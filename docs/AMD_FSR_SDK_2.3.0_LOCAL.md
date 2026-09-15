@@ -36,7 +36,7 @@
 
 ## 3. 待办与边界
 
-1. **构建 SDK 2.3.0**（CMake/MSVC，`BuildFidelityFXSDKSolutionDX12.bat` 或等价 CMake 预设），产出 provider/backend 静态库；只用其 DLL 与头文件、不修改任何 AMD 二进制。
+1. **构建路径勘察结论**：SDK 2.3.0 根目录没有 CMakeLists，官方构建方式是**每个效果一个 Visual Studio 解决方案**（`Samples/FidelityFX_<effect>/dx12/FidelityFX_<effect>_2022.sln`），依赖 vcpkg 与 Cauldron 框架——这是一套重量级样例构建，不适合直接搬进 Veyra。**但签名预编译 DLL 已随 SDK 提供**（见 §1 表格），所以下一步不是"重建 SDK"，而是：读 `Kits/FidelityFX/api` 与 `Kits/FidelityFX/framegeneration/fsr3` 的 provider/host 源码，评估把少量 provider 胶水源码直接编进 Veyra（或经 `amd_fidelityfx_loader_dx12.dll` 加载）的可行性，再按 `CMakeLists.txt` 里 1.1.4 静态库那种方式接入。只用其 DLL 与头文件、不修改任何 AMD 二进制。
 2. **能力查询优先**：先在真实显卡上查询 FSR Frame Generation / Upscaling 4.x 是否可用（AMD 的支持列表按 GPU/驱动区分；NVIDIA 上大概率不可用），据此决定界面分档：AMD 卡开放 4.1/4.0.x，N 卡只给 FSR 2 / 3.1。
 3. **发布范围**：把 `amd_fidelityfx_*_dx12.dll` 放进 Release 属于范围变更，需要用户单独授权，并在 `release-runtime-manifest.json` 与 `THIRD_PARTY_NOTICES.md` 中逐项登记（名称、版本、大小、SHA-256、来源、许可）。
 4. **不改二进制**：所有 AMD DLL 原样使用，不做补丁、不重签名。
