@@ -114,7 +114,15 @@ $env:VEYRA_TEST_FG_FORCE_MULTIPLIER='1'
 
 ## 三、明早验收清单（建议顺序）
 
-1. `git log --oneline -4` 确认三个提交都在 `codex/framegen-fsr-dolby-20260916`，`main` 未动。
+0. `git log --oneline -12` 确认全部提交都在 `codex/framegen-fsr-dolby-20260916`，`main` 仍是 `693db07`、未推送、未发布。
+   最终构建 `cmd.exe /c out\build\veyra-build-x64-release.cmd` exit 0；最终
+   `veyra.exe` SHA256 `36024024B5DE530FB15CE4E07839EB0EC8B2477476599B4A9A5C86FCE41F59A9`；
+   delivery 短测 PASS（`logs/delivery/7180a557fe934a27a225f6367a1b06e9/result.json`）；
+   `veyra_repair_contract_tests` 157 项 0 失败；`veyra_repair_preset_tests` 60 组迁移全通过。
+1. **AMD FSR 补帧**：`out\build\audio-continuity-repair-20260915\veyra.exe --fg-fsr --smoke-seconds 10 <视频>`，
+   期望日志出现 `[fsr-fg] provider=3.1.6` 与 `using the retained AMD proxy swapchain`，结尾
+   `generated ≈ frames`（2X）且 exit 0；顺手看设置里「补帧方式」是否出现 `AMD FSR 帧生成 · 2X`。
+   最近一次实跑：284 真实 / 280 生成（`logs/fsr/smoke-fsr-final2.log`）。
 2. DLSS 6X：`out\build\audio-continuity-repair-20260915\veyra.exe --fg-multiplier 6 --smoke-seconds 10 loop\local\fixed_clips\test_av_1080p.mp4`，看日志 `maxMultiplier=6` 与 `generated ≈ 5×frames`；UI 里补帧下拉应出现 `6X · 五张中间帧`。
 3. XeSS 4X：`--fg-xess --fg-multiplier 4 --smoke-seconds 10 <视频>`，看 `unlock applied`、`framesPresented=4`、退出时 `rolled back 5/5`；**注意**：节奏 hook 未移植，观感是否均匀需要你人工判断。
 4. 40 系实验：把 EXE 复制到 4060 机器，按上面 §一.4 的命令跑，把日志发我。
