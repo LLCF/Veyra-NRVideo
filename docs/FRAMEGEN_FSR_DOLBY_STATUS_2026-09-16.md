@@ -4,8 +4,8 @@
 
 - 存档点（main）：`693db07`，tag `checkpoint/pre-framegen-fsr-dolby-2026-09-16`
 - 施工分支：`codex/framegen-fsr-dolby-20260916`
-- 分支提交：`35dd632`（DLSS 6X）→ `4124a9d`（XeSS MFG 解锁）→ `e68b79d`（杜比探测 + 40 系实验开关）→ `5b1f21a`（状态文档）→ `50e4c9c`（ThunkHook detour 基础设施，A-2 前置）
-- delivery 短测在该分支上共跑过两次：`89286afb…`（23/23，48.9 秒）与 `c6b3294d…`（23/23），均在 `logs/delivery/` 下
+- 分支提交：`35dd632`（DLSS 6X）→ `4124a9d`（XeSS MFG 解锁）→ `e68b79d`（杜比探测 + 40 系实验开关）→ `5b1f21a`/`cc5b0bb`（状态文档）→ `50e4c9c`（ThunkHook detour 基础设施，A-2 前置）→ `e7e558a`/`70be83b`（AMD FSR SDK 2.3.0 落地与构建路径勘察）→ `ef0fb50`（FSR 探针实测）
+- delivery 短测在该分支上共跑过三次：`89286afb…`（23/23，48.9 秒）、`c6b3294d…`（23/23）、`9951994f…`（23/23，44.2 秒），均在 `logs/delivery/` 下
 - 计划：`docs/FRAMEGEN_FSR_DOLBY_PLAN_2026-09-16.md`
 
 ## 一、已完成并实测（可直接验收）
@@ -41,6 +41,17 @@ $env:VEYRA_TEST_FG_FORCE_MULTIPLIER='1'
 # 看日志：requested MFG multiplier unsupported / test-only FG multiplier forced above capability
 # 以及 [app] smoke frames=... generated=... 与画面是否真的更顺（重复帧=数字翻倍但运动不增加）
 ```
+
+### 5. AMD FSR 探针（E/F 前置证据，提交 `ef0fb50`）
+
+`tools/fsr_probe`（CMake 目标 `veyra_fsr_probe`）加载 AMD FSR SDK 2.3.0 的签名 loader DLL，在真实 D3D12 设备上枚举 provider 并创建帧生成代理交换链。本机 NVIDIA RTX 5070 实测结果：
+
+- `framegen-swapchain` 3.1.7、`framegen` 3.1.6 被枚举到（带真实 device 的 version 变体同样）；
+- **`CreateContext(framegen swapchain for hwnd) = OK`**（返回非空 context 与代理交换链），`DestroyContext = OK`；
+- 4.0.1(ML) 在这些 desc 类型下**未被枚举**——与"4.x 面向 AMD 支持列表"的分档假设一致，需要在 AMD 卡上复测；
+- 实现约束：loader 只在 **DLL 所在目录可被搜索**时才发现 provider（工作目录切到 `signedbin` 才成功；仅 `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR` 会得到 `NO_PROVIDER`/`ERROR_UNKNOWN_DESCTYPE`）。播放器集成必须显式把 AMD DLL 目录加入加载搜索路径。
+
+含义：**FSR 帧生成 3.1.x 后端在 NVIDIA 上可做，API 路径已用本机证据验证**；4.0.x ML 等 AMD 卡验证。详细身份与调用序列见 [AMD FSR SDK 2.3.0 本地落地记录](AMD_FSR_SDK_2.3.0_LOCAL.md)。
 
 ## 二、未完成（明早需要决策或继续施工）
 
