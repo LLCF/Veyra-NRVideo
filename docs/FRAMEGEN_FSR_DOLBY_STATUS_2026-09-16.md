@@ -4,7 +4,8 @@
 
 - 存档点（main）：`693db07`，tag `checkpoint/pre-framegen-fsr-dolby-2026-09-16`
 - 施工分支：`codex/framegen-fsr-dolby-20260916`
-- 分支提交：`35dd632`（DLSS 6X）→ `4124a9d`（XeSS MFG 解锁）→ `e68b79d`（杜比探测 + 40 系实验开关）
+- 分支提交：`35dd632`（DLSS 6X）→ `4124a9d`（XeSS MFG 解锁）→ `e68b79d`（杜比探测 + 40 系实验开关）→ `5b1f21a`（状态文档）→ `50e4c9c`（ThunkHook detour 基础设施，A-2 前置）
+- delivery 短测在该分支上共跑过两次：`89286afb…`（23/23，48.9 秒）与 `c6b3294d…`（23/23），均在 `logs/delivery/` 下
 - 计划：`docs/FRAMEGEN_FSR_DOLBY_PLAN_2026-09-16.md`
 
 ## 一、已完成并实测（可直接验收）
