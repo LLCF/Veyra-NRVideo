@@ -2306,6 +2306,55 @@ HDR修改ColorMetadata/FramePacket/MediaFileSource静态元数据继承，HdrTon
 最终候选SHA256 `02BBC51FF46A8DEBCCA9961BEC48500E2AA77FE62B238174172D4E238ACA6401`，入口沿用 `out/start-user-issues-candidate.cmd`。详细文件/命令/SDK结果及边界见FG_OUTPUT_RATE_AUDIT。回调至Present返回P95前后44.606/50.328ms，不能从丢帧改善推论屏幕延迟降低；真实屏幕与帧间均匀性尚未测量，下一步交用户同一组合游玩验收。HDR改动一同保留为本地可回退记录，运行库/SDK/媒体未入Git。
 ## 2026-09-15 1.3.0发布后文档对齐
 
+## 2026-09-16 AMD FSR 帧生成接入（隔离分支 codex/framegen-fsr-dolby-20260916）
+
+按 `docs/FRAMEGEN_FSR_DOLBY_PLAN_2026-09-16.md` 的 E 工作流施工，**只在隔离分支**，
+未合并 main、未推送、未发布。详细设计、API 顺序、约束与命令清单见
+`docs/FSR_FRAMEGEN_INTEGRATION_2026-09-16.md`。
+
+新增 `FsrFgPresenter`（FidelityFX loader + 帧生成/代理交换链上下文 + 每帧 prepare/configure/
+插帧 dispatch + 提供方 present 回调计数与合成）、`PresentSink`/`VideoPresenter`/`EnhanceGraph`/
+`EngineController`/UI/预设 schema v13 接入，`--fg-fsr` 开关，`tools/fsr_probe` 扩成完整流水线探针
+（计数回调、upscale 几何、pipelined 模式、销毁后重建检查）。
+
+关键实测（本机 RTX 5070 / 616.56，全部为玩家真实运行）：
+
+- 探针：90 帧 → 89 生成帧、0 失败（`logs/fsr/probe-recreate.log`）；请求 2/3 张生成帧时提供方
+  仍只给 1 张/真实帧 → **3.1.x 上限就是 2X**，故引擎与预设把 FSR 倍率门限设为 2X；
+- 玩家 1080p：226 真实 / 222 生成，exit 0（`logs/fsr/smoke-fsr-final.log`）；
+- 玩家 4K 渲染：render 3840×2160 → display 1280×712，559 真实 / 555 生成，exit 0
+  （`logs/fsr/smoke-fsr-4k.log`）；
+- 设置事务重建（开超分）后继续补帧，exit 0（`logs/fsr/smoke-fsr-rebuild2.log`）；
+- 回归：DLSS 6X 875/177、XeSS 4X 639/217 均 exit 0（`logs/fsr/regress-dlss6x.log`、`regress-xess4x.log`）；
+- `scripts/gates/delivery.ps1` PASS（`logs/delivery/4f387d93def9440f8fa9f7efe92d6bd3/result.json`）；
+  `veyra_repair_contract_tests` 157 项 0 失败；`veyra_repair_preset_tests` 全通过
+  （其中两条旧断言因 XeSS 4X 放宽而失效，已按现合同修正，不是掩盖失败）。
+
+过程中修掉的两个真实缺陷：插帧命令列表必须在 `Configure(frameGenerationEnabled=true)` 之后查询，
+否则拿到空列表导致 `ffxDispatch` 返回 `ERROR_RUNTIME_ERROR`；`EnhanceGraph::applySettings` 的
+DLSSG 能力门控没有排除 FSR，导致 FSR 会话下任何就地设置变更被回滚。
+
+**未验证/未完成**：AMD 显卡实机、HDR10 输出、采集卡实时输入下的 FSR 帧生成；FSR 4.0.1 ML 提供方
+在本机 NVIDIA 上未被枚举。以上均不得当作已完成能力对外描述。
+
+## 2026-09-16 40 系 DLSS MFG 解锁调研（未实施）
+
+定位到上游 `ImDreamt/MFGAdaUnlock-RenoDx`（MIT，ReShade addon，README 明确写"仅内存修改"），
+已克隆到 `third_party_local/community/MFGAdaUnlock-RenoDx`（gitignore）。其解锁由四件事组成：
+
+1. `DLSSGInstanceManager::PopulateParameters` 中 NVAPI 架构 id 与 `0x1b0`(Blackwell) 的比较（两种编码）；
+2. 同一常量的第二处比较，驱动"是否真的生成"的能力标志（只改 1 不改 2 会出黑帧）；
+3. **PTX 中点修正**：把插值核心里编译期常量 `0.5`（104 处 `mul.ftz.f32 ..., 0f3F000000`）改成
+   核函数自身的 temporal 参数，并把 fatbin 在 sm_89 PTX 项之后截断、以非压缩方式重发，
+   逼驱动走 JIT（否则驱动用 sm_89 cubin，改写无效）；
+4. 关闭 Blackwell 的硬件 flip metering（该 patch 针对 Streamline 插件，Veyra 直接走 NGX，不适用）。
+
+本轮**没有实施**，原因不是"做不了"，而是不能在本机证明：本机只有 5070（Blackwell），PTX 改写在
+Blackwell 上会改变一条已经正常工作的路径，无法区分"补丁生效"与"破坏原生 MFG"。上游也明确
+指出单改门控会出现黑帧/重复帧。下一步做法（写入计划文档）：把 1+2+3 逐项做成带模块身份、
+模式校验、回滚的进程内补丁，只在 Ada 上启用，并用真实 40 系机器验收；在那之前
+`VEYRA_TEST_FG_FORCE_MULTIPLIER=1` 只能用来观察未打补丁时的失败现象。
+
 用户要求更新长期未维护的文档。审计发现 README/README_EN 已指向1.3.0，但 `docs/BUILD.md` 仍有1.2.0构建、打包和PS5标题，`docs/LOCAL_INTEGRATION_STATUS_2026-09-15.md` 仍把1.2.0写成当前未发布版本。
 
 已更新：构建依赖与便携打包命令改为1.3.0，补充dav1d/RemotePlay对应说明；本地整合状态新增当前1.3.0发布、main/tag和远端资产核验，并把dc44c48候选、未发布结论和待办明确标为历史快照。没有改动运行时代码、SDK、DLL、版本标签或发布资产。

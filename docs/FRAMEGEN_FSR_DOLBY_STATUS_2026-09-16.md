@@ -42,7 +42,28 @@ $env:VEYRA_TEST_FG_FORCE_MULTIPLIER='1'
 # 以及 [app] smoke frames=... generated=... 与画面是否真的更顺（重复帧=数字翻倍但运动不增加）
 ```
 
-### 5. AMD FSR 探针（E/F 前置证据，提交 `ef0fb50`）
+### 5. AMD FSR 帧生成接入（E 工作流，**已完成并实测**）
+
+完整设计、API 顺序、失败模式与命令清单见 [AMD FSR 帧生成接入记录](FSR_FRAMEGEN_INTEGRATION_2026-09-16.md)。
+
+- 新增 `FsrFgPresenter`：FidelityFX loader + 代理交换链上下文 + 帧生成上下文 +
+  每帧 prepare/configure/插帧 dispatch + 提供方 present 回调（合成与真实/生成帧计数）。
+- `PresentSink`/`VideoPresenter`/`EnhanceGraph`/`EngineController`/设置 UI/预设 schema v13 全部接入，
+  命令行开关 `--fg-fsr`；导出与 XeSS 一样明确拒绝（交换链插帧无编码器输出合同）。
+- **实测（RTX 5070 / 提供方 3.1.6+3.1.7）**：
+  - 1080p：226 真实帧 / **222 生成帧**，exit 0（`logs/fsr/smoke-fsr-final.log`）；
+  - 4K 渲染（render 3840×2160 → display 1280×712）：559 真实 / **555 生成**，exit 0（`logs/fsr/smoke-fsr-4k.log`）；
+  - 设置事务重建后继续补帧：`using the retained AMD proxy swapchain`，exit 0（`logs/fsr/smoke-fsr-rebuild2.log`）；
+  - 回归：DLSS 6X 875 生成/177 真实、XeSS 4X 639 生成/217 真实，均 exit 0；
+  - `scripts/gates/delivery.ps1` PASS（`logs/delivery/4f387d93def9440f8fa9f7efe92d6bd3/result.json`）。
+- **上限实测为 2X**：请求 2 或 3 张生成帧时，present 回调仍只收到每真实帧 1 张
+  （`logs/fsr/probe-3x-20260916.log`、`probe-4x-20260916.log`）。引擎与预设据此把 FSR 倍率门限设为 2X，
+  超过即拒绝而不是"标 4X 实际 2X"。
+- **已知约束（已实测）**：提供方在 `ffxDestroyContext` 后不释放真实 DXGI 交换链，同一 HWND 无法再建交换链，
+  因此代理交换链在窗口生命周期内保留（详情见接入记录第 4 节）。
+- **未验证**：AMD 显卡实机、HDR10 输出、采集卡实时输入下的 FSR 帧生成；FSR 4.0.1 ML 提供方在本机未被枚举。
+
+### 6. AMD FSR 探针（E/F 前置证据，提交 `ef0fb50`）
 
 `tools/fsr_probe`（CMake 目标 `veyra_fsr_probe`）加载 AMD FSR SDK 2.3.0 的签名 loader DLL，在真实 D3D12 设备上枚举 provider 并创建帧生成代理交换链。本机 NVIDIA RTX 5070 实测结果：
 
@@ -58,9 +79,9 @@ $env:VEYRA_TEST_FG_FORCE_MULTIPLIER='1'
 | 项 | 状态 | 说明 / 下一步 |
 | --- | --- | --- |
 | XeSS 节奏 hook（A-2） | **未移植** | 上游 `XeFGPacing.h` 需要重定向运行库内部 Present/Scheduler/Deadline 三处入口；我们目前没有 detour 基础设施，且 >2X 的生成帧间距是否成串**未测量**。这是 XeSS 4X 画质/节奏的关键未验证项，不能当作已完成 |
-| 40 系 DLSS MFG 解锁（C-2） | **未实现** | 需要移植 `MFGAdaUnlock-RenoDx`（MIT）的两处架构比较补丁 + **内核 PTX 中点修正** + 强制软件 flip metering；PTX 修正是难点。在完成前不会把 Ada 的 3X/4X 伪装成可用 |
+| 40 系 DLSS MFG 解锁（C-2） | **未实现（本轮改为调研完成）** | 上游已定位并克隆：`ImDreamt/MFGAdaUnlock-RenoDx`（MIT，`third_party_local/community/`，gitignore）。机制=两处架构比较（0x1b0）+ **PTX 中点修正**（104 处 0.5 + fatbin 截断逼 JIT）+ 关闭硬件 flip metering（Streamline 专属，Veyra 走 NGX 不适用）。**没有实施的理由**：本机只有 5070，PTX 改写会改动一条已经正常的路径，无法区分"补丁生效"与"破坏原生 MFG"；上游也明确单改门控=黑帧。下一步按带身份校验/模式校验/回滚的进程内补丁实现，并需真实 40 系验收 |
 | 30 系原生 2X（D） | **未开始** | 需要 `dlssg_for_sm86` 代理方案与另一份 DLSSG 运行库身份，属发布范围变更 |
-| FSR 帧生成（E） | **未开始** | 需先落 AMD FSR SDK 2.3.0（`AMD FSR Frame Generation 4.0.1` ML）并登记身份；本地 1.1.4 的 3.1.x 仅作回退 |
+| FSR 帧生成（E） | **已完成并实测（2X）** | 见上文 §一.5 与 [接入记录](FSR_FRAMEGEN_INTEGRATION_2026-09-16.md)；4.0.1 ML 需 AMD 卡复测 |
 | FSR 超分（F） | **未开始** | AMD 卡 4.1 / N 卡 2、3.1 的分档 UI 与后端接入 |
 | 杜比直通 / 解码（G-2） | **未开始** | 依赖支持位流的采集设备；当前设备已证实不提供 |
 

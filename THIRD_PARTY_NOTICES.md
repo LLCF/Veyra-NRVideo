@@ -125,6 +125,41 @@ Remote Play also depends on **OpenSSL, Opus, json-c, libevent, miniupnpc, curl, 
 
 </details>
 
+## AMD FidelityFX SDK 2.3.0 (experimental FSR frame generation)
+
+The player's AMD FSR frame-generation backend is written against the public
+FidelityFX API documented and shipped in the AMD FidelityFX SDK 2.3.0 (MIT
+licensed). The SDK itself is **not** vendored into this source repository: it
+stays in the gitignored `third_party_local/amd/FidelityFX-SDK-2.3.0` tree, and
+the signed provider/loader DLLs are used from the local
+`runtime_local/amd/framegeneration/` folder like the other experimental
+runtimes. Integration code (`src/gfx/FsrFgPresenter.cpp`) is an independent
+implementation of the documented API sequence and was written against these
+references:
+
+- `Kits/FidelityFX/docs/techniques/frame-interpolation-swap-chain.md`
+- `Kits/FidelityFX/docs/techniques/frame-interpolation-api.md`
+- `Samples/Upscalers/FidelityFX_FSR/dx12/fsrapirendermodule.cpp`
+
+Relevant negative finding, recorded so it is not re-litigated: a FidelityFX
+frame-generation swapchain context keeps the real DXGI swapchain alive after
+`ffxDestroyContext` (measured locally), so the player retains the proxy
+swapchain for the window's lifetime. See
+[AMD FSR frame generation integration record](docs/FSR_FRAMEGEN_INTEGRATION_2026-09-16.md).
+
+## MFGAdaUnlock-RenoDx (research only, not integrated)
+
+[ImDreamt/MFGAdaUnlock-RenoDx](https://github.com/ImDreamt/MFGAdaUnlock-RenoDx)
+(MIT) was cloned into the gitignored `third_party_local/community/` tree and
+read as the reference for unlocking DLSS multi-frame generation on RTX 40
+series. **No code from it is integrated, and Veyra does not load ReShade
+add-ons.** The mechanism analysis (two architecture compares against 0x1b0, the
+kernel PTX midpoint correction, fatbin truncation to force JIT, and the
+hardware flip-metering requirement) is summarised in
+[the 40-series research note](docs/WORKLOG.md). Any future port must be an
+independent in-memory implementation with module identity checks, pattern
+verification and rollback.
+
 ## dav1d (1.3.0 AV1 playback)
 
 FFmpeg dynamically links dav1d 1.5.4 from the pinned local vcpkg build. The portable package includes its complete aggregated copyright/license text in `licenses/DAV1D-COPYRIGHT.txt` and provenance in `licenses/DAV1D-SPDX.json`. The FFmpeg corresponding-source ZIP includes dav1d source and its vcpkg port. Upstream: https://code.videolan.org/videolan/dav1d . License set recorded by the build: Apache-2.0, BSD-2-Clause, ISC and MIT; retain all notices supplied with the source.

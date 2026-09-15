@@ -83,7 +83,7 @@ inline LRESULT CALLBACK proc(HWND h,UINT message,WPARAM wp,LPARAM lp){
             rows.emplace_back(L"实际解码方式",!r.decodeConfirmed?L"等待首帧":r.hardwareDecode?L"D3D12VA 硬解":r.decodeFallback?L"软件解码 · 硬解已回退":L"CPU 软件解码");
             rows.emplace_back(L"接收 / 解码",std::format(L"{:.1f} / {:.1f} fps",r.receivedFps,r.decodedFps));
             rows.emplace_back(L"增强完成",fps(f.sourceCompletedFps));
-            rows.emplace_back(L"原帧 / 生成帧呈现",xess?L"XeSS SDK 内部合计":std::format(L"{:.1f} / {:.1f} fps",f.realPresentFps,f.generatedPresentFps));
+        rows.emplace_back(L"原帧 / 生成帧呈现",xess?L"显示补帧 SDK 内部合计":std::format(L"{:.1f} / {:.1f} fps",f.realPresentFps,f.generatedPresentFps));
             rows.emplace_back(L"视频有效码率",std::format(L"{:.2f} Mbps",r.videoMbps));
             rows.emplace_back(L"接收后等待解码",ms(r.ingressWaitMeanMs));
             rows.emplace_back(L"距上次视频接收",age(r.lastVideo100ns));
@@ -123,7 +123,9 @@ inline LRESULT CALLBACK proc(HWND h,UINT message,WPARAM wp,LPARAM lp){
             const wchar_t* resetNames[]={L"排空",L"销毁资源",L"创建资源",L"首帧预热提交",L"首帧完成观测"};
             for(size_t i=0;i<r.stageMs.size();++i)rows.emplace_back(resetNames[i],ms(r.stageMs[i]));
         }
-        rows.emplace_back(L"补帧方式",s.applied.multiplier<=1?L"关闭":std::format(L"{} {}X",xess?L"XeSS":L"DLSS",s.applied.multiplier));
+        const wchar_t* fgName=s.applied.frameGenerationBackend==engine::FrameGenerationBackend::XeSS?L"XeSS"
+            :s.applied.frameGenerationBackend==engine::FrameGenerationBackend::Fsr?L"AMD FSR":L"DLSS";
+        rows.emplace_back(L"补帧方式",s.applied.multiplier<=1?L"关闭":std::format(L"{} {}X",fgName,s.applied.multiplier));
         rows.emplace_back(L"NR内部尺寸",s.applied.nr?std::format(L"{} x {}",s.metrics.resolution.nr.width,s.metrics.resolution.nr.height):L"关闭");
         rows.emplace_back(L"NR运行版本",s.nrActive?(s.applied.nrRuntime==engine::NrRuntime::Ampere?L"RTX 30兼容 · 实验":s.applied.nrRuntime==engine::NrRuntime::Community?L"社区兼容 · 实验":L"NVIDIA原版"):L"未运行");
         rows.emplace_back(L"显示模式",s.running?(s.applied.captureCompatible?L"直播兼容 · 实验":L"标准显示"):L"未运行");
