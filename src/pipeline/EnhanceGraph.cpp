@@ -94,7 +94,8 @@ bool EnhanceGraph::initialize(const EnhanceGraphDesc& desc)
     if(desc.hdrOutput&&!desc.hdrInput){veyra::log::error("hdr","HDR output requires an explicit HDR input contract");return false;}
     srEnabled_ = desc.enableSr && (srcW_ != workW_ || srcH_ != workH_);
     nrEnabled_ = desc.enableNr && !desc.noFeatures && !desc.noNgx;
-    fgEnabled_ = desc.enableFg && !desc.noNgx && !desc.stillImage && desc.frameGenerationBackend!=engine::FrameGenerationBackend::XeSS;
+    fgEnabled_ = desc.enableFg && !desc.noNgx && !desc.stillImage && desc.frameGenerationBackend!=engine::FrameGenerationBackend::XeSS
+        && desc.frameGenerationBackend!=engine::FrameGenerationBackend::Fsr;
     nvofStandalone_ = desc.enableNvofStandalone && !desc.noFeatures;
     if(desc.opticalFlowBackend==engine::OpticalFlowBackend::AmdFidelityFx&&desc.amdFlowHalfResolution){nvofW_=std::max(1u,nvofW_/2);nvofH_=std::max(1u,nvofH_/2);}
     uint64_t budget=0,usage=0;
@@ -181,7 +182,7 @@ bool EnhanceGraph::createResources()
     residualRgba_=makeTexture(context_.device(),desc_.nrBeforeSr?srcW_:workW_,desc_.nrBeforeSr?srcH_:workH_,DXGI_FORMAT_R16G16B16A16_FLOAT,true);
     nrFlow_=makeTexture(context_.device(),nrW_,nrH_,DXGI_FORMAT_R16G16_FLOAT,true);
     baseFlow_=makeTexture(context_.device(),workW_,workH_,DXGI_FORMAT_R16G16_FLOAT,true);
-    if(xessEnabled())for(auto& motion:presentMotion_){motion=makeTexture(context_.device(),workW_,workH_,DXGI_FORMAT_R16G16_FLOAT,false);if(!motion)return false;}
+    if(presentSinkFg())for(auto& motion:presentMotion_){motion=makeTexture(context_.device(),workW_,workH_,DXGI_FORMAT_R16G16_FLOAT,false);if(!motion)return false;}
     if(!nrInput_||!residualRgba_||!nrFlow_||!baseFlow_)return false;
     proxyTex_ = makeTexture(context_.device(), nrW_, nrH_, DXGI_FORMAT_R8G8B8A8_UNORM, true);
     neuralTex_ = makeTexture(context_.device(), nrW_, nrH_, DXGI_FORMAT_R8G8B8A8_UNORM, true);
@@ -300,7 +301,7 @@ bool EnhanceGraph::initZeroAndDepthTextures()
 bool EnhanceGraph::initNvof()
 {
     if(desc_.stillImage){mvecSource_="single-image (no temporal motion)";return true;}
-    if (desc_.noFeatures || !(nvofStandalone_ || xessEnabled() || (fgEnabled_&&desc_.frameGenerationBackend==engine::FrameGenerationBackend::Dlss) || (srEnabled_&&!desc_.videoSrQuality))) {
+    if (desc_.noFeatures || !(nvofStandalone_ || presentSinkFg() || (fgEnabled_&&desc_.frameGenerationBackend==engine::FrameGenerationBackend::Dlss) || (srEnabled_&&!desc_.videoSrQuality))) {
         veyra::log::info("graph", "VEYRA_NO_FEATURES: NVOF session skipped");
         return true;
     }
@@ -969,7 +970,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
 
     // Guidance from original source-space color before SR/NR. Queue waits are GPU-side.
     bool haveFlow = false;
-    const bool runMotion = nvofStandalone_ || xessEnabled() || fgEnabled_ || (srEnabled_ && !desc_.videoSrQuality);
+    const bool runMotion = nvofStandalone_ || presentSinkFg() || fgEnabled_ || (srEnabled_ && !desc_.videoSrQuality);
     if (runMotion && (gpuDis_ || amdOf_ || (nvof_ && nvof_->initialized()))) {
         const float dims[8] = {uintBits(nvofW_),uintBits(nvofH_),uintBits(nvofW_),uintBits(nvofH_),0,0,0,0};
         if (prevValid_) {
@@ -1230,7 +1231,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
         tracker_.transition(list, videoFrame_[parity].Get(), D3D12_RESOURCE_STATE_COMMON);
 
     }
-    if(xessEnabled()){
+    if(presentSinkFg()){
         auto* input=haveFlow?baseFlow_.Get():nrZeroMotion_.Get();
         tracker_.transition(list,input,D3D12_RESOURCE_STATE_COPY_SOURCE);
         tracker_.transition(list,presentMotion_[parity].Get(),D3D12_RESOURCE_STATE_COPY_DEST);
@@ -1360,10 +1361,10 @@ bool EnhanceGraph::applySettings(const engine::EnhancementSettings& s){
     // DLSS allocates multiplier-specific feature/output resources.
     // XeSS has a fixed 2X proxy swapchain contract. Settings callers must
     // rebuild instead of accepting a change that cannot take effect in place.
-    if(s.nrRuntime!=desc_.nrRuntime||std::max(2u,s.multiplier)!=desc_.fgMultiplier||s.frameGenerationBackend!=desc_.frameGenerationBackend||s.videoSrQuality!=desc_.videoSrQuality||!s.validate().empty()||(s.multiplier>1&&s.frameGenerationBackend!=engine::FrameGenerationBackend::XeSS&&(!fgCapsAvailable_||s.multiplier-1>uint32_t(fgMultiFrameMax_))))return false;
+    if(s.nrRuntime!=desc_.nrRuntime||std::max(2u,s.multiplier)!=desc_.fgMultiplier||s.frameGenerationBackend!=desc_.frameGenerationBackend||s.videoSrQuality!=desc_.videoSrQuality||!s.validate().empty()||(s.multiplier>1&&!engine::presentSinkFrameGeneration(s.frameGenerationBackend)&&(!fgCapsAvailable_||s.multiplier-1>uint32_t(fgMultiFrameMax_))))return false;
     desc_.contentRate=s.content;desc_.model=s.model;desc_.residual=s.residual;desc_.protection=s.protection;desc_.settingsRevision=s.revision;
     desc_.fgMultiplier=std::max(2u,s.multiplier);desc_.enableNvofStandalone=s.nr&&!desc_.stillImage;nvofStandalone_=desc_.enableNvofStandalone;
-    setNrEnabled(s.nr);setFgEnabled(s.multiplier>1&&s.frameGenerationBackend!=engine::FrameGenerationBackend::XeSS);
+    setNrEnabled(s.nr);setFgEnabled(s.multiplier>1&&!engine::presentSinkFrameGeneration(s.frameGenerationBackend));
     veyra::log::info("settings",std::format("requested revision={} intensity={} tone={} structure={} skin={} style={} autoMask={} UI={} residual={}/{}/{}/{}/{} multiplier={}",s.revision,s.model.intensity,s.model.tone,s.model.structure,s.model.skin,s.model.style,s.model.autoMask,s.model.uiCorrection,s.residual.total,s.residual.darken,s.residual.brighten,s.residual.color,s.residual.luminance,s.multiplier));
     return true;
 }

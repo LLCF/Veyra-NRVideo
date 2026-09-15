@@ -182,7 +182,17 @@ int main(){
     check(!lineage.observe(skipped,2100000,true,false),"missing A identity is unknown rather than extrapolated");
     check(!lineage.observe(skipped,2400000,true,true),"cached preview cannot seed latency lineage");
     check(!pairFlow.snapshot(13000000).pairTiming[size_t(diagnostics::PairTiming::GeneratedFromA)].mean,"generated latency expires when no new frames are presented");
-    check(engine::frameGenerationBackendName(engine::FrameGenerationBackend::Dlss)=="DLSS"&&engine::frameGenerationBackendName(engine::FrameGenerationBackend::XeSS)=="XeSS","frame-generation backend names identify every backend");
+    check(engine::frameGenerationBackendName(engine::FrameGenerationBackend::Dlss)=="DLSS"&&engine::frameGenerationBackendName(engine::FrameGenerationBackend::XeSS)=="XeSS"&&engine::frameGenerationBackendName(engine::FrameGenerationBackend::Fsr)=="AMD-FSR","frame-generation backend names identify every backend");
+    // The present-sink backends own generation inside their swapchain provider;
+    // the in-graph DLSSG path must never try to run for them.
+    check(engine::presentSinkFrameGeneration(engine::FrameGenerationBackend::XeSS)&&engine::presentSinkFrameGeneration(engine::FrameGenerationBackend::Fsr)&&!engine::presentSinkFrameGeneration(engine::FrameGenerationBackend::Dlss),"present-sink frame generation covers XeSS and AMD FSR only");
+    {
+        engine::EnhancementSettings settings;
+        settings.multiplier=4;settings.frameGenerationBackend=engine::FrameGenerationBackend::Fsr;
+        check(!settings.validate().empty()&&std::string(settings.validate()).find("2X")!=std::string::npos,"AMD FSR requests above 2X are rejected by validation");
+        settings.multiplier=2;
+        check(settings.validate().empty(),"AMD FSR 2X is a valid request");
+    }
     check(engine::opticalFlowBackendName(engine::OpticalFlowBackend::Nvidia)=="NVIDIA_NVOF"&&engine::opticalFlowBackendName(engine::OpticalFlowBackend::AmdFidelityFx)=="AMD_FIDELITYFX_OF","optical-flow backend names identify every backend");
     s.model.intensity=std::numeric_limits<float>::quiet_NaN();check(!s.validate().empty(),"reject NaN transaction");
     s={};s.multiplier=5;check(s.validate().empty(),"5X multiplier accepted by the API guard (6X ceiling)");

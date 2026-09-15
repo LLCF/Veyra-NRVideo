@@ -24,7 +24,7 @@ inline LRESULT CALLBACK proc(HWND h,UINT message,WPARAM wp,LPARAM lp){
         paintDashboard(h,paint.dc,width,height,s,state->history,state->advanced);
         if(!state->advanced)return 0;
         const bool playing=s.running&&!s.image&&s.transport==engine::TransportState::Playing;
-        const bool xess=s.applied.frameGenerationBackend==engine::FrameGenerationBackend::XeSS&&s.applied.multiplier>1;
+        const bool xess=s.applied.multiplier>1&&engine::presentSinkFrameGeneration(s.applied.frameGenerationBackend);
         auto write=[&](const std::wstring& value,int x,int y,int w,int ht,int size,COLORREF color){chromeText(paint.dc,h,value,x,y,w,ht,size,color);};
         auto ms=[](std::optional<double> v){return v?std::format(L"{:.1f} ms",*v):std::wstring(L"未测");};
         auto timing=[&](const diagnostics::TimingAggregate& a){return playing&&a.mean&&a.p95?(state->advanced?std::format(L"{:.1f} / {:.1f}",*a.mean,*a.p95):ms(a.mean)):std::wstring(L"未测");};
@@ -37,7 +37,7 @@ inline LRESULT CALLBACK proc(HWND h,UINT message,WPARAM wp,LPARAM lp){
         rows.emplace_back(L"测量范围",L"非屏幕实测 · 非增强处理耗时");
         rows.emplace_back(L"增强处理 · 平均 / P95",timing(f.enhancementProcessing));
         rows.emplace_back(L"处理统计口径",L"同帧光流+NR+SR+残差+FG区间去重");
-        rows.emplace_back(L"处理范围",xess?L"不含XeSS内部FG":L"不含输入颜色、输出、声音和呈现等待");
+        rows.emplace_back(L"处理范围",xess?L"不含显示补帧(XeSS/AMD FSR)":L"不含输入颜色、输出、声音和呈现等待");
         rows.emplace_back(L"平均范围",L"总计按源帧；单项按执行次数");
         rows.emplace_back(L"光流范围",L"含光流GPU依赖等待");
         rows.emplace_back(xess?L"SDK提交（非屏幕实测）":L"显示提交（非屏幕实测）",fps(xess?f.xessSdkSubmitFps:f.presentSubmitFps));

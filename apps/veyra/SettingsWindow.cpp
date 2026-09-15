@@ -73,6 +73,12 @@ int multiplierChoiceCount(engine::FrameGenerationBackend backend){
         cap=providerAudited?4:2;
         if(controller){const auto snapshot=controller->snapshot();if(snapshot.xessMaxInterpolatedFrames>1)cap=std::clamp(snapshot.xessMaxInterpolatedFrames+1,2,4);}
     }
+    else if(backend==engine::FrameGenerationBackend::Fsr){
+        // AMD 3.1.x frame generation delivers one generated frame per present;
+        // tools/fsr_probe measured the same count for 2/3/4 requested frames.
+        cap=2;
+        if(controller){const auto snapshot=controller->snapshot();if(snapshot.fsrMaxGeneratedFrames>0)cap=std::clamp(int(snapshot.fsrMaxGeneratedFrames)+1,2,2);}
+    }
     else if(controller){const auto snapshot=controller->snapshot();if(snapshot.fgMultiFrameMax>0)cap=std::clamp(snapshot.fgMultiFrameMax+1,2,6);}
     int count=1;
     for(size_t i=1;i<engine::kFgMultiplierChoiceCount;++i)if(int(engine::kFgMultiplierChoices[i])<=cap)++count;
@@ -144,7 +150,7 @@ bool liveField(int id){
         case 203:s.nrPolicy=static_cast<pipeline::NrSizePolicy>(send(id,CB_GETCURSEL));break;
         case 204:s.flow=static_cast<engine::FlowQuality>(send(id,CB_GETCURSEL));break;
         case 205:s.content=static_cast<engine::ContentRate>(send(id,CB_GETCURSEL));break;
-        case 208:{s.frameGenerationBackend=static_cast<engine::FrameGenerationBackend>(send(id,CB_GETCURSEL));if(s.frameGenerationBackend==engine::FrameGenerationBackend::XeSS){const int choices=multiplierChoiceCount(engine::FrameGenerationBackend::XeSS);const size_t index=size_t(std::clamp(choices-1,1,int(engine::kFgMultiplierChoiceCount)-1));s.multiplier=std::min(s.multiplier,engine::kFgMultiplierChoices[index]);}break;}
+        case 208:{s.frameGenerationBackend=static_cast<engine::FrameGenerationBackend>(send(id,CB_GETCURSEL));if(engine::presentSinkFrameGeneration(s.frameGenerationBackend)){const int choices=multiplierChoiceCount(s.frameGenerationBackend);const size_t index=size_t(std::clamp(choices-1,1,int(engine::kFgMultiplierChoiceCount)-1));s.multiplier=std::min(s.multiplier,engine::kFgMultiplierChoices[index]);}break;}
         case 209:s.opticalFlowBackend=static_cast<engine::OpticalFlowBackend>(send(id,CB_GETCURSEL));break;
         case 220:s.lowLatency=checked(id)==BST_CHECKED;break;
         case 215:s.amdFlowHalfResolution=checked(id)==BST_CHECKED;break;
@@ -215,7 +221,7 @@ case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.
     SetPropW(item(219),L"veyra.tip",HANDLE(L"直播兼容模式：切换显示交换链，会短暂停顿；不改变增强算法或导出。不保证所有捕获方式有效。"));
     add(L"STATIC",L"补帧与运动估算",1103,0,1,12,12,-1,30);
     add(L"STATIC",L"补帧方式",1111,0,1,12,50,-1,24);
-    combo(208,1,78,{L"DLSS 帧生成",L"Intel XeSS · 实验显示补帧 2X"});
+    combo(208,1,78,{L"DLSS 帧生成",L"Intel XeSS · 实验显示补帧 2X",L"AMD FSR 帧生成 · 2X"});
     add(L"STATIC",L"补帧倍率",1112,0,1,12,122,-1,24);
     combo(202,1,150,{L"关闭补帧",L"2X · 一张中间帧",L"3X · 两张中间帧",L"4X · 三张中间帧"});
     add(L"STATIC",L"运动估算",1113,0,1,12,194,-1,24);
@@ -307,7 +313,7 @@ case WM_COMMAND:{const int id=LOWORD(wp);if(!populating&&((id>=202&&id<=205||id=
 case WM_HSCROLL:{int id=GetDlgCtrlID(reinterpret_cast<HWND>(lp));if(id>=600&&id<612){int index=id-600;float v=float(SendMessageW(reinterpret_cast<HWND>(lp),TBM_GETPOS,0,0))/(index>=4&&index<=6?1:100);if(index==3&&v<0)v=-1;std::wostringstream o;o<<std::setprecision(4)<<v;putText(100+index,o.str().c_str());}return 0;}
 case WM_TIMER:{auto s=controller->snapshot();syncProtection(enhancementEnabled?s.desired.protection:configuredSettings.protection);if(enhancementEnabled&&!dirty&&displayedSettings!=s.desired)populate(s.desired);check(200,enhancementEnabled&&s.desired.nr?BST_CHECKED:BST_UNCHECKED);check(201,enhancementEnabled&&s.desired.sr?BST_CHECKED:BST_UNCHECKED);std::wostringstream o;if(!s.running&&!s.frames&&s.transport!=engine::TransportState::Opening)o<<L"未打开媒体 · 设置待启用\n";else{
     o<<L"期望版本 "<<s.desired.revision<<L" / 已应用 "<<s.applied.revision<<(s.applying?L" · 应用中":L"");
-    const wchar_t* backend=s.applied.frameGenerationBackend==engine::FrameGenerationBackend::XeSS?L"XeSS":L"DLSS";
+    const wchar_t* backend=s.applied.frameGenerationBackend==engine::FrameGenerationBackend::XeSS?L"XeSS":s.applied.frameGenerationBackend==engine::FrameGenerationBackend::Fsr?L"AMD FSR":L"DLSS";
     o<<L"\n"<<backend<<L" · "<<(s.applied.multiplier<=1?L"补帧关闭":s.fgActive?L"补帧运行":L"等待有效补帧");
     if(!s.backendWarning.empty())message(s.backendWarning);
     else if(!displayedBackendWarning.empty())message(L"设置已应用");

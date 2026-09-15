@@ -121,6 +121,35 @@ bool PresentSink::initialize(ID3D12Device* device, ID3D12CommandQueue* queue,
     scd.Flags = tearingSupported_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
 
     ComPtr<IDXGISwapChain1> swapChain1;
+    // Once the AMD provider has wrapped this HWND it retains the DXGI swapchain
+    // for the process lifetime (verified: a second CreateSwapChainForHwnd for
+    // the same window fails afterwards). The proxy therefore stays with the
+    // sink and keeps working as a plain swapchain whenever frame generation is
+    // not requested by the session.
+    if(desc.fsr&&!fsr_){
+        fsr_=std::make_unique<FsrFgPresenter>();
+        IDXGISwapChain4* proxy=nullptr;
+        const uint32_t renderW=desc.renderWidth?desc.renderWidth:scd.Width;
+        const uint32_t renderH=desc.renderHeight?desc.renderHeight:scd.Height;
+        if(!fsr_->initialize(device,queue,factory_.Get(),hwnd_,scd,renderW,renderH,&proxy,desc.fgMultiplier)){
+            // Like XeSS: a missing or incompatible local runtime must never
+            // prevent basic playback.
+            log::warn("present", "AMD FSR frame generation unavailable; falling back to native presentation");
+            fsr_.reset();
+        }
+    }
+    if(fsr_){
+        if(!desc.fsr)fsr_->disableGeneration();
+        IDXGISwapChain4* proxy=fsr_->swapchainHandle();
+        ComPtr<IDXGISwapChain3> proxied;
+        if(proxy==nullptr||FAILED(proxy->QueryInterface(IID_PPV_ARGS(&proxied)))){
+            log::error("present", "retained FSR proxy swapchain is no longer usable");
+            status = Status::WindowFailure;
+            return false;
+        }
+        swapChain_=proxied;
+        log::info("present", std::format("using the retained AMD proxy swapchain (frame generation {})", desc.fsr?"on":"off"));
+    }
     if(desc.xess){
         xess_=std::make_unique<XessPresenter>();
         if(!xess_->initialize(device,queue,factory_.Get(),hwnd_,scd,swapChain_.GetAddressOf(),desc.fgMultiplier)){
@@ -221,6 +250,7 @@ ID3D12Resource* PresentSink::currentBackBuffer()
 bool PresentSink::present(Status& status)
 {
     xessFailed_=false;
+    fsrFailed_=false;
     const UINT syncInterval = desc_.vsync ? 1 : 0;
     const UINT flags = (!desc_.vsync && tearingSupported_) ? DXGI_PRESENT_ALLOW_TEARING : 0;
     ++attemptedPresentCount_;
@@ -230,6 +260,7 @@ bool PresentSink::present(Status& status)
         ++presentCount_;
         backBufferIndex_ = swapChain_->GetCurrentBackBufferIndex();
         if(xess_&&!xess_->afterPresent()){xessFailed_=true;status=Status::WindowFailure;return false;}
+        if(fsr_)fsr_->afterPresent();
         return true;
     }
     ++failedPresentCount_;
@@ -346,6 +377,10 @@ void PresentSink::shutdown()
     }
     swapChain_.Reset();
     xess_.reset();
+    // The AMD proxy context is deliberately NOT destroyed here: the provider
+    // keeps the real DXGI swapchain alive, so releasing it would leave this
+    // HWND permanently unable to host a swapchain. It is destroyed with the
+    // sink at process/engine teardown instead.
     log::info("present", "sink-shutdown: sub-step window-destroy-last");
     if (hwnd_ != nullptr && !desc_.targetWindow) {
         DestroyWindow(hwnd_);

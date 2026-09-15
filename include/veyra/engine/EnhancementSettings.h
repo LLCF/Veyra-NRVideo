@@ -6,7 +6,12 @@
 #include <string_view>
 #include "veyra/pipeline/ResolutionPlan.h"
 namespace veyra::engine {
-enum class FrameGenerationBackend { Dlss, XeSS };
+enum class FrameGenerationBackend { Dlss, XeSS, Fsr };
+// Frame generation that runs inside the present sink (external frame
+// interpolation swapchain) instead of the in-graph DLSSG backend.
+constexpr bool presentSinkFrameGeneration(FrameGenerationBackend backend) {
+    return backend==FrameGenerationBackend::XeSS||backend==FrameGenerationBackend::Fsr;
+}
 // Multipliers the UI offers. 5X is intentionally absent: the DLSS runtime
 // exposes 2/3/4/6 and MFG buyers pick from those; 1 = generation off.
 inline constexpr uint32_t kFgMultiplierChoices[]={1,2,3,4,6};
@@ -28,6 +33,7 @@ constexpr std::string_view frameGenerationBackendName(FrameGenerationBackend bac
     switch(backend) {
     case FrameGenerationBackend::Dlss: return "DLSS";
     case FrameGenerationBackend::XeSS: return "XeSS";
+    case FrameGenerationBackend::Fsr: return "AMD-FSR";
     }
     return "unknown";
 }
@@ -113,11 +119,14 @@ struct EnhancementSettings {
         if(model.skin!=-1&&!range(model.skin,2))return "skin parameter out of range";
         if(model.style<0||model.style>2||model.autoMask<0||model.autoMask>1||model.uiCorrection<0||model.uiCorrection>1)return "invalid experimental parameter";
         for(float v:{residual.total,residual.darken,residual.brighten,residual.color,residual.luminance})if(!range(v,2))return "residual parameter out of range";
-        if(frameGenerationBackend<FrameGenerationBackend::Dlss||frameGenerationBackend>FrameGenerationBackend::XeSS)return "invalid frame generation backend";
+        if(frameGenerationBackend<FrameGenerationBackend::Dlss||frameGenerationBackend>FrameGenerationBackend::Fsr)return "invalid frame generation backend";
         // The XeSS provider reports its own generated-frame ceiling at session
         // start; the engine clamps/rejects above it, so validation only guards
         // the absolute API range here.
         if(frameGenerationBackend==FrameGenerationBackend::XeSS&&multiplier>4)return "XeSS frame generation supports up to 4X";
+        // The AMD 3.1.x provider delivers one generated frame per present; the
+        // probe measured the same count for 2/3/4 requested frames.
+        if(frameGenerationBackend==FrameGenerationBackend::Fsr&&multiplier>2)return "AMD FSR frame generation supports up to 2X";
         if(videoSrQuality>4)return "invalid video SR quality";
         if(!pipeline::validSrTarget(srTarget))return "invalid SR target";
         if(opticalFlowBackend!=OpticalFlowBackend::Nvidia&&opticalFlowBackend!=OpticalFlowBackend::AmdFidelityFx&&opticalFlowBackend!=OpticalFlowBackend::GpuDis)return "invalid optical flow backend";

@@ -66,6 +66,9 @@ struct PlayerSnapshot {
     // 0 = no XeSS session has reported yet; the settings UI then falls back to
     // the audited-provider probe.
     int xessMaxInterpolatedFrames=0;
+    // AMD FSR frame-generation ceiling (generated frames per presented frame;
+    // 1 = 2X). 0 = no FSR session has reported yet.
+    int fsrMaxGeneratedFrames=0;
     bool running=false,failed=false,image=false,capture=false,remotePlay=false;
     int remotePlayState=0; uint64_t remotePlaySkipped=0;
     bool remoteRecovering=false;unsigned remoteReconnectAttempts=0;std::wstring remoteRecoveryMessage;
@@ -118,5 +121,7 @@ private:
     int fgMultiFrameMaxCap_=0;
     // Guarded by mutex_: XeSS provider ceiling of the active session (0 = unknown).
     int xessMaxInterpolatedFramesCap_=0;
+    // Guarded by mutex_: AMD FSR ceiling of the active session (0 = unknown).
+    int fsrMaxGeneratedFramesCap_=0;
 };
 }

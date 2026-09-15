@@ -201,6 +201,10 @@ public:
     DXGI_FORMAT outputFormat() const { return hdr10Output()?DXGI_FORMAT_R10G10B10A2_UNORM:desc_.hdrOutput?DXGI_FORMAT_R16G16B16A16_FLOAT:DXGI_FORMAT_R8G8B8A8_UNORM; }
     bool highQualityPresentation() const { return desc_.highQualityPresentation; }
     bool xessEnabled() const { return desc_.enableFg && !desc_.noFeatures && !desc_.stillImage && desc_.frameGenerationBackend==engine::FrameGenerationBackend::XeSS; }
+    bool fsrEnabled() const { return desc_.enableFg && !desc_.noFeatures && !desc_.stillImage && desc_.frameGenerationBackend==engine::FrameGenerationBackend::Fsr; }
+    // Frame generation implemented by the present sink (XeSS, FSR) instead of
+    // the in-graph DLSSG path; both consume the same guidance motion texture.
+    bool presentSinkFg() const { return xessEnabled() || fsrEnabled(); }
     // Requested output multiplier (2 = one generated frame). Consumed by the
     // present sink so the XeSS provider knows how many frames to generate.
     uint32_t fgMultiplier() const { return desc_.fgMultiplier; }

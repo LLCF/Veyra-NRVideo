@@ -43,6 +43,7 @@ option(VEYRA_ENABLE_NVOF "Enable NVIDIA Optical Flow guidance" OFF)
 option(VEYRA_ENABLE_D3D12_DEBUG "Enable D3D12 debug layer" ON)
 set(VEYRA_FIDELITYFX_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party_local/amd/FidelityFX-SDK/sdk" CACHE PATH "Local official FidelityFX SDK 1.1.4")
 set(VEYRA_XESS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party_local/intel/xess-3.0.2" CACHE PATH "Local Intel XeSS SDK 3.0.2")
+set(VEYRA_FIDELITYFX2_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party_local/amd/FidelityFX-SDK-2.3.0/Kits/FidelityFX" CACHE PATH "Local AMD FidelityFX SDK 2.3.0 Kits/FidelityFX tree")
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(VeyraWarnings)
@@ -76,6 +77,7 @@ add_library(veyra_gfx STATIC
   src/gfx/PresentSink.cpp
   src/gfx/XessPresenter.cpp
   src/gfx/XessMfgUnlock.cpp
+  src/gfx/FsrFgPresenter.cpp
 )
 veyra_apply_warnings(veyra_gfx)
 target_compile_features(veyra_gfx PUBLIC cxx_std_20)
@@ -83,6 +85,12 @@ target_link_libraries(veyra_gfx PUBLIC veyra_base d3d12 dxgi dxguid)
 if(EXISTS "${VEYRA_XESS_ROOT}/inc/xess_fg/xefg_swapchain_d3d12.h")
   target_include_directories(veyra_gfx PRIVATE "${VEYRA_XESS_ROOT}/inc")
   target_compile_definitions(veyra_gfx PRIVATE VEYRA_HAS_XESS=1)
+endif()
+if(EXISTS "${VEYRA_FIDELITYFX2_ROOT}/framegeneration/include/dx12/ffx_api_framegeneration_dx12.h")
+  target_include_directories(veyra_gfx PRIVATE
+    "${VEYRA_FIDELITYFX2_ROOT}/api/include"
+    "${VEYRA_FIDELITYFX2_ROOT}/framegeneration/include")
+  target_compile_definitions(veyra_gfx PRIVATE VEYRA_HAS_FSR=1)
 endif()
 if(VEYRA_ENABLE_D3D12_DEBUG)
   target_compile_definitions(veyra_gfx PUBLIC VEYRA_D3D12_DEBUG=1)

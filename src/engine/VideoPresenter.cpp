@@ -7,7 +7,7 @@ namespace veyra::engine {
 bool VideoPresenter::open(gfx::D3D12DeviceContext& ctx,HWND window,pipeline::EnhanceGraph& graph,bool captureCompatible) {
     gpuTimer_.initialize(ctx.device(),ctx.directQueue());window_=window;RECT rc{};GetClientRect(window,&rc);
     gfx::PresentSink::Desc d;d.targetWindow=window;d.width=std::max(1L,rc.right);d.height=std::max(1L,rc.bottom);d.vsync=false;
-    d.hdr=graph.hdrOutput();d.hdr10=graph.hdr10Output();d.xess=graph.xessEnabled();d.captureCompatible=captureCompatible;d.fgMultiplier=graph.fgMultiplier();lastXessFrame_={};lastXessIdentity_={};xessWasEnabled_=false;
+    d.hdr=graph.hdrOutput();d.hdr10=graph.hdr10Output();d.xess=graph.xessEnabled();d.fsr=graph.fsrEnabled();d.renderWidth=graph.workWidth();d.renderHeight=graph.workHeight();d.captureCompatible=captureCompatible;d.fgMultiplier=graph.fgMultiplier();lastXessFrame_={};lastXessIdentity_={};xessWasEnabled_=false;lastFsrFrame_={};lastFsrIdentity_={};fsrWasEnabled_=false;
     Status st=Status::Ok;if(!sink_.initialize(ctx.device(),ctx.directQueue(),d,st))return false;
     std::vector<uint8_t> vs,ps;
     // SRV layout: 0..1 video frames, 2..11 generated frames (2 parities x 5
@@ -22,7 +22,7 @@ bool VideoPresenter::open(gfx::D3D12DeviceContext& ctx,HWND window,pipeline::Enh
 }
 void VideoPresenter::refresh(ID3D12Device* device){for(unsigned i=0;i<3;++i){Microsoft::WRL::ComPtr<ID3D12Resource> bb;if(SUCCEEDED(sink_.swapChain()->GetBuffer(i,IID_PPV_ARGS(&bb))))device->CreateRenderTargetView(bb.Get(),nullptr,{rtvs_->GetCPUDescriptorHandleForHeapStart().ptr+size_t(i)*inc_});}}
 bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& ring,pipeline::EnhanceGraph& graph,unsigned slot,bool generated,bool referencesValid,int comparison,bool baseReference,float split,pipeline::FrameIdentity identity,PreviewView view) {
-    xessFailed_=false;
+    xessFailed_=false;fsrFailed_=false;
     RECT rc{};GetClientRect(window_,&rc);if(rc.right<1||rc.bottom<1)return true;
     const auto now=std::chrono::steady_clock::now();
     const auto deferUntil=uint64_t(uintptr_t(GetPropW(window_,L"Veyra.ResizeDeferUntil")));
@@ -94,9 +94,23 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
         }else if(!xess->tag(list,bb,motion,depth,{left,top,left+w,top+h},false,reset,elapsed)){xessFailed_=true;return false;}
         lastXessFrame_=now;lastXessIdentity_=identity;xessWasEnabled_=enabled;
     }
+    if(auto* fsr=sink_.fsr()){
+        const float fit=std::min(float(sink_.bufferWidth())/graph.workWidth(),float(sink_.bufferHeight())/graph.workHeight());
+        const LONG w=std::max(1L,LONG(std::lround(graph.workWidth()*fit))),h=std::max(1L,LONG(std::lround(graph.workHeight()*fit)));
+        const LONG left=(LONG(sink_.bufferWidth())-w)/2,top=(LONG(sink_.bufferHeight())-h)/2;
+        const bool enabled=!generated&&!comparison&&view==PreviewView{}&&graph.presentMotionValid(slot)&&identity.sourceFrameId!=lastFsrIdentity_.sourceFrameId;
+        const bool reset=!fsrWasEnabled_||identity.epoch!=lastFsrIdentity_.epoch||identity.settingsRevision!=lastFsrIdentity_.settingsRevision||graph.motionPreviousSource(slot)!=lastFsrIdentity_.sourceFrameId;
+        const float elapsed=lastFsrFrame_==std::chrono::steady_clock::time_point{}?0.0f:float(std::chrono::duration<double,std::milli>(now-lastFsrFrame_).count());
+        // The AMD presenter degrades inside the provider (generation off, plain
+        // presentation continues) instead of failing the frame: tearing the
+        // swapchain down would only cost the session a restart.
+        if(!fsr->tag(list,bb,graph.presentMotion(slot),graph.presentDepth(),{left,top,left+w,top+h},enabled,reset,elapsed))fsrFailed_=true;
+        if(sink_.fsr()->failed())fsrFailed_=true;
+        lastFsrFrame_=now;lastFsrIdentity_=identity;fsrWasEnabled_=enabled;
+    }
     gpuTimer_.mark(list,diagnostics::GpuStage::Blit,true);gpuTimer_.resolve(list);
     if(!ring.submitAndSignal(commandSlot))return false;gpuTimer_.submitted(ring.lastSignaledValue());lastBuffer_=sink_.swapChain()->GetCurrentBackBufferIndex();hasPresented_=true;
-    const bool presented=sink_.present(st);xessFailed_=sink_.xessFailed();return presented;
+    const bool presented=sink_.present(st);xessFailed_=sink_.xessFailed();fsrFailed_=fsrFailed_||sink_.fsrFailed();return presented;
 }
 bool VideoPresenter::readPresentedFrameForTest(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& ring,sink::RgbaImage& image){
     if(!hasPresented_||!sink_.swapChain()||!ring.drainQueue())return false;

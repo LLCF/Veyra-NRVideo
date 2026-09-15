@@ -7,7 +7,7 @@ namespace {
 bool legacyBackends(const std::filesystem::path& path) {
  using namespace veyra::engine;
  unsigned checks=0;
- for(int version=4;version<=11;++version)for(int backend=0;backend<=2;++backend)for(int multiplier:{2,4}){
+ for(int version=4;version<=13;++version)for(int backend=0;backend<=2;++backend)for(int multiplier:{2,4}){
   std::ostringstream fixture;
   fixture<<"VEYRA_PRESETS "<<version<<"\n\"legacy\" 1\n\"legacy\" 1 1 1 -1 0 0 0 1 1 1 1 1 1 0 "<<multiplier<<" 0 1 0";
   fixture<<" 0 0";
@@ -19,11 +19,16 @@ bool legacyBackends(const std::filesystem::path& path) {
   if(version>=9)fixture<<" 1";
   if(version>=10)fixture<<" 1";
   if(version>=11)fixture<<" 0";
+  if(version>=12)fixture<<" 0";
   fixture<<'\n';
   {std::ofstream file(path);file<<fixture.str();}
   const bool xess=version<8?backend==2:backend==1;
-  const bool supportedValue=backend<2||(version>=6&&version<=7);
-  const bool expected=supportedValue&&(!xess||multiplier==2);
+  const bool fsr=version>=13&&backend==2;
+  const bool supportedValue=backend<2||(version>=6&&version<=7)||fsr;
+  // FSR accepts 2X only (the 3.1.x provider generates one frame per present).
+  // XeSS presets up to 4X stay loadable: the audited unlock raises the ceiling
+  // and the engine clamps to the runtime value. DLSS accepts both here.
+  const bool expected=supportedValue&&(!fsr||multiplier==2);
   PresetStore store(path);
   if(store.load()!=expected)return false;
   if(expected){
@@ -31,11 +36,12 @@ bool legacyBackends(const std::filesystem::path& path) {
    if(value.lowLatency||value.forceSdrPreview)return false;
    if(value.captureCompatible!=(version>=10))return false;
    if(value.nrRuntime!=(version>=9?NrRuntime::Community:NrRuntime::Original))return false;
-   if(value.frameGenerationBackend!=(xess?FrameGenerationBackend::XeSS:FrameGenerationBackend::Dlss)||value.multiplier!=multiplier||value.videoSrQuality!=2)return false;
+   const auto expectedBackend=fsr?FrameGenerationBackend::Fsr:xess?FrameGenerationBackend::XeSS:FrameGenerationBackend::Dlss;
+   if(value.frameGenerationBackend!=expectedBackend||value.multiplier!=multiplier||value.videoSrQuality!=2)return false;
    if(version>=7&&(value.audioSync!=AudioSyncMode::Manual||value.audioOffsetMs!=137))return false;
    if(!store.put(L"legacy",value,true))return false;
    std::ifstream file(path);std::string magic;int savedVersion=0;file>>magic>>savedVersion;
-   if(magic!="VEYRA_PRESETS"||savedVersion!=12)return false;
+   if(magic!="VEYRA_PRESETS"||savedVersion!=13)return false;
    PresetStore reloaded(path);
    if(!reloaded.load()||reloaded.defaultSettings()!=value)return false;
   }else{
@@ -57,12 +63,26 @@ int main(int argc,char** argv){if(argc!=2)return 2;using namespace veyra::engine
  s.srTarget=veyra::pipeline::SrTarget::Uhd8K;
  s.audioSync=AudioSyncMode::Manual;s.audioOffsetMs=137;
  s.nrRuntime=NrRuntime::Community;s.captureCompatible=true;s.lowLatency=true;s.forceSdrPreview=true;
- ok=ok&&a.put(L"test",s)&&a.setDefault(0)&&!a.put(L"test",s);PresetStore b(p);ok=ok&&b.load()&&b.defaultSettings()==s&&b.rename(0,L"renamed")&&b.defaultSettings()==s;
+ok=ok&&a.put(L"test",s)&&a.setDefault(0)&&!a.put(L"test",s);PresetStore b(p);ok=ok&&b.load()&&b.defaultSettings()==s&&b.rename(0,L"renamed")&&b.defaultSettings()==s;
+ if(!ok){std::cerr<<"stage basic-preset failed\n";return 1;}
  auto badTarget=s;badTarget.srTarget=static_cast<veyra::pipeline::SrTarget>(3);ok=ok&&!b.put(L"invalid target",badTarget);
- auto xess=s;xess.frameGenerationBackend=FrameGenerationBackend::XeSS;ok=ok&&!b.put(L"XeSS 4X rejected",xess);
- xess.multiplier=2;ok=ok&&b.put(L"XeSS 2X",xess);PresetStore xessReload(p);ok=ok&&xessReload.load()&&xessReload.entries().back().settings==xess&&b.erase(1);
+ if(!ok){std::cerr<<"stage bad-target failed\n";return 1;}
+ // XeSS presets may request up to 4X since the audited multi-frame unlock; the
+ // engine clamps to the ceiling the provider reports at session start.
+ auto xess=s;xess.frameGenerationBackend=FrameGenerationBackend::XeSS;ok=ok&&b.put(L"XeSS 4X",xess);
+ PresetStore xessReload(p);ok=ok&&xessReload.load()&&xessReload.entries().back().settings==xess&&b.erase(1);
+ xess.multiplier=5;ok=ok&&!b.put(L"XeSS 5X rejected",xess);
+ xess.multiplier=2;ok=ok&&b.put(L"XeSS 2X",xess);PresetStore xess2Reload(p);ok=ok&&xess2Reload.load()&&xess2Reload.entries().back().settings==xess&&b.erase(1);
+ if(!ok){std::cerr<<"stage xess-cases failed\n";return 1;}
+ // AMD FSR frame generation: the 3.1.x provider delivers one generated frame
+ // per present, so 2X round-trips and 4X is refused by validation.
+ auto fsr=s;fsr.frameGenerationBackend=FrameGenerationBackend::Fsr;ok=ok&&!b.put(L"FSR 4X rejected",fsr);
+ if(!ok){std::cerr<<"stage fsr-4x failed\n";return 1;}
+ fsr.multiplier=2;ok=ok&&b.put(L"FSR 2X",fsr);PresetStore fsrReload(p);ok=ok&&fsrReload.load()&&fsrReload.entries().back().settings==fsr&&b.erase(1);
+ if(!ok){std::cerr<<"stage backend-cases failed\n";return 1;}
  auto badBackend=s;badBackend.frameGenerationBackend=static_cast<FrameGenerationBackend>(3);ok=ok&&!b.put(L"invalid backend",badBackend);
  auto dis=s;dis.opticalFlowBackend=OpticalFlowBackend::GpuDis;ok=ok&&b.put(L"GPU DIS",dis)&&b.save();PresetStore disReload(p);ok=ok&&disReload.load()&&disReload.entries().back().settings==dis&&b.erase(1);
+ if(!ok){std::cerr<<"stage flow-cases failed\n";return 1;}
  auto badFlow=s;badFlow.opticalFlowBackend=static_cast<OpticalFlowBackend>(3);ok=ok&&!b.put(L"invalid flow backend",badFlow);
  auto ampere=s;ampere.nr=true;ampere.nrRuntime=NrRuntime::Ampere;ok=ok&&b.put(L"RTX30",ampere);PresetStore ampereReload(p);ok=ok&&ampereReload.load()&&ampereReload.entries().back().settings==ampere&&b.erase(1);
  auto badNr=s;badNr.nrRuntime=static_cast<NrRuntime>(3);ok=ok&&!b.put(L"invalid NR runtime",badNr);
@@ -73,6 +93,8 @@ int main(int argc,char** argv){if(argc!=2)return 2;using namespace veyra::engine
  {std::ofstream legacy(p);legacy<<"VEYRA_PRESETS 1\n\"legacy\" 1\n\"legacy\" 1 1 1 -1 0 0 0 1 1 1 1 1 1 0 1 0 1 0\n";}
  PresetStore old(p);ok=ok&&old.load()&&!old.defaultSettings().protection.enabled&&old.defaultSettings().srTarget==veyra::pipeline::SrTarget::Uhd4K&&old.put(L"v2",s);
  PresetStore upgraded(p);ok=ok&&upgraded.load()&&upgraded.entries().size()==2&&upgraded.entries()[1].settings==s;
+ if(!ok){std::cerr<<"stage legacy-v1 failed\n";return 1;}
  {std::ofstream f(p);f<<"VEYRA_PRESETS 99\ncorrupt mediaPath executable must reject";}PresetStore c(p);ok=ok&&!c.load()&&!c.put(L"override",{});std::ifstream f(p);std::string data((std::istreambuf_iterator<char>(f)),{});ok=ok&&data=="VEYRA_PRESETS 99\ncorrupt mediaPath executable must reject";
  f.close();ok=legacyBackends(p)&&ok;
+ if(!ok){std::cerr<<"stage closing failed\n";return 1;}
  std::cout<<"preset roundtrip, all fields, duplicate, rename-default, delete, validation, unknown schema, corrupt-preservation="<<ok<<'\n';return ok?0:1;}
