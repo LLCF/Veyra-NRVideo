@@ -116,7 +116,7 @@ $env:VEYRA_TEST_FG_FORCE_MULTIPLIER='1'
 
 0. `git log --oneline -12` 确认全部提交都在 `codex/framegen-fsr-dolby-20260916`，`main` 仍是 `693db07`、未推送、未发布。
    最终构建 `cmd.exe /c out\build\veyra-build-x64-release.cmd` exit 0；最终
-   `veyra.exe` SHA256 `36024024B5DE530FB15CE4E07839EB0EC8B2477476599B4A9A5C86FCE41F59A9`；
+   `veyra.exe` SHA256 `6291F7CF6E737DD12C057F08848C8A1B48C6DBA394D429E5CE918B01E227A01D`；
    delivery 短测 PASS（`logs/delivery/7180a557fe934a27a225f6367a1b06e9/result.json`）；
    `veyra_repair_contract_tests` 157 项 0 失败；`veyra_repair_preset_tests` 60 组迁移全通过。
 1. **AMD FSR 补帧**：`out\build\audio-continuity-repair-20260915\veyra.exe --fg-fsr --smoke-seconds 10 <视频>`，
