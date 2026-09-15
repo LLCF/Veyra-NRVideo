@@ -36,7 +36,26 @@
 
 ## 3. 待办与边界
 
-1. **构建路径勘察结论**：SDK 2.3.0 根目录没有 CMakeLists，官方构建方式是**每个效果一个 Visual Studio 解决方案**（`Samples/FidelityFX_<effect>/dx12/FidelityFX_<effect>_2022.sln`），依赖 vcpkg 与 Cauldron 框架——这是一套重量级样例构建，不适合直接搬进 Veyra。**但签名预编译 DLL 已随 SDK 提供**（见 §1 表格），所以下一步不是"重建 SDK"，而是：读 `Kits/FidelityFX/api` 与 `Kits/FidelityFX/framegeneration/fsr3` 的 provider/host 源码，评估把少量 provider 胶水源码直接编进 Veyra（或经 `amd_fidelityfx_loader_dx12.dll` 加载）的可行性，再按 `CMakeLists.txt` 里 1.1.4 静态库那种方式接入。只用其 DLL 与头文件、不修改任何 AMD 二进制。
+### 3.0 本机探针实测（2026-09-16，`tools/fsr_probe`）
+
+新增诊断工具 `tools/fsr_probe`（CMake 目标 `veyra_fsr_probe`）：加载上述签名 loader DLL、枚举 provider 版本、并用真实 D3D12 设备 + 隐藏窗口尝试创建 FX 帧生成的代理交换链。**在本机 NVIDIA RTX 5070（vendor 0x10DE）** 实测：
+
+```text
+loader 加载成功，FSR API 入口解析成功
+framegen-swapchain-forhwnd versionsQuery=OK count=1 -> 3.1.7
+framegen            versionsQuery=OK count=1 -> 3.1.6
+(带真实 device 查询 version 变体，同样只返回 3.1.7 / 3.1.6)
+CreateContext(framegen swapchain for hwnd) result=OK  context=非空 swapchain=非空
+DestroyContext result=OK
+```
+
+结论（与计划的分档一致，且首次有本机证据）：
+
+1. **FSR 帧生成 3.1.x 在 NVIDIA 上可以初始化**：3.1.7 swapchain provider 在 RTX 5070 上 `CreateContext` 成功并返回代理交换链。→ 这就是"N 卡回退 3.1.x"的可行性证明，可以直接做后端。
+2. **4.0.1（ML）在本机没有被 provider 枚举出来**（同一 desc 类型与真实 device 都只返回 3.1.x）。与"4.x 面向 AMD 支持列表"一致；4.0.x 是否可用需要在 AMD 卡上复测，不能凭 NVIDIA 结果推断。
+3. **loader 的 provider 发现依赖 DLL 所在目录**：只有把工作目录切到 `signedbin` 时才会枚举到 provider；仅用 `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR` 加载 loader 不够。正式集成时必须显式把 AMD DLL 目录加入加载搜索路径（`AddDllDirectory`/`SetDllDirectory` 或等价手段），否则会出现 `NO_PROVIDER` / `ERROR_UNKNOWN_DESCTYPE`。
+
+1. **构建路径勘察结论**：SDK 2.3.0 根目录没有 CMakeLists，官方构建方式是**每个效果一个 Visual Studio 解决方案**（`Samples/FidelityFX_<effect>/dx12/FidelityFX_<effect>_2022.sln`），依赖 vcpkg 与 Cauldron 框架——这是一套重量级样例构建，不适合直接搬进 Veyra。**但签名预编译 DLL 已随 SDK 提供**（见 §1 表格），且探针已证明**不编译 SDK、直接经 loader DLL 调用就能用**（3.1.7 帧生成已在本机创建成功）。下一步是把这条路径接入播放器。
 2. **能力查询优先**：先在真实显卡上查询 FSR Frame Generation / Upscaling 4.x 是否可用（AMD 的支持列表按 GPU/驱动区分；NVIDIA 上大概率不可用），据此决定界面分档：AMD 卡开放 4.1/4.0.x，N 卡只给 FSR 2 / 3.1。
 3. **发布范围**：把 `amd_fidelityfx_*_dx12.dll` 放进 Release 属于范围变更，需要用户单独授权，并在 `release-runtime-manifest.json` 与 `THIRD_PARTY_NOTICES.md` 中逐项登记（名称、版本、大小、SHA-256、来源、许可）。
 4. **不改二进制**：所有 AMD DLL 原样使用，不做补丁、不重签名。
