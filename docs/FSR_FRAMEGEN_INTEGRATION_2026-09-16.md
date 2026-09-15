@@ -85,6 +85,23 @@ DXGI 规定一个 HWND 同时只能有一个交换链，因此：
   因此 FSR 侧 `motionVectorScale = (1,1)`（存储值已是像素），不得再加负号。
 - 深度使用图内 guidance 深度（R32F）。它不是引擎原生深度，遮挡处理能力有限，这一点不粉饰。
 
+## 6.1 生成帧真的带运动吗（E-1 门槛的"真实运动"）
+
+`veyra_fsr_probe ... motion` 模式：黑底 + 白色方块，每帧右移 40 像素，插帧目标回读后
+用方块**中心**（不是边缘，插帧后边缘会变软）与理论中点比较。本机实测
+（`logs/fsr/probe-motion.log`）：
+
+```
+realCenter=1060.0  previousCenter=1020.0  expectedMidpoint=1040.0
+interpolatedCenter=1041.5 (left=1006 width=72)  midpoint=1 notDuplicate=1 notOlderFrame=1
+```
+
+即生成帧里的方块位于两真实帧的正中间（误差 1.5 像素），既不是重复帧也不是外推帧。
+这同时反向验证了运动矢量的符号约定：符号错了方块会出现在错误一侧或偏移加倍。
+
+节奏（同一探针的 present 回调时间戳，**提供方提交节奏，不是屏幕扫描实测**）：
+47 个间隔，均值 9.52ms、最大 15.57ms、<5ms 的间隔仅 3 个 → 没有成串突发。
+
 ## 7. 归属
 
 - AMD FidelityFX SDK 2.3.0（MIT）：头文件与签名运行库仅本地使用，

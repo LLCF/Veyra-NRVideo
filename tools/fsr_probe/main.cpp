@@ -11,11 +11,16 @@
 //      frames, which is the only ground truth that interpolation actually
 //      reached the display path.
 //
-// Usage: veyra_fsr_probe [path-to-amd_fidelityfx_loader_dx12.dll] [generated-frames-per-real-frame] [upscale]
+// Usage: veyra_fsr_probe [path-to-amd_fidelityfx_loader_dx12.dll] [generated-frames-per-real-frame] [upscale] [pipelined] [motion]
 //
 // The optional "upscale" mode reproduces the player's geometry: the render
 // resolution (guidance) is larger than the swapchain and the interpolation
 // rectangle is the letterboxed fit inside it.
+//
+// The optional "motion" mode moves a white square by a known number of pixels
+// per frame, then reads the interpolation target back and checks that the
+// generated frame really sits at the temporal midpoint between the two real
+// frames (real interpolation) instead of repeating or extrapolating.
 #include <windows.h>
 
 #include <d3d12.h>
@@ -23,6 +28,8 @@
 #include <wrl/client.h>
 
 #include <atomic>
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <string>
@@ -39,6 +46,11 @@ namespace {
 constexpr UINT kProbeWidth = 1280;
 constexpr UINT kProbeHeight = 720;
 constexpr UINT kProbeFrames = 90;
+// Motion mode: white square geometry, in back buffer pixels.
+constexpr UINT kMotionStartX = 100;
+constexpr UINT kMotionStep = 40;
+constexpr UINT kMotionTop = 320;
+constexpr UINT kMotionSize = 80;
 
 const char* resultName(ffxReturnCode_t code) {
     switch (code) {
@@ -116,6 +128,13 @@ struct PresentCounters {
     std::atomic<uint64_t> real{0};
     std::atomic<uint64_t> generated{0};
     std::atomic<uint64_t> callbackFailures{0};
+    // Cadence sampling from the provider's presentation thread: intervals are
+    // stored in microseconds so the counters stay lock-free.
+    std::atomic<int64_t> lastPresentQpc{0};
+    std::atomic<int64_t> intervalSumUs{0};
+    std::atomic<uint64_t> intervalCount{0};
+    std::atomic<uint64_t> fastIntervals{0};
+    std::atomic<int64_t> maxIntervalUs{0};
 };
 
 // The swapchain context calls this for every frame it presents (real and
@@ -129,6 +148,23 @@ ffxReturnCode_t presentCallback(ffxCallbackDescFrameGenerationPresent* params, v
         counters->generated.fetch_add(1, std::memory_order_relaxed);
     } else {
         counters->real.fetch_add(1, std::memory_order_relaxed);
+    }
+    {
+        LARGE_INTEGER now{};
+        LARGE_INTEGER frequency{};
+        QueryPerformanceCounter(&now);
+        QueryPerformanceFrequency(&frequency);
+        const int64_t previous = counters->lastPresentQpc.exchange(now.QuadPart);
+        if (previous != 0 && frequency.QuadPart > 0) {
+            const int64_t micros = (now.QuadPart - previous) * 1000000 / frequency.QuadPart;
+            counters->intervalSumUs.fetch_add(micros, std::memory_order_relaxed);
+            counters->intervalCount.fetch_add(1, std::memory_order_relaxed);
+            if (micros < 5000) counters->fastIntervals.fetch_add(1, std::memory_order_relaxed);
+            int64_t observed = counters->maxIntervalUs.load(std::memory_order_relaxed);
+            while (micros > observed &&
+                   !counters->maxIntervalUs.compare_exchange_weak(observed, micros, std::memory_order_relaxed)) {
+            }
+        }
     }
     if (params->currentUI.resource != nullptr || params->commandList == nullptr ||
         params->outputSwapChainBuffer.resource == nullptr || params->currentBackBuffer.resource == nullptr) {
@@ -208,6 +244,17 @@ ComPtr<ID3D12Resource> makeTexture(ID3D12Device* device, UINT width, UINT height
     return resource;
 }
 
+void transition(ID3D12GraphicsCommandList* list, ID3D12Resource* resource, D3D12_RESOURCE_STATES before,
+                D3D12_RESOURCE_STATES after) {
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = resource;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = before;
+    barrier.Transition.StateAfter = after;
+    list->ResourceBarrier(1, &barrier);
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -223,6 +270,9 @@ int wmain(int argc, wchar_t** argv) {
     }
     bool upscaleMode = argc > 3 && _wcsicmp(argv[3], L"upscale") == 0;
     const bool pipelined = argc > 4 && _wcsicmp(argv[4], L"pipelined") == 0;
+    const bool motionMode = argc > 5 && _wcsicmp(argv[5], L"motion") == 0;
+    const UINT frames = motionMode ? 24u : kProbeFrames;
+    const UINT lastRealLeft = kMotionStartX + kMotionStep * (frames - 1);
     const UINT renderWidth = upscaleMode ? 1920u : kProbeWidth;
     const UINT renderHeight = upscaleMode ? 1080u : kProbeHeight;
     const FfxApiRect2D generationRect = upscaleMode
@@ -444,8 +494,10 @@ int wmain(int argc, wchar_t** argv) {
     PresentCounters counters{};
     uint64_t prepareFailures = 0, configureFailures = 0, dispatchFailures = 0, queryFailures = 0, presentFailures = 0;
     uint64_t preparedFrames = 0;
+    ID3D12Resource* lastInterpolationTarget = nullptr;
+    ComPtr<ID3D12Resource> lastRealBackBuffer;
 
-    for (UINT frame = 0; frame < kProbeFrames; ++frame) {
+    for (UINT frame = 0; frame < frames; ++frame) {
         if (FAILED(allocator->Reset())) break;
         list->Reset(allocator.Get(), nullptr);
 
@@ -459,11 +511,23 @@ int wmain(int argc, wchar_t** argv) {
         toTarget.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
         toTarget.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
         list->ResourceBarrier(1, &toTarget);
-        const float shade = float(frame % 60) / 60.0f;
-        const float clear[4] = {shade, 0.25f, 1.0f - shade, 1.0f};
         const D3D12_CPU_DESCRIPTOR_HANDLE rtv{
             rtvHeap->GetCPUDescriptorHandleForHeapStart().ptr + size_t(backBufferIndex) * rtvIncrement};
-        list->ClearRenderTargetView(rtv, clear, 0, nullptr);
+        if (motionMode) {
+            // Static black background plus one white square that advances a
+            // fixed number of pixels per frame.
+            const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+            const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+            list->ClearRenderTargetView(rtv, black, 0, nullptr);
+            const LONG left = LONG(kMotionStartX + kMotionStep * frame);
+            const D3D12_RECT square{left, LONG(kMotionTop), left + LONG(kMotionSize),
+                                    LONG(kMotionTop + kMotionSize)};
+            list->ClearRenderTargetView(rtv, white, 1, &square);
+        } else {
+            const float shade = float(frame % 60) / 60.0f;
+            const float clear[4] = {shade, 0.25f, 1.0f - shade, 1.0f};
+            list->ClearRenderTargetView(rtv, clear, 0, nullptr);
+        }
         std::swap(toTarget.Transition.StateBefore, toTarget.Transition.StateAfter);
         list->ResourceBarrier(1, &toTarget);
 
@@ -479,7 +543,9 @@ int wmain(int argc, wchar_t** argv) {
         guidance[0].Transition.pResource = motionTexture.Get();
         guidance[1].Transition.pResource = depthTexture.Get();
         list->ResourceBarrier(2, guidance);
-        const float motion[4] = {4.0f, 0.0f, 0.0f, 0.0f};
+        // Constant motion matching the square: FSR reprojects "previous =
+        // current + mv", so +x is where the content was one frame ago.
+        const float motion[4] = {motionMode ? float(kMotionStep) : 4.0f, 0.0f, 0.0f, 0.0f};
         const float depth = 0.5f;
         list->ClearUnorderedAccessViewFloat(uavHeap->GetGPUDescriptorHandleForHeapStart(),
             {uavHeap->GetCPUDescriptorHandleForHeapStart().ptr}, motionTexture.Get(), motion, 0, nullptr);
@@ -548,8 +614,10 @@ int wmain(int argc, wchar_t** argv) {
         queryResult = functions.Query(&swapchainContext, &queryTexture.header);
         if (queryResult != FFX_API_RETURN_OK) ++queryFailures;
 
-        const auto dispatchResult = functions.Dispatch(&fgContext, &dispatch.header);
-        if (dispatchResult != FFX_API_RETURN_OK) ++dispatchFailures;
+    const auto dispatchResult = functions.Dispatch(&fgContext, &dispatch.header);
+    if (dispatchResult != FFX_API_RETURN_OK) ++dispatchFailures;
+    lastInterpolationTarget = static_cast<ID3D12Resource*>(dispatch.outputs[0].resource);
+    lastRealBackBuffer = backBuffer;
         if (frame == 0) {
             std::printf("[fsr-probe] frame0 prepare=%s configure=%s dispatch=%s interpCommandList=%p interpTexture=%p\n",
                         resultName(prepareResult), resultName(configureResult), resultName(dispatchResult),
@@ -570,11 +638,124 @@ int wmain(int argc, wchar_t** argv) {
         WaitForSingleObject(fenceEvent, pipelined ? 0 : 5000);
     }
 
-    std::printf("[fsr-probe] frames=%u requestedGenerated=%u prepared=%llu real=%llu generated=%llu\n", kProbeFrames,
+    std::printf("[fsr-probe] frames=%u requestedGenerated=%u prepared=%llu real=%llu generated=%llu\n", frames,
                 generatedPerFrame,
                 static_cast<unsigned long long>(preparedFrames),
                 static_cast<unsigned long long>(counters.real.load()),
                 static_cast<unsigned long long>(counters.generated.load()));
+
+    // Motion analysis: where does the square sit in the interpolation target?
+    bool motionProven = false;
+    if (motionMode && lastInterpolationTarget != nullptr && lastRealBackBuffer != nullptr) {
+        // Let the provider finish its presentation work before reading its
+        // interpolation target back.
+        ffxDispatchDescFrameGenerationSwapChainWaitForPresentsDX12 wait{};
+        wait.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_WAIT_FOR_PRESENTS_DX12;
+        functions.Dispatch(&swapchainContext, &wait.header);
+        queue->Signal(fence.Get(), 1);
+        fence->SetEventOnCompletion(1, fenceEvent);
+        WaitForSingleObject(fenceEvent, 10000);
+
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+        UINT rows = 0;
+        UINT64 rowSize = 0, total = 0;
+        const D3D12_RESOURCE_DESC targetDesc = lastInterpolationTarget->GetDesc();
+        device->GetCopyableFootprints(&targetDesc, 0, 1, 0, &footprint, &rows, &rowSize, &total);
+        ComPtr<ID3D12Resource> motionReadback;
+        D3D12_HEAP_PROPERTIES readHeap{};
+        readHeap.Type = D3D12_HEAP_TYPE_READBACK;
+        D3D12_RESOURCE_DESC readDesc{};
+        readDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        readDesc.Width = total;
+        readDesc.Height = 1;
+        readDesc.DepthOrArraySize = 1;
+        readDesc.MipLevels = 1;
+        readDesc.Format = DXGI_FORMAT_UNKNOWN;
+        readDesc.SampleDesc.Count = 1;
+        readDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        bool readbackReady = SUCCEEDED(device->CreateCommittedResource(
+            &readHeap, D3D12_HEAP_FLAG_NONE, &readDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+            IID_PPV_ARGS(&motionReadback)));
+        if (readbackReady) {
+            // Copy the interpolation target and the last real back buffer into
+            // the readback buffer, one at a time.
+            // The interpolation target holds the frame generated between the
+            // last two real frames, so the square should sit half a step behind
+            // the last rendered position.
+            int interpolatedLeft = -1, interpolatedRight = -1, interpolatedWidth = 0;
+            double meanLuma = 0.0;
+            int minLuma = 255, maxLuma = 0;
+            uint64_t sampledPixels = 0;
+            for (int pass = 0; pass < 1 && readbackReady; ++pass) {
+                ID3D12Resource* source = lastInterpolationTarget;
+                if (FAILED(allocator->Reset())) break;
+                list->Reset(allocator.Get(), nullptr);
+                transition(list.Get(), source, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                D3D12_TEXTURE_COPY_LOCATION dst{};
+                dst.pResource = motionReadback.Get();
+                dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                dst.PlacedFootprint = footprint;
+                D3D12_TEXTURE_COPY_LOCATION src{};
+                src.pResource = source;
+                src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                src.SubresourceIndex = 0;
+                list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                transition(list.Get(), source, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                list->Close();
+                ID3D12CommandList* submit[] = {list.Get()};
+                queue->ExecuteCommandLists(1, submit);
+                queue->Signal(fence.Get(), 2 + pass);
+                fence->SetEventOnCompletion(2 + pass, fenceEvent);
+                WaitForSingleObject(fenceEvent, 10000);
+                void* mapped = nullptr;
+                if (FAILED(motionReadback->Map(0, nullptr, &mapped))) { readbackReady = false; break; }
+                const auto* pixels = static_cast<const uint8_t*>(mapped) + footprint.Offset;
+                const UINT row = kMotionTop + kMotionSize / 2;
+                const uint8_t* rowPixels = pixels + size_t(row) * footprint.Footprint.RowPitch;
+                for (UINT y = 0; y < uint32_t(footprint.Footprint.Height); y += 8) {
+                    const uint8_t* scanRow = pixels + size_t(y) * footprint.Footprint.RowPitch;
+                    for (UINT x = 0; x < uint32_t(footprint.Footprint.Width); x += 8) {
+                        const int green = scanRow[size_t(x) * 4 + 1];
+                        meanLuma += green;
+                        minLuma = std::min(minLuma, green);
+                        maxLuma = std::max(maxLuma, green);
+                        ++sampledPixels;
+                    }
+                }
+                int left = -1, right = -1;
+                for (UINT x = 0; x < kProbeWidth; ++x) {
+                    const bool bright = rowPixels[size_t(x) * 4 + 1] > 128;
+                    if (bright && left < 0) left = int(x);
+                    if (bright) right = int(x);
+                }
+                motionReadback->Unmap(0, nullptr);
+                interpolatedLeft = left;
+                if (right >= 0) interpolatedWidth = right - left + 1;
+                interpolatedRight = right;
+            }
+            if (sampledPixels > 0) meanLuma /= double(sampledPixels);
+            // Interpolated edges are softer than the cleared square, so compare
+            // square CENTRES: that is scale independent and is what "the frame
+            // sits at the temporal midpoint" actually means.
+            const double interpolatedCenter = interpolatedLeft >= 0 && interpolatedRight > interpolatedLeft
+                ? (interpolatedLeft + interpolatedRight) / 2.0 : -1.0;
+            const double realCenter = double(lastRealLeft) + double(kMotionSize) / 2.0;
+            const double previousCenter = realCenter - double(kMotionStep);
+            const double expected = (realCenter + previousCenter) / 2.0;
+            const bool midpoint = interpolatedCenter >= 0.0 && std::abs(interpolatedCenter - expected) <= 4.0;
+            const bool notDuplicate = interpolatedCenter >= 0.0 &&
+                                      std::abs(interpolatedCenter - realCenter) > double(kMotionStep) / 4.0;
+            const bool notOlderFrame = interpolatedCenter >= 0.0 &&
+                                       std::abs(interpolatedCenter - previousCenter) > double(kMotionStep) / 4.0;
+            motionProven = midpoint && notDuplicate && notOlderFrame;
+            std::printf("[fsr-probe] motion: realCenter=%.1f previousCenter=%.1f expectedMidpoint=%.1f "
+                        "interpolatedCenter=%.1f (left=%d width=%d) meanLuma=%.2f min=%d max=%d "
+                        "midpoint=%d notDuplicate=%d notOlderFrame=%d\n",
+                        realCenter, previousCenter, expected, interpolatedCenter, interpolatedLeft,
+                        interpolatedWidth, meanLuma, minLuma, maxLuma, midpoint ? 1 : 0, notDuplicate ? 1 : 0,
+                        notOlderFrame ? 1 : 0);
+        }
+    }
     std::printf("[fsr-probe] failures prepare=%llu configure=%llu dispatch=%llu query=%llu present=%llu callback=%llu\n",
                 static_cast<unsigned long long>(prepareFailures),
                 static_cast<unsigned long long>(configureFailures),
@@ -582,14 +763,24 @@ int wmain(int argc, wchar_t** argv) {
                 static_cast<unsigned long long>(queryFailures),
                 static_cast<unsigned long long>(presentFailures),
                 static_cast<unsigned long long>(counters.callbackFailures.load()));
+    if (counters.intervalCount.load() > 0) {
+        const double meanMs = double(counters.intervalSumUs.load()) / double(counters.intervalCount.load()) / 1000.0;
+        std::printf("[fsr-probe] cadence: intervals=%llu mean=%.2fms max=%.2fms fast(<5ms)=%llu (provider submission pacing, not measured scanout)\n",
+                    static_cast<unsigned long long>(counters.intervalCount.load()), meanMs,
+                    double(counters.maxIntervalUs.load()) / 1000.0,
+                    static_cast<unsigned long long>(counters.fastIntervals.load()));
+    }
 
     // Ground truth: the swapchain context reports how many frames it actually
     // presented, so require the requested multiplier to be reached.
-    const uint64_t expectedGenerated = uint64_t(kProbeFrames - 1) * generatedPerFrame;
+    const uint64_t expectedGenerated = uint64_t(frames - 1) * generatedPerFrame;
     const bool generatedFrames = counters.generated.load() >= expectedGenerated;
     const bool clean = prepareFailures == 0 && configureFailures == 0 && dispatchFailures == 0 &&
                        queryFailures == 0 && presentFailures == 0 && counters.callbackFailures.load() == 0;
     if (fenceEvent) CloseHandle(fenceEvent);
+    // Swapchain buffers belong to the proxy: drop those references before the
+    // context goes away or the release walks into freed memory.
+    lastRealBackBuffer.Reset();
     list.Reset();
     allocator.Reset();
     // The proxy swapchain is owned by its context: drop our reference before
@@ -621,6 +812,10 @@ int wmain(int argc, wchar_t** argv) {
     DestroyWindow(hwnd);
     FreeLibrary(loader);
 
+    if (motionMode && !motionProven) {
+        std::printf("[fsr-probe] VERDICT generated frames reached the display path but the motion check did not prove interpolation\n");
+        return 1;
+    }
     if (clean && generatedFrames) {
         std::printf("[fsr-probe] VERDICT generated frames reached the present callback on this adapter\n");
         return 0;
