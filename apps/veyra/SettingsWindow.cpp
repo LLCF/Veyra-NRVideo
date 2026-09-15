@@ -121,8 +121,8 @@ bool read(engine::EnhancementSettings& s,bool allPages=false){s=enhancementEnabl
         wchar_t offset[32]{};GetWindowTextW(item(217),offset,32);wchar_t* offsetEnd=nullptr;const auto parsed=wcstol(offset,&offsetEnd,10);
         if(offsetEnd==offset||*offsetEnd||parsed<-250||parsed>250){message(L"声音偏移须为 -250 至 250 ms");return false;}s.audioOffsetMs=int(parsed);
         for(int j=0;j<3;++j)if(GetPropW(item(730+j),L"veyra.selected")){s.srTarget=static_cast<pipeline::SrTarget>(j);break;}
-        if(s.frameGenerationBackend==engine::FrameGenerationBackend::XeSS){
-            const int choices=multiplierChoiceCount(engine::FrameGenerationBackend::XeSS);
+        if(engine::presentSinkFrameGeneration(s.frameGenerationBackend)){
+            const int choices=multiplierChoiceCount(s.frameGenerationBackend);
             const size_t index=size_t(std::clamp(choices-1,1,int(engine::kFgMultiplierChoiceCount)-1));
             s.multiplier=std::min(s.multiplier,engine::kFgMultiplierChoices[index]);
         }
