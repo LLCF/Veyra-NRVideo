@@ -1,5 +1,18 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-16 帧生成 / FSR / 杜比：隔离分支夜间施工（未合并 main）
+
+用户要求"开工前创建 GIT 存档、建立隔离区分支、所有操作在隔离区进行、人工验收合格前不允许合并 main"。已建 tag `checkpoint/pre-framegen-fsr-dolby-2026-09-16`（main `693db07`）与分支 `codex/framegen-fsr-dolby-20260916`。
+
+本轮完成并实测：
+
+- **DLSS 6X**（提交 `35dd632`）：生成池 3→5/parity、`FrameBatch` 4→6、present SRV 堆 8→12、DLSSG 后端上限 3→5、倍率 1..6；新增能力驱动的倍率 UI 与"超上限拒绝/按上限降级并提示"。实测 RTX 5070：`--fg-multiplier 6` → `multiFrameMax=5`、445 真帧 / 2215 生成帧、exit 0；模拟 40 系上限（`VEYRA_TEST_FG_MULTIFRAME_MAX=1`）→ 4X 请求降级为 2X 且保留补帧。UI 合同 PASS、修复合同 146 项 0 失败、预设 48 组 PASS。
+- **XeSS MFG 解锁**（提交 `4124a9d`）：移植 OptiScaler（GPL-3.0，`70676c5f`）五处补丁到 `XessMfgUnlock`；模块身份（大小 + SHA-256 + PE 标识）与逐字节校验、事务安装、回读校验、上下文销毁后回滚；`XessPresenter` 接入真实上限查询与 `SetNumInterpolatedFrames`。DLL 审计五处原始字节全匹配；实测 RTX 5070 `--fg-xess --fg-multiplier 4` → `maxInterpolatedFrames=3`、`framesPresented=4`、563 真帧 / 1677 生成帧、exit 0、`rolled back 5/5`；归属写入 `THIRD_PARTY_NOTICES.md`。
+- **杜比位流探测 + 40 系实验开关**（提交 `e68b79d`）：采集音频 subtype 分类与每设备汇总；参考采集卡实测 `bitstream types=0 [none] pcmTypes=15`，证明该设备硬件层不提供杜比位流。`VEYRA_TEST_FG_FORCE_MULTIPLIER=1`（仅测试）供 4060 机器直接请求 3X/4X，观察真实插帧/重复帧/黑屏。
+- delivery 短测 23/23 PASS、48.9 秒（`logs/delivery/89286afbb28d4785925ae3772e0409c4`），EXE SHA256 `9B8EA46AECF7A95E99472B7A31D60F9B5B9D8008D7B6BE0966C261095FDD0263`。
+
+未完成（如实记录）：XeSS 节奏 hook（`XeFGPacing`）未移植、>2X 生成帧间距未测量；40 系 DLSS MFG 解锁（RenoDX 的架构比较 + PTX 中点修正 + flip metering）未实现；30 系原生 2X 未开始；AMD FSR（帧生成 4.0.x / 超分）未开始（SDK 2.3.0 未下载）；杜比直通/解码未实现。完整状态、验收清单与边界见 [隔离分支施工状态](FRAMEGEN_FSR_DOLBY_STATUS_2026-09-16.md)。未合并 main、未推送、未发布。
+
 ## 2026-09-15 采集卡直播窗口标题修复（第三方工具“识别不到 Veyra”）
 
 用户反馈除 OBS 外各平台直播工具无法识别“正在采集中的 Veyra”，且顺序敏感：先抓到窗口再开采集卡正常，先开采集卡再抓就抓不到。实机取证确认根因是 Veyra 自己：采集卡来源 `capture:`/`capture2:` 连接串被当文件名写进主窗口标题，实测标题长 776 字符（`Veyra — capture2:<十六进制设备路径>:...`），空闲/播放文件时为正常短名；直播伴侣日志把该标题截断到 259 字符后参与来源命名，其包内前端以 `${exe} ${title}` 命名来源。同场会话的 mediasdk_server 日志显示“采集卡已运行再添加 game 来源”的 hook 通路实际成功（`Load Shared Texture Success, size: 842 x 494`、`OnAutoSwitchMode from Window to Game`、GameSource 连续 60 秒以上有数据），因此本轮不做换链/画面的猜测性改动。
