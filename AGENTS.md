@@ -1,5 +1,9 @@
 # Veyra 项目 Agent 执行规则
 
+> 2026-09-16 用户决定：**有成熟开源实现就直接搬过来改造，不要重复造轮子**。XeSS MFG 解锁（OptiScaler 的 XeFGUnlock/XeFGPacing，经 Magpie fork 适配）、40 系 DLSS MFG 解锁（RTX40MFG-Unlock、MFGAdaUnlock-RenoDx，MIT）、30 系原生 2X（dlssg_for_sm86）、AMD FSR 帧生成（FidelityFX SDK 的 Frame Interpolation / AMD FSR Frame Generation）等能力，一律**优先移植现成开源实现并接入 Veyra**，不做等价重写、不另起炉灶。搬运要求：逐项记录来源仓库、固定提交、许可证、被改动的文件与改动说明，写入 `THIRD_PARTY_NOTICES.md` 与对应源码；Veyra 自身为 GPLv3，与本批 MIT / GPL-3.0 来源兼容，禁止只改名不标注。对 NVIDIA / Intel 运行库只允许**进程内修改**，不改磁盘文件、不重签名、不伪装身份。移植后仍按本次改动范围做真实验证，未验证项如实报告，不得用上游项目名替代本机证据。计划见 `docs/FRAMEGEN_FSR_DOLBY_PLAN_2026-09-16.md`。
+
+> 2026-09-16 用户追加决定：FSR 超分按显卡分档——**AMD 卡开放 FSR 4.1（ML）；N 卡只提供 FSR 2 / FSR 3.1，不开放 FSR 4.1**（N 卡跑 FSR4 目前无可用实现，仅列入观察名单，成熟后按"有开源就直接搬"处理）。AMD 补帧**必做且优先用新版**：先接 AMD FSR SDK 2.3.0 的 `AMD FSR Frame Generation 4.0.1`（ML），不支持的显卡回退本地 SDK 1.1.4 的 3.1.x。40 系 DLSS MFG 解锁已获条件授权：**只要确认不影响 50 系即可施工**（50 系走原生路径、不安装任何补丁）。
+
 > 2026-09-14 用户授权实施 HDR 全增强与文件/采集 5.1，PS5 串流真实多声道不在本次范围。按 docs/HDR_ALL_EFFECTS_MULTICHANNEL_RESEARCH_PLAN_2026-09-14.md 施工，经过显式颜色合同扩展旧 SDR 边界；HDR 基底保留合成不宣称 NR 模型原生 HDR 推理。默认效果全关、共享处理图、直接 NGX、现有运行组件身份及 patched FFmpeg 保持。未授权新发布。
 
 > 2026-09-14 用户授权发布1.1.1到Likely7/Veyra-NRVideo，包含RTX30 NR实验选项和首次效果全关。发布范围新增用户已指定的NeuralScreen1.8.2 NR原件：DCC0DC2414AEDEC4A8E084647070383BE068554042587180C20C784D4772D36F / 165840496 bytes / 310.8.0.0 / HashMismatch，独立放在Release的runtime/experimental/nr-ampere/，逐文件manifest记录；原七组件与patched FFmpeg沿用。此授权扩展上次仅本地范围，不允许修改DLL或进入源码Git。RTX30实卡尚未验收，不能宣称全型号成功。更新双语README、完整便携包和对应源码；本轮未请求关机。
@@ -137,7 +141,7 @@ renodx-dlss5-1.addon64
 
 ## 许可证与分发红线
 
-- Magpie 是 GPLv3。闭源 Veyra 不得复制其源码或做机械改名；只可把其公开行为当作黑盒/接口参考后独立实现。若要直接复用，先让用户明确接受 GPLv3 以及对应源码义务。
+- Magpie（含 `SAOG0721/Magpie` experimental fork）与 OptiScaler 均为 GPLv3，Veyra 自身也是 GPLv3，**可以直接移植其源码**；义务是逐项标注来源、固定提交、许可证与改动，并随源码/对应源码包提供。禁止只做机械改名而不标注来源。第三方 MIT 项目（RTX40MFG-Unlock、MFGAdaUnlock-RenoDx、dlssg_for_sm86 等）同样逐项标注。
 - `video2dlssnr` 当前仓库未提供许可证；不得复制代码。`DLSS5-Feeder`、`dlss5-infinity-studio` 和 `dlss5-visual-enhancer` 只能按各自许可证与第三方 notices 取用；默认只借鉴公开行为与架构，任何代码复用都要在 `THIRD_PARTY_NOTICES` 逐项归因。
 - NVIDIA SDK/runtime 的分发权不得想当然地扩大。除“Release Runtime Pack 规则”列出的、用户明确批准并完成身份校验的 Release 资产外，默认只做本机研发；`runtime_local/`、`third_party_local/`、抓帧和 SDK 压缩包必须 gitignore。
 - NVIDIA Video Codec SDK 头文件/sample 同样需要单独接受 EULA；系统 `nvEncodeAPI64.dll` 不复制进用户包。没有完成第三方分发审计前，不得把产品宣传为 NVIDIA 官方认证、合作或支持。
