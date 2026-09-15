@@ -54,6 +54,10 @@ class NvOfSession;
 namespace veyra::pipeline {
 struct ColorDescription;
 
+// One generated-frame texture per (parity, subframe): 2 parities x 5 generated
+// frames = 6X multi-frame generation. Sized once, reused for every FG backend.
+inline constexpr unsigned kGeneratedPoolSlots=10;
+
 struct EnhanceGraphDesc {
     uint32_t sourceWidth = 0;
     uint32_t sourceHeight = 0;
@@ -142,7 +146,7 @@ public:
     bool nextFrameSlotAvailable()const {
         const unsigned slot=unsigned(realFrameIndex_%2);
         if(!realLeases_[slot].expired())return false;
-        for(unsigned i=slot;i<6;i+=2)if(!generatedLeases_[i].expired())return false;
+        for(unsigned i=slot;i<kGeneratedPoolSlots;i+=2)if(!generatedLeases_[i].expired())return false;
         return true;
     }
     // Nonblocking. The scheduler polls at a GPU-ready/deadline boundary; no
@@ -278,8 +282,8 @@ private:
     ComPtr<ID3D12Resource> confTex_;
     ComPtr<ID3D12Resource> flowTex_;
     ComPtr<ID3D12Resource> depthTex_;
-    ComPtr<ID3D12Resource> genFrame_[6];
-    ComPtr<ID3D12Resource> fgDisable_[6],fgDisableReadback_[6],fgDisableInit_;
+    ComPtr<ID3D12Resource> genFrame_[kGeneratedPoolSlots];
+    ComPtr<ID3D12Resource> fgDisable_[kGeneratedPoolSlots],fgDisableReadback_[kGeneratedPoolSlots],fgDisableInit_;
     ComPtr<ID3D12Resource> nrZeroMotion_;
     ComPtr<ID3D12Resource> nrZeroDepth_;
     ComPtr<ID3D12Resource> nvofRawTex_;
@@ -322,7 +326,7 @@ private:
     // Per-run state.
     uint64_t realFrameIndex_ = 0;
     uint64_t epoch_ = 0;
-    std::weak_ptr<FrameLease> realLeases_[2],generatedLeases_[6];
+    std::weak_ptr<FrameLease> realLeases_[2],generatedLeases_[kGeneratedPoolSlots];
     uint32_t nextListSlot_ = 0;
     uint64_t uploadFences_[2] = {};
     // FFmpeg may recycle a hardware surface as soon as its AVFrame is freed.

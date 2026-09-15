@@ -7,6 +7,10 @@
 #include "veyra/pipeline/ResolutionPlan.h"
 namespace veyra::engine {
 enum class FrameGenerationBackend { Dlss, XeSS };
+// Multipliers the UI offers. 5X is intentionally absent: the DLSS runtime
+// exposes 2/3/4/6 and MFG buyers pick from those; 1 = generation off.
+inline constexpr uint32_t kFgMultiplierChoices[]={1,2,3,4,6};
+inline constexpr size_t kFgMultiplierChoiceCount=sizeof(kFgMultiplierChoices)/sizeof(kFgMultiplierChoices[0]);
 enum class NrRuntime { Original, Community, Ampere };
 constexpr std::string_view nrRuntimeName(NrRuntime runtime) {
     switch(runtime) {
@@ -114,7 +118,7 @@ struct EnhancementSettings {
         if(videoSrQuality>4)return "invalid video SR quality";
         if(!pipeline::validSrTarget(srTarget))return "invalid SR target";
         if(opticalFlowBackend!=OpticalFlowBackend::Nvidia&&opticalFlowBackend!=OpticalFlowBackend::AmdFidelityFx&&opticalFlowBackend!=OpticalFlowBackend::GpuDis)return "invalid optical flow backend";
-        if(multiplier<1||multiplier>4)return "unsupported multiplier";
+        if(multiplier<1||multiplier>6)return "unsupported multiplier";
         if(!pipeline::validNrSizePolicy(nrPolicy))return "invalid NR size policy";
         if(flow<FlowQuality::Performance||flow>FlowQuality::Quality||content<ContentRate::Transport||content>ContentRate::Capture60To30)return "invalid flow/content mode";
         return {};

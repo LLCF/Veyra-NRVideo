@@ -177,7 +177,9 @@ int main(){
     check(engine::frameGenerationBackendName(engine::FrameGenerationBackend::Dlss)=="DLSS"&&engine::frameGenerationBackendName(engine::FrameGenerationBackend::XeSS)=="XeSS","frame-generation backend names identify every backend");
     check(engine::opticalFlowBackendName(engine::OpticalFlowBackend::Nvidia)=="NVIDIA_NVOF"&&engine::opticalFlowBackendName(engine::OpticalFlowBackend::AmdFidelityFx)=="AMD_FIDELITYFX_OF","optical-flow backend names identify every backend");
     s.model.intensity=std::numeric_limits<float>::quiet_NaN();check(!s.validate().empty(),"reject NaN transaction");
-    s={};s.multiplier=5;check(!s.validate().empty(),"reject unsupported multiplier");
+    s={};s.multiplier=5;check(s.validate().empty(),"5X multiplier accepted by the API guard (6X ceiling)");
+    s={};s.multiplier=6;check(s.validate().empty(),"6X multiplier accepted");
+    s={};s.multiplier=7;check(!s.validate().empty(),"reject multiplier above the 6X ceiling");
     check(pipeline::FrameBatch::interpolate(-200000,0,1,2)==-100000,"negative PTS midpoint");
     check(pipeline::FrameBatch::interpolate(0,200000,1,3)==66667&&pipeline::FrameBatch::interpolate(0,200000,2,3)==133333,"rational 3X PTS within tick");
     pipeline::FrameBatch b;b.identity={1,2,3};pipeline::BatchFrame f;f.identity=b.identity;f.pts100ns=1;b.append(f);f.identity.settingsRevision=3;

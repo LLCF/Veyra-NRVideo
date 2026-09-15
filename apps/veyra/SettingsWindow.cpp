@@ -55,6 +55,19 @@ void syncProtection(const engine::ProtectionSettings& protection){
     putText(206,(L"NR保护区域 · "+std::to_wstring(count)+L"/4").c_str());
 }
 void selectDiscrete(int group,int value){for(int j=0;j<(group==0?3:2);++j){auto h=item(700+group*10+j);if(j==value)SetPropW(h,L"veyra.selected",HANDLE(1));else RemovePropW(h,L"veyra.selected");InvalidateRect(h,nullptr,FALSE);}}
+// Multiplier list is capability-driven: the DLSS runtime reports how many
+// generated frames it supports (1 = 2X only on Ada, 5 = 6X on Blackwell), and
+// the XeSS unlock path raises its own ceiling. Unknown capability offers the
+// full list; the engine gate rejects an unsupported request with a message.
+int multiplierChoiceCount(engine::FrameGenerationBackend backend){
+    int cap=6;
+    if(backend==engine::FrameGenerationBackend::XeSS)cap=2; // raised by the MFG unlock path
+    else if(controller){const auto snapshot=controller->snapshot();if(snapshot.fgMultiFrameMax>0)cap=std::clamp(snapshot.fgMultiFrameMax+1,2,6);}
+    int count=1;
+    for(size_t i=1;i<engine::kFgMultiplierChoiceCount;++i)if(int(engine::kFgMultiplierChoices[i])<=cap)++count;
+    return count;
+}
+int multiplierChoiceIndex(uint32_t multiplier){for(size_t i=0;i<engine::kFgMultiplierChoiceCount;++i)if(engine::kFgMultiplierChoices[i]==multiplier)return int(i);return 0;}
 void populate(engine::EnhancementSettings s){
     populating=true;
     float v[]={s.model.intensity,s.model.tone,s.model.structure,s.model.skin,float(s.model.style),float(s.model.autoMask),float(s.model.uiCorrection),s.residual.total,s.residual.darken,s.residual.brighten,s.residual.color,s.residual.luminance};
@@ -63,9 +76,9 @@ void populate(engine::EnhancementSettings s){
     check(200,enhancementEnabled&&s.nr?BST_CHECKED:BST_UNCHECKED);
     check(201,enhancementEnabled&&s.sr?BST_CHECKED:BST_UNCHECKED);
     for(int j=0;j<3;++j){auto h=item(730+j);if(j==int(s.srTarget))SetPropW(h,L"veyra.selected",HANDLE(1));else RemovePropW(h,L"veyra.selected");InvalidateRect(h,nullptr,FALSE);}
-    const int multiplierCount=s.frameGenerationBackend==engine::FrameGenerationBackend::XeSS?2:4;
-    if(send(202,CB_GETCOUNT)!=multiplierCount){send(202,CB_RESETCONTENT);const wchar_t* choices[]={L"关闭补帧",L"2X · 一张中间帧",L"3X · 两张中间帧",L"4X · 三张中间帧"};for(int i=0;i<multiplierCount;++i)send(202,CB_ADDSTRING,0,LPARAM(choices[i]));}
-    send(207,CB_SETCURSEL,s.videoSrQuality,0);send(202,CB_SETCURSEL,s.multiplier-1,0);
+    const int multiplierCount=multiplierChoiceCount(s.frameGenerationBackend);
+    if(send(202,CB_GETCOUNT)!=multiplierCount){send(202,CB_RESETCONTENT);const wchar_t* choices[]={L"关闭补帧",L"2X · 一张中间帧",L"3X · 两张中间帧",L"4X · 三张中间帧",L"6X · 五张中间帧"};for(int i=0;i<multiplierCount;++i)send(202,CB_ADDSTRING,0,LPARAM(choices[i]));}
+    send(207,CB_SETCURSEL,s.videoSrQuality,0);send(202,CB_SETCURSEL,multiplierChoiceIndex(s.multiplier),0);
     send(208,CB_SETCURSEL,int(s.frameGenerationBackend),0);send(203,CB_SETCURSEL,int(s.nrPolicy),0);
     send(218,CB_SETCURSEL,int(s.nrRuntime));
     check(219,s.captureCompatible?BST_CHECKED:BST_UNCHECKED);check(220,s.lowLatency?BST_CHECKED:BST_UNCHECKED);
@@ -84,7 +97,7 @@ bool read(engine::EnhancementSettings& s,bool allPages=false){s=enhancementEnabl
     s.model={v[0],v[1],v[2],v[3],int(v[4]),int(v[5]),int(v[6])};s.residual={v[7],v[8],v[9],v[10],v[11]};if(enhancementEnabled){s.nr=checked(200)==BST_CHECKED;s.sr=checked(201)==BST_CHECKED;}s.videoSrQuality=uint32_t(send(207,CB_GETCURSEL,0,0));s.nrPolicy=static_cast<pipeline::NrSizePolicy>(send(203,CB_GETCURSEL,0,0));if(allPages){
         const auto multiplier=send(202,CB_GETCURSEL,0,0),generation=send(208,CB_GETCURSEL,0,0),flowBackend=send(209,CB_GETCURSEL,0,0),flowQuality=send(204,CB_GETCURSEL,0,0),content=send(205,CB_GETCURSEL,0,0);
         if(multiplier==CB_ERR||generation==CB_ERR||flowBackend==CB_ERR||flowQuality==CB_ERR||content==CB_ERR){message(L"设置控件未完成初始化；未保存预设");return false;}
-        s.multiplier=uint32_t(multiplier+1);s.frameGenerationBackend=static_cast<engine::FrameGenerationBackend>(generation);s.opticalFlowBackend=static_cast<engine::OpticalFlowBackend>(flowBackend);s.amdFlowHalfResolution=checked(215)==BST_CHECKED;s.flow=static_cast<engine::FlowQuality>(flowQuality);s.content=static_cast<engine::ContentRate>(content);
+        s.multiplier=(multiplier>=0&&multiplier<int(engine::kFgMultiplierChoiceCount))?engine::kFgMultiplierChoices[multiplier]:1;s.frameGenerationBackend=static_cast<engine::FrameGenerationBackend>(generation);s.opticalFlowBackend=static_cast<engine::OpticalFlowBackend>(flowBackend);s.amdFlowHalfResolution=checked(215)==BST_CHECKED;s.flow=static_cast<engine::FlowQuality>(flowQuality);s.content=static_cast<engine::ContentRate>(content);
         s.audioSync=static_cast<engine::AudioSyncMode>(send(216,CB_GETCURSEL));
         s.nrRuntime=static_cast<engine::NrRuntime>(send(218,CB_GETCURSEL));
         s.captureCompatible=checked(219)==BST_CHECKED;s.lowLatency=checked(220)==BST_CHECKED;
@@ -99,7 +112,8 @@ bool read(engine::EnhancementSettings& s,bool allPages=false){s=enhancementEnabl
 bool liveField(int id){
     if(id==202){
         const auto index=send(id,CB_GETCURSEL);if(index==CB_ERR)return false;
-        const bool accepted=SendMessageW(GetParent(window),WM_APP+44,202,index+1)!=0;
+        const uint32_t requested=(index>=0&&index<int(engine::kFgMultiplierChoiceCount))?engine::kFgMultiplierChoices[index]:1;
+        const bool accepted=SendMessageW(GetParent(window),WM_APP+44,202,requested)!=0;
         populate(enhancementEnabled?controller->snapshot().desired:configuredSettings);
         message(accepted?L"已请求补帧；无需先开启NR。":L"总增强正在切换，请待当前事务完成。");return accepted;
     }

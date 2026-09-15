@@ -32,11 +32,13 @@ struct FrameBatch {
     uint64_t batchId=0;
     FrameIdentity identity;
     int64_t a100ns=0,b100ns=0;
-    std::array<BatchFrame,4> frames{};
+    // 6X multi-frame generation needs one real frame plus up to five generated
+    // frames in a single batch.
+    std::array<BatchFrame,6> frames{};
     uint32_t count=0;
     static int64_t interpolate(int64_t a,int64_t b,uint32_t j,uint32_t n) {
         // The application accepts at most one second between continuous endpoints.
-        if(n<2||n>4||j==0||j>=n||b<=a||a>INT64_MAX-10000000||b>a+10000000)
+        if(n<2||n>6||j==0||j>=n||b<=a||a>INT64_MAX-10000000||b>a+10000000)
             throw std::invalid_argument("invalid interpolation interval");
         const int64_t d=b-a;return a+(d/n)*j+((d%n)*j+n/2)/n;
     }

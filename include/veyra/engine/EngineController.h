@@ -57,6 +57,11 @@ struct PlayerSnapshot {
     uint64_t previewSkipped=0;
     double playbackSpeed=0;
     bool fgBudgetLimited=false,xessGenerationSuppressed=false;
+    // Runtime-reported DLSSG MultiFrameCountMax: 1 = 2X only, 5 = 6X.
+    // 0 = not queried yet (no session). The UI uses this to offer only the
+    // multipliers the active GPU can actually honour.
+    int fgMultiFrameMax=0;
+    bool fgCapabilityKnown=false;
     bool running=false,failed=false,image=false,capture=false,remotePlay=false;
     int remotePlayState=0; uint64_t remotePlaySkipped=0;
     bool remoteRecovering=false;unsigned remoteReconnectAttempts=0;std::wstring remoteRecoveryMessage;
@@ -105,5 +110,7 @@ private:
     std::atomic<float> volume_{1};uint64_t sessionId_=0;
     std::atomic<double> seekSeconds_{-1};
     std::atomic<int> comparisonMode_{0};std::atomic<bool> comparisonBase_{false};std::atomic<float> comparisonSplit_{.5f};
+    // Guarded by mutex_: DLSSG MultiFrameCountMax of the active session.
+    int fgMultiFrameMaxCap_=0;
 };
 }

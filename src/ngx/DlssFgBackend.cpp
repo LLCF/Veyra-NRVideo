@@ -224,7 +224,10 @@ bool DlssFgBackend::evaluate(ID3D12GraphicsCommandList* cmdList,
                              const EvalDesc& desc,
                              Status& status)
 {
-    if (handle_ == nullptr || desc.multiFrameCount<1 || desc.multiFrameCount>3 || desc.multiFrameIndex<1 || desc.multiFrameIndex>desc.multiFrameCount) {
+    // Up to five generated frames (6X). The graph validates the requested
+    // multiplier against the runtime's MultiFrameCountMax before creating the
+    // feature; this is only the absolute API-level guard.
+    if (handle_ == nullptr || desc.multiFrameCount<1 || desc.multiFrameCount>5 || desc.multiFrameIndex<1 || desc.multiFrameIndex>desc.multiFrameCount) {
         status = Status::InvalidArgument;
         return false;
     }

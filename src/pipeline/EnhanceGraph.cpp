@@ -139,7 +139,7 @@ bool EnhanceGraph::createResources()
     if(!fgDisableInit_)return false;
     void* initial=nullptr;if(FAILED(fgDisableInit_->Map(0,nullptr,&initial)))return false;
     *static_cast<uint32_t*>(initial)=1;fgDisableInit_->Unmap(0,nullptr);
-    for(unsigned i=0;i<6;++i){
+    for(unsigned i=0;i<kGeneratedPoolSlots;++i){
         D3D12_RESOURCE_DESC bd{};bd.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;bd.Width=4;bd.Height=1;bd.DepthOrArraySize=1;bd.MipLevels=1;bd.SampleDesc.Count=1;bd.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;bd.Flags=D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
         D3D12_HEAP_PROPERTIES hp{};hp.Type=D3D12_HEAP_TYPE_DEFAULT;
         HRESULT hr=context_.device()->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&bd,D3D12_RESOURCE_STATE_COMMON,nullptr,IID_PPV_ARGS(&fgDisable_[i]));
@@ -392,11 +392,26 @@ bool EnhanceGraph::initNgxFeatures()
         veyra::log::error("graph", "FG unavailable; fail closed");
         return false;
     }
-    if(desc_.enableFg&&(desc_.fgMultiplier<2||desc_.fgMultiplier>4||fgCaps.multiFrameCountMax<desc_.fgMultiplier-1)){veyra::log::error("graph","requested MFG multiplier unsupported");return false;}
-    fgCapsAvailable_ = fgCaps.available;
-    fgMultiFrameMax_ = fgCaps.multiFrameCountMax;
-    veyra::log::info("graph", std::format("FG capability available={} multiFrameMax={}",
-        fgCaps.available, fgCaps.multiFrameCountMax));
+        // Publish the capability before validating the request so a rejected
+        // multiplier still teaches the caller what this GPU supports.
+        fgCapsAvailable_ = fgCaps.available;
+        fgMultiFrameMax_ = fgCaps.multiFrameCountMax;
+        // Test-only capability override: lets the Ada (40-series) ceiling and the
+        // capability-driven UI/recovery paths be exercised on a 50-series host
+        // without touching the runtime. Never set by the product UI.
+        {
+            wchar_t overrideText[16]{};
+            if(GetEnvironmentVariableW(L"VEYRA_TEST_FG_MULTIFRAME_MAX",overrideText,16)>0){
+                const int forced=_wtoi(overrideText);
+                if(forced>=0&&forced<=5){
+                    fgMultiFrameMax_=forced;fgCaps.multiFrameCountMax=uint32_t(forced);
+                    veyra::log::warn("capability",std::format("test-only FG MultiFrameCountMax override={}",forced));
+                }
+            }
+        }
+        veyra::log::info("graph", std::format("FG capability available={} multiFrameMax={}",
+            fgCaps.available, fgCaps.multiFrameCountMax));
+        if(desc_.enableFg&&(desc_.fgMultiplier<2||desc_.fgMultiplier>6||fgCaps.multiFrameCountMax<desc_.fgMultiplier-1)){veyra::log::error("graph",std::format("requested MFG multiplier unsupported request={} maxGeneratedFrames={}",desc_.fgMultiplier,fgCaps.multiFrameCountMax));return false;}
     }
 
     if(nrEnabled_){
@@ -741,7 +756,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
     if(!realLeases_[parity].expired()||!generatedLeases_[parity].expired()){
         veyra::log::error("frame-pool",std::format("slot={} still leased; refusing overwrite, batch={}",parity,realFrameIndex_+1));return false;
     }
-    for(unsigned i=parity;i<6;i+=2)if(!generatedLeases_[i].expired()){veyra::log::error("frame-pool","generated subframe still leased; refusing overwrite");return false;}
+    for(unsigned i=parity;i<kGeneratedPoolSlots;i+=2)if(!generatedLeases_[i].expired()){veyra::log::error("frame-pool","generated subframe still leased; refusing overwrite");return false;}
     if (graphOff) {
         prevPtsMs_ = ptsMs;
         prevValid_ = true;
@@ -1381,7 +1396,7 @@ ID3D12Resource* EnhanceGraph::videoFrameResource(uint32_t slot) const
 
 ID3D12Resource* EnhanceGraph::generatedFrameResource(uint32_t slot) const
 {
-    return slot < 6 ? genFrame_[slot].Get() : nullptr;
+    return slot < kGeneratedPoolSlots ? genFrame_[slot].Get() : nullptr;
 }
 
 // ---------------------------------------------------------------------------
@@ -1442,7 +1457,7 @@ void EnhanceGraph::shutdown()
     for(unsigned i=0;i<2;++i){if(upRgb_[i]&&mappedRgb_[i])upRgb_[i]->Unmap(0,nullptr);mappedRgb_[i]=nullptr;upRgb_[i].Reset();}
     downsamplePass_={};residualPass_={};flowAdaptPass_={};
     nrInput_.Reset();residualRgba_.Reset();nrFlow_.Reset();baseFlow_.Reset();
-    for(unsigned i=0;i<6;++i){fgDisable_[i].Reset();fgDisableReadback_[i].Reset();generatedLeases_[i].reset();genFrame_[i].Reset();}for(auto& lease:realLeases_)lease.reset();fgDisableInit_.Reset();
+    for(unsigned i=0;i<kGeneratedPoolSlots;++i){fgDisable_[i].Reset();fgDisableReadback_[i].Reset();generatedLeases_[i].reset();genFrame_[i].Reset();}for(auto& lease:realLeases_)lease.reset();fgDisableInit_.Reset();
     encPass_ = ComputePass{};
     blitPass_ = ComputePass{};hdrVideoSrPass_={};
     yuvPass_ = ComputePass{};
