@@ -329,17 +329,45 @@ bool CaptureCardSource::connectDirectShowAudio(const SourceOpenDesc& desc){
     // commonly stereo first even when native 5.1 is available.
     auto releaseType=[](AM_MEDIA_TYPE* type){freeType(type);};
     using AudioType=std::unique_ptr<AM_MEDIA_TYPE,decltype(releaseType)>;
-    std::vector<AudioType> audioTypes;unsigned typeIndex=0;
-    for(;;){AM_MEDIA_TYPE* type=nullptr;if(types->Next(1,&type,nullptr)!=S_OK||!type)break;
-        AudioType owned(type,releaseType);sink::WavePcmFormat pcm;bool supported=false;
-        if(type->formattype==FORMAT_WaveFormatEx&&type->pbFormat)supported=sink::parseWavePcm(type->pbFormat,type->cbFormat,pcm);
+std::vector<AudioType> audioTypes;unsigned typeIndex=0;
+// Dolby/DTS bitstream capability probe: the capture card may expose AC-3 /
+// E-AC-3 (Dolby Digital Plus, includes Atmos over DD+) / TrueHD / DTS instead
+// of PCM. Veyra currently consumes PCM only, so a compressed stream is reported
+// here (and then ignored) instead of being silently mis-parsed. Dolby passthrough
+// work builds on this inventory.
+unsigned bitstreamTypeCount=0;std::string bitstreamSummary;
+auto bitstreamName=[](const GUID& subtype)->const char*{
+    switch(subtype.Data1){
+    case 0x00000092u:return "AC-3(SPDIF)";
+    case 0x00002000u:return "AC-3";
+    case 0x0000000Au:return "E-AC-3/DD+";
+    case 0x0000010Au:return "E-AC-3/DD+ Atmos";
+    case 0x0000000Cu:return "TrueHD/MLP";
+    case 0x00000008u:return "DTS";
+    case 0x0000000Bu:return "DTS-HD";
+    case 0x0000010Bu:return "DTS:X(E1)";
+    case 0x0000030Bu:return "DTS:X(E2)";
+    default:return nullptr;
+    }
+};
+for(;;){AM_MEDIA_TYPE* type=nullptr;if(types->Next(1,&type,nullptr)!=S_OK||!type)break;
+AudioType owned(type,releaseType);sink::WavePcmFormat pcm;bool supported=false;
+if(type->formattype==FORMAT_WaveFormatEx&&type->pbFormat)supported=sink::parseWavePcm(type->pbFormat,type->cbFormat,pcm);
+if(!supported){
+    const char* name=bitstreamName(type->subtype);
+if(name){
+    ++bitstreamTypeCount;if(!bitstreamSummary.empty())bitstreamSummary+=",";bitstreamSummary+=name;
+    log::info("capture-audio-bitstream",std::string("mediaType=")+std::to_string(typeIndex)+" subtype=0x"+std::format("{:08X}",unsigned(type->subtype.Data1))+" kind="+name+" (not consumed yet)");
+}
+}
         if(type->formattype==FORMAT_WaveFormatEx&&type->pbFormat&&type->cbFormat>=sizeof(WAVEFORMATEX)){
             const auto* wave=reinterpret_cast<const WAVEFORMATEX*>(type->pbFormat);
             log::info("capture-audio",std::format("mediaType={} major=0x{:08X} subtype=0x{:08X} tag={} channels={} mask=0x{:X} rate={} containerBits={} validBits={} floating={} pcm={}",typeIndex++,type->majortype.Data1,type->subtype.Data1,wave->wFormatTag,wave->nChannels,supported?pcm.layout.mask:0,wave->nSamplesPerSec,wave->wBitsPerSample,supported?pcm.validBits:0,supported&&pcm.floating?1:0,supported?1:0));
         }else log::info("capture-audio",std::format("mediaType={} major=0x{:08X} subtype=0x{:08X} format=0x{:08X} pcm=0",typeIndex++,type->majortype.Data1,type->subtype.Data1,type->formattype.Data1));
         if(supported)audioTypes.push_back(std::move(owned));
     }
-    if(audioTypes.empty()){log::warn("capture-audio","audio pin has no supported PCM media type");return false;}
+log::info("capture-audio-bitstream",std::format("device bitstream types={} [{}] pcmTypes={}",bitstreamTypeCount,bitstreamSummary.empty()?"none":bitstreamSummary,audioTypes.size()));
+if(audioTypes.empty()){log::warn("capture-audio","audio pin has no supported PCM media type");return false;}
     std::stable_sort(audioTypes.begin(),audioTypes.end(),[](const auto& a,const auto& b){
         sink::WavePcmFormat lhs{},rhs{};
         if(!sink::parseWavePcm(a->pbFormat,a->cbFormat,lhs)||!sink::parseWavePcm(b->pbFormat,b->cbFormat,rhs))return false;

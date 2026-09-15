@@ -411,7 +411,17 @@ bool EnhanceGraph::initNgxFeatures()
         }
         veyra::log::info("graph", std::format("FG capability available={} multiFrameMax={}",
             fgCaps.available, fgCaps.multiFrameCountMax));
-        if(desc_.enableFg&&(desc_.fgMultiplier<2||desc_.fgMultiplier>6||fgCaps.multiFrameCountMax<desc_.fgMultiplier-1)){veyra::log::error("graph",std::format("requested MFG multiplier unsupported request={} maxGeneratedFrames={}",desc_.fgMultiplier,fgCaps.multiFrameCountMax));return false;}
+        // Test-only research path for the Ada (40-series) MFG unlock: with
+        // VEYRA_TEST_FG_FORCE_MULTIPLIER=1 the reported capability no longer
+        // rejects the request, so a 40-series host can show whether the runtime
+        // generates real frames (or repeats/black) when the gate is bypassed at
+        // the caller. Never reachable from the product UI.
+        const bool forceAboveCapability=GetEnvironmentVariableW(L"VEYRA_TEST_FG_FORCE_MULTIPLIER",nullptr,0)>0;
+        const bool aboveCapability=desc_.enableFg&&fgCaps.multiFrameCountMax<desc_.fgMultiplier-1;
+        if(aboveCapability&&forceAboveCapability){
+            veyra::log::warn("capability",std::format("test-only FG multiplier forced above capability request={} maxGeneratedFrames={}",desc_.fgMultiplier,fgCaps.multiFrameCountMax));
+        }
+        if(desc_.enableFg&&(desc_.fgMultiplier<2||desc_.fgMultiplier>6||(aboveCapability&&!forceAboveCapability))){veyra::log::error("graph",std::format("requested MFG multiplier unsupported request={} maxGeneratedFrames={}",desc_.fgMultiplier,fgCaps.multiFrameCountMax));return false;}
     }
 
     if(nrEnabled_){
