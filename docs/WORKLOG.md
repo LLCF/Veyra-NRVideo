@@ -2339,6 +2339,18 @@ DLSSG 能力门控没有排除 FSR，导致 FSR 会话下任何就地设置变�
 
 ## 2026-09-16 40 系 DLSS MFG 解锁调研（未实施）
 
+### 2026-09-16 FSR 超分可行性（N 卡）与接入点勘察
+
+新增 `tools/fsr_upscale_probe`（目标 `veyra_fsr_upscale_probe`）：枚举超分提供方 →
+建上下文 → 上传 64 像素棋盘 + 水平渐变（1280×720）→ FSR 放大到 2560×1440 → 回读校验内容。
+本机 RTX 5070 结果（`logs/fsr/upscale-probe.log`）：提供方只有 **3.1.5 与 2.3.4**（4.x ML 不出现）、
+CreateContext OK、Dispatch OK、回读 mean=127.33 / min=0 / max=255 / distinctLevels=15 /
+棋盘相位校验通过 → **N 卡能跑 FSR 3.1.x 超分，4.1 必须等 AMD 实机**。
+
+接入点、需要的输入（`srcRgba_` + 源分辨率光流 + 常量深度）、以及三个不能跳过的验证点
+（MV 符号必须像 FG 那样先核对、常量深度的质量代价、画质 A/B）写在
+`docs/FSR_UPSCALING_PLAN_2026-09-16.md`。**产品代码本轮未改，不算完成功能。**
+
 定位到上游 `ImDreamt/MFGAdaUnlock-RenoDx`（MIT，ReShade addon，README 明确写"仅内存修改"），
 已克隆到 `third_party_local/community/MFGAdaUnlock-RenoDx`（gitignore）。其解锁由四件事组成：
 

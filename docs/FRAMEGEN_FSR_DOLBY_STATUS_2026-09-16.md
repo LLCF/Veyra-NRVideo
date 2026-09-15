@@ -82,7 +82,7 @@ $env:VEYRA_TEST_FG_FORCE_MULTIPLIER='1'
 | 40 系 DLSS MFG 解锁（C-2） | **未实现（本轮改为调研完成）** | 上游已定位并克隆：`ImDreamt/MFGAdaUnlock-RenoDx`（MIT，`third_party_local/community/`，gitignore）。机制=两处架构比较（0x1b0）+ **PTX 中点修正**（104 处 0.5 + fatbin 截断逼 JIT）+ 关闭硬件 flip metering（Streamline 专属，Veyra 走 NGX 不适用）。**没有实施的理由**：本机只有 5070，PTX 改写会改动一条已经正常的路径，无法区分"补丁生效"与"破坏原生 MFG"；上游也明确单改门控=黑帧。下一步按带身份校验/模式校验/回滚的进程内补丁实现，并需真实 40 系验收 |
 | 30 系原生 2X（D） | **未开始** | 需要 `dlssg_for_sm86` 代理方案与另一份 DLSSG 运行库身份，属发布范围变更 |
 | FSR 帧生成（E） | **已完成并实测（2X）** | 见上文 §一.5 与 [接入记录](FSR_FRAMEGEN_INTEGRATION_2026-09-16.md)；4.0.1 ML 需 AMD 卡复测 |
-| FSR 超分（F） | **未开始** | AMD 卡 4.1 / N 卡 2、3.1 的分档 UI 与后端接入 |
+| FSR 超分（F） | **可行性已验证，未接入** | 探针实测 N 卡可跑 FSR 3.1.5 超分（1280×720→2560×1440，回读是真图）；4.x ML 在 NVIDIA 上不被枚举。接入点、需要的输入、未验证点见 [FSR 超分计划](FSR_UPSCALING_PLAN_2026-09-16.md)；本轮没有写进产品，不当作已完成 |
 | 杜比直通 / 解码（G-2） | **未开始** | 依赖支持位流的采集设备；当前设备已证实不提供 |
 
 ### A-2 节奏 hook：已完成的准备与勘察结论
