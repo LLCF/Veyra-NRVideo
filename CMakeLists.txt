@@ -60,6 +60,7 @@ add_library(veyra_base STATIC
   src/base/NgxResult.cpp
   src/base/FileIdentity.cpp
   src/base/RuntimePaths.cpp
+  src/base/ThunkHook.cpp
 )
 veyra_apply_warnings(veyra_base)
 target_compile_options(veyra_base PUBLIC /utf-8)

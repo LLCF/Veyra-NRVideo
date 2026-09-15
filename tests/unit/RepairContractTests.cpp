@@ -7,9 +7,17 @@
 #include "veyra/engine/LiveFgAdmission.h"
 #include "veyra/engine/FrameFlowWindow.h"
 #include "veyra/engine/EnhancementDelayEstimate.h"
+#include "veyra/ThunkHook.h"
 #include <iostream>
 #include <filesystem>
 #include <fstream>
+
+namespace {
+int thunkHookCalls = 0;
+int (*thunkOriginal)(int) = nullptr;
+int thunkTargetFunction(int value) { return value + 1; }
+int thunkReplacementFunction(int value) { ++thunkHookCalls; return thunkOriginal ? thunkOriginal(value) + 100 : -1; }
+}
 #include <windows.h>
 #include "veyra/engine/ContentCadence.h"
 #include "veyra/diagnostics/Redaction.h"
@@ -358,5 +366,41 @@ int main(){
     check(report.find("event=Ready host=12345 session=7 revision=9 epoch=3 source=55 batch=6 fence=8")!=std::string::npos,
         "existing diagnostic preview exports frame identity and actual completion events");
     check(report.find("NVOF=0x5")!=std::string::npos&&report.find("NVOF=0x7")!=std::string::npos&&report.find("NGX=0xBAD00005")!=std::string::npos&&report.find("SEH=0xC0000005")!=std::string::npos,"diagnostic report retains NVOF aliases and NGX/SEH codes (synthetic errors)");
+    {
+        // ThunkHook is the detour primitive the XeSS pacing port needs: build a
+        // canonical provider-style thunk, hook it, forward through the
+        // trampoline, then verify byte-exact restoration.
+        auto* page=static_cast<uint8_t*>(VirtualAlloc(nullptr,0x1000,MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE));
+        check(page!=nullptr,"thunk test page allocated");
+        if(page){
+            // Layout: [thunk E9 rel32 -> target stub][target stub: jmp [rip+0]; abs64]
+            // The stub keeps the whole test inside one page, so the relative jump
+            // is always in range regardless of where VirtualAlloc lands.
+            auto* thunk=page;
+            auto* targetStub=page+64;
+            targetStub[0]=0xFF;targetStub[1]=0x25;targetStub[2]=0x00;targetStub[3]=0x00;targetStub[4]=0x00;targetStub[5]=0x00;
+            *reinterpret_cast<uint64_t*>(targetStub+6)=reinterpret_cast<uint64_t>(&thunkTargetFunction);
+            const int64_t relative=targetStub-(thunk+5);
+            check(relative>=-0x7FFFFFFFll&&relative<=0x7FFFFFFFll,"test thunk target is in relative range");
+            thunk[0]=0xE9;
+            *reinterpret_cast<int32_t*>(thunk+1)=static_cast<int32_t>(relative);
+            for(int i=0;i<11;++i)thunk[5+i]=0xCC;
+            FlushInstructionCache(GetCurrentProcess(),page,0x1000);
+            auto callThunk=reinterpret_cast<int(*)(int)>(thunk);
+            thunkHookCalls=0;
+            check(callThunk(5)==6,"thunk reaches the original function");
+            veyra::ThunkHook hook;
+            const auto status=hook.install(thunk,reinterpret_cast<void*>(&thunkReplacementFunction));
+            check(status.installed,"thunk hook installs on a canonical thunk");
+            thunkOriginal=reinterpret_cast<int(*)(int)>(status.trampoline);
+            check(callThunk(5)==106&&thunkHookCalls==1,"replacement runs and forwards through the trampoline");
+            check(hook.remove(),"thunk hook restores the original bytes");
+            check(callThunk(5)==6&&thunkHookCalls==1,"original thunk works after removal");
+            veyra::ThunkHook reject;
+            const auto rejected=reject.install(page+512,reinterpret_cast<void*>(&thunkReplacementFunction));
+            check(!rejected.installed&&!rejected.error.empty(),"non-thunk target is rejected instead of guessed");
+            VirtualFree(page,0,MEM_RELEASE);
+        }
+    }
     std::cout<<checks<<" checks "<<failures<<" failures\n";return failures?1:0;
 }

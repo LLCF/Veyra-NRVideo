@@ -52,6 +52,29 @@ $env:VEYRA_TEST_FG_FORCE_MULTIPLIER='1'
 | FSR 超分（F） | **未开始** | AMD 卡 4.1 / N 卡 2、3.1 的分档 UI 与后端接入 |
 | 杜比直通 / 解码（G-2） | **未开始** | 依赖支持位流的采集设备；当前设备已证实不提供 |
 
+### A-2 节奏 hook：已完成的准备与勘察结论
+
+本轮已落地 detour 基础设施并用单测验证：
+
+- 新增 `include/veyra/ThunkHook.h` + `src/base/ThunkHook.cpp`：面向"五字节 `E9 rel32` + 0xCC 填充"的跳转 thunk 做函数级 hook。它会校验 thunk 形状（非 thunk 直接拒绝，不猜）、在目标 ±2GB 内分配一页放两个绝对跳转桩（trampoline 指回原目标、entry 指向替换函数）、打补丁后回读校验、移除时按原字节恢复。替换函数可在任意地址（不受 rel32 限制）。
+- 单测（`veyra_repair_contract_tests`，现 154 项 0 失败）覆盖：thunk 到达原函数、安装 hook、替换函数执行并经 trampoline 转发、移除后恢复、非 thunk 目标被拒绝。
+
+上游 `XeFGPacing.h`（OptiScaler 固定提交 `70676c5f`）的施工坐标已勘察完毕，供下一轮直接移植：
+
+| 项 | 值 |
+| --- | --- |
+| Present thunk | RVA `0x25C0`（`jmp 0x21F730`，后接 11 字节 0xCC 填充，正好可被 `ThunkHook` 接管） |
+| 原生 present 目标 | RVA `0x21F730` |
+| 调度 thunk | RVA `0x3100`（→ `0x21EE30`） |
+| 每帧间隔计算点 | RVA `0x220254`（`count=[r8+8]`、`div rcx`、结果存 `r12`） |
+| burst 循环 / 最后一帧调用 | RVA `0x2202E8`（循环内）；`0x220462`（最后一帧，arg7=0，入口 `0x220467`） |
+| 限流块触发条件 | RVA `0x220317`：`[rsi+0x340]!=0`、`[r8+8]>2`、`[r8+0x28]==0` |
+| 上下文偏移 | `LimiterEnabled=0x340`、`SchedEnable=0x341`、`BurstGate=0xC0`、`Ring=0x168`、`BurstLimiterField=0x28` |
+| ring 快照函数 | RVA `0x224CF0`（经 `0x4DA0` 调用；调用点 `0x22023D..0x22024B`） |
+| 上游实现要点 | 需要重建 present 调用的参数（上游用 1500 字节 helper `0x3F570`）；全局时序变量需按上下文管理；hook 回调不得抛异常或做大分配/同步日志 |
+
+结论：基础设施已就绪，剩余工作是 hook 体本身（参数重建 + 逐帧节奏），属高风险改动，需要一轮可快速迭代的实机调试；在完成并验证前，4X 的生成帧间距仍标为"未验证"。
+
 ## 三、明早验收清单（建议顺序）
 
 1. `git log --oneline -4` 确认三个提交都在 `codex/framegen-fsr-dolby-20260916`，`main` 未动。
