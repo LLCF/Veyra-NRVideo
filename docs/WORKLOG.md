@@ -1,5 +1,11 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-15 采集卡直播窗口标题修复（第三方工具“识别不到 Veyra”）
+
+用户反馈除 OBS 外各平台直播工具无法识别“正在采集中的 Veyra”，且顺序敏感：先抓到窗口再开采集卡正常，先开采集卡再抓就抓不到。实机取证确认根因是 Veyra 自己：采集卡来源 `capture:`/`capture2:` 连接串被当文件名写进主窗口标题，实测标题长 776 字符（`Veyra — capture2:<十六进制设备路径>:...`），空闲/播放文件时为正常短名；直播伴侣日志把该标题截断到 259 字符后参与来源命名，其包内前端以 `${exe} ${title}` 命名来源。同场会话的 mediasdk_server 日志显示“采集卡已运行再添加 game 来源”的 hook 通路实际成功（`Load Shared Texture Success, size: 842 x 494`、`OnAutoSwitchMode from Window to Game`、GameSource 连续 60 秒以上有数据），因此本轮不做换链/画面的猜测性改动。
+
+修复新增 `apps/veyra/ui/SourceTitle.h`（`windowTitleForSource`），`AppShell::openFile` 对采集卡用 `Veyra — 采集卡 · LIVE`、PS5 用 `Veyra — PS5 Remote Play`、文件仍用文件名。构建 `cmd.exe /c out\build\veyra-build-x64-release.cmd` exit0（4/4）；`veyra_ui_contract_tests.exe` PASS exit0（含新增标题合同）；新 EXE `--smoke-seconds 6 capture:9:0:-1:0` 实测标题 `Veyra — 采集卡 · LIVE`（18 字符），1.3.0 便携版同命令为 `Veyra — capture:9:0:-1:0`；随后用本机实体采集卡连接串（`capture2:`，1920x1080 YUY2@60）跑 `--smoke-seconds 12`：exit0、`frames=685`、`captureDropped=0`、`failed=false`，t+4s/t+9s 标题保持 `Veyra — 采集卡 · LIVE`。delivery 23/23 PASS、59.633 秒，`logs/delivery/7283c292af9e471bbba9c4bc8b0316af/result.json`，EXE SHA256 `0F1DEB29D80E80264CC5EE1D6D210D9415DEBC68EBA47DD22A1C73500D5700A4`，gate 自身仍标 `capture=awaiting_user_capture_test`。未驱动第三方 UI 复测（本机无可用 UI 自动化）、未 push/发布，候选 EXE 在 `out/build/audio-continuity-repair-20260915/`。完整证据、边界与下一步见 [采集卡直播窗口标题修复](CAPTURE_WINDOW_TITLE_FIX_2026-09-15.md)。
+
 ## 2026-09-15 VRR / 自动音频补偿延迟排查
 
 用户反馈疑似采集卡在PS5开启VRR后自动补偿导致声音延迟、关闭补偿恢复。当前没有反馈者版本/实卡日志，不能认定VRR根因。新增生产CaptureAudioSession诊断`--sync-clock-audit`：正常可变观察间隔下补偿35.50ms、PCM队列13.75ms；保持合成画面延迟35ms而视频PTS后移1200ms时，补偿1235.51ms、PCM队列1214.56ms；同时间戳关闭补偿后0ms/10ms。真实WASAPI、合成PCM且增益0，不是实卡或声学测量。专项exit1保留失败，证明现有自动同步缺少时间戳可比性验证；未修改产品同步策略。

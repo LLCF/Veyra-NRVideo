@@ -4,6 +4,7 @@
 #include "../../apps/veyra/ui/TransportLayout.h"
 #include "../../apps/veyra/ui/UiPreferenceStore.h"
 #include "../../apps/veyra/ui/CapturePreferenceStore.h"
+#include "../../apps/veyra/ui/SourceTitle.h"
 #include "veyra/engine/EngineController.h"
 #include "veyra/sink/AudioGain.h"
 #include "veyra/engine/PreviewView.h"
@@ -44,6 +45,20 @@ int wmain(int argc,wchar_t** argv){try{
         const auto restored=store.load();require(restored.videoPath==p.videoPath&&restored.formatKey==p.formatKey&&restored.audioPath==p.audioPath&&restored.audioMode==p.audioMode&&restored.colorOverride==p.colorOverride,"capture stable identifiers and Unicode round trip");
     }
     require(ResolutionPlan::make({1448,1086},true,NrSizePolicy::Native,true).output==Extent{2880,2160},"4:3 SR preserves aspect");
+    {
+        // A live capture card shares its window list entry with every external
+        // broadcast tool. The encoded connection string must never become the
+        // window title again (it made the live window unrecognisable).
+        const std::wstring encoded=L"capture2:005C005C003F005C0075007300620023007600690064005F003300340035006600:0:0:005C005C003F005C0061007500640069006F:0";
+        require(ui::isCaptureCardSource(encoded)&&ui::isCaptureCardSource(L"capture:0:1:-1:0"),"capture connection strings detected");
+        require(ui::windowTitleForSource(encoded)==L"Veyra — 采集卡 · LIVE","capture2 connection string never becomes the window title");
+        require(ui::windowTitleForSource(L"capture:0:1:-1:0")==L"Veyra — 采集卡 · LIVE","legacy capture connection string never becomes the window title");
+        require(ui::windowTitleForSource(L"remoteplay:")==L"Veyra — PS5 Remote Play","remote play keeps its readable title");
+        require(ui::windowTitleForSource(L"D:\\media\\clip.mp4")==L"Veyra — clip.mp4","file title keeps the file name");
+        require(ui::windowTitleForSource(L"")==L"Veyra — 本地实验版","empty source restores the default title");
+        for(const auto& title:{ui::windowTitleForSource(encoded),ui::windowTitleForSource(L"capture:0:1:-1:0")})
+            require(title.find(L"capture2:")==std::wstring::npos&&title.find(L"capture:")==std::wstring::npos&&title.find(L'\\')==std::wstring::npos&&title.size()<64,"exposed window title stays short and path free");
+    }
     require(ResolutionPlan::make({1080,1920},true,NrSizePolicy::Native,true).output==Extent{1214,2160},"portrait SR even dimensions");
     require(!ResolutionPlan::make({2880,2160},true,NrSizePolicy::Native,true).srApplied,"already maximum edge skips SR");
     require(ResolutionPlan::make({1920,1080},true,NrSizePolicy::Realtime,false).output==Extent{3840,2160},"16:9 SR unchanged");
