@@ -3,6 +3,7 @@
 #include "ui/SettingHelp.h"
 #include "veyra/engine/PresetStore.h"
 #include "veyra/RuntimePaths.h"
+#include "veyra/gfx/XessMfgUnlock.h"
 #include <filesystem>
 #include <sstream>
 #include <iomanip>
@@ -61,7 +62,17 @@ void selectDiscrete(int group,int value){for(int j=0;j<(group==0?3:2);++j){auto 
 // full list; the engine gate rejects an unsupported request with a message.
 int multiplierChoiceCount(engine::FrameGenerationBackend backend){
     int cap=6;
-    if(backend==engine::FrameGenerationBackend::XeSS)cap=2; // raised by the MFG unlock path
+    if(backend==engine::FrameGenerationBackend::XeSS){
+        // Stock provider is 2X only; the audited OptiScaler unlock raises it to
+        // 4X. Hash the provider once, and prefer the ceiling an actual session
+        // already reported.
+        static const bool providerAudited=[](){
+            const auto path=veyra::runtime::localDataDirectory()/L"intel"/L"experimental"/L"libxess_fg.dll";
+            return veyra::gfx::XessMfgUnlock::providerIsAudited(path.wstring());
+        }();
+        cap=providerAudited?4:2;
+        if(controller){const auto snapshot=controller->snapshot();if(snapshot.xessMaxInterpolatedFrames>1)cap=std::clamp(snapshot.xessMaxInterpolatedFrames+1,2,4);}
+    }
     else if(controller){const auto snapshot=controller->snapshot();if(snapshot.fgMultiFrameMax>0)cap=std::clamp(snapshot.fgMultiFrameMax+1,2,6);}
     int count=1;
     for(size_t i=1;i<engine::kFgMultiplierChoiceCount;++i)if(int(engine::kFgMultiplierChoices[i])<=cap)++count;
@@ -104,7 +115,11 @@ bool read(engine::EnhancementSettings& s,bool allPages=false){s=enhancementEnabl
         wchar_t offset[32]{};GetWindowTextW(item(217),offset,32);wchar_t* offsetEnd=nullptr;const auto parsed=wcstol(offset,&offsetEnd,10);
         if(offsetEnd==offset||*offsetEnd||parsed<-250||parsed>250){message(L"声音偏移须为 -250 至 250 ms");return false;}s.audioOffsetMs=int(parsed);
         for(int j=0;j<3;++j)if(GetPropW(item(730+j),L"veyra.selected")){s.srTarget=static_cast<pipeline::SrTarget>(j);break;}
-        if(s.frameGenerationBackend==engine::FrameGenerationBackend::XeSS)s.multiplier=std::min(s.multiplier,2u);
+        if(s.frameGenerationBackend==engine::FrameGenerationBackend::XeSS){
+            const int choices=multiplierChoiceCount(engine::FrameGenerationBackend::XeSS);
+            const size_t index=size_t(std::clamp(choices-1,1,int(engine::kFgMultiplierChoiceCount)-1));
+            s.multiplier=std::min(s.multiplier,engine::kFgMultiplierChoices[index]);
+        }
     }if(!s.validate().empty()){message(L"参数越界，未提交。悬停数值框查看允许范围。");return false;}return true;}
 
 // Each notification changes one field on the latest desired settings. Hidden
@@ -129,7 +144,7 @@ bool liveField(int id){
         case 203:s.nrPolicy=static_cast<pipeline::NrSizePolicy>(send(id,CB_GETCURSEL));break;
         case 204:s.flow=static_cast<engine::FlowQuality>(send(id,CB_GETCURSEL));break;
         case 205:s.content=static_cast<engine::ContentRate>(send(id,CB_GETCURSEL));break;
-        case 208:s.frameGenerationBackend=static_cast<engine::FrameGenerationBackend>(send(id,CB_GETCURSEL));if(s.frameGenerationBackend==engine::FrameGenerationBackend::XeSS)s.multiplier=std::min(s.multiplier,2u);break;
+        case 208:{s.frameGenerationBackend=static_cast<engine::FrameGenerationBackend>(send(id,CB_GETCURSEL));if(s.frameGenerationBackend==engine::FrameGenerationBackend::XeSS){const int choices=multiplierChoiceCount(engine::FrameGenerationBackend::XeSS);const size_t index=size_t(std::clamp(choices-1,1,int(engine::kFgMultiplierChoiceCount)-1));s.multiplier=std::min(s.multiplier,engine::kFgMultiplierChoices[index]);}break;}
         case 209:s.opticalFlowBackend=static_cast<engine::OpticalFlowBackend>(send(id,CB_GETCURSEL));break;
         case 220:s.lowLatency=checked(id)==BST_CHECKED;break;
         case 215:s.amdFlowHalfResolution=checked(id)==BST_CHECKED;break;

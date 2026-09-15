@@ -74,6 +74,7 @@ add_library(veyra_gfx STATIC
   src/gfx/CommandSlotRing.cpp
   src/gfx/PresentSink.cpp
   src/gfx/XessPresenter.cpp
+  src/gfx/XessMfgUnlock.cpp
 )
 veyra_apply_warnings(veyra_gfx)
 target_compile_features(veyra_gfx PUBLIC cxx_std_20)

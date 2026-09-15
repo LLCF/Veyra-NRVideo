@@ -62,6 +62,10 @@ struct PlayerSnapshot {
     // multipliers the active GPU can actually honour.
     int fgMultiFrameMax=0;
     bool fgCapabilityKnown=false;
+    // XeSS frame-generation ceiling (generated frames; 1 = stock 2X, 3 = 4X).
+    // 0 = no XeSS session has reported yet; the settings UI then falls back to
+    // the audited-provider probe.
+    int xessMaxInterpolatedFrames=0;
     bool running=false,failed=false,image=false,capture=false,remotePlay=false;
     int remotePlayState=0; uint64_t remotePlaySkipped=0;
     bool remoteRecovering=false;unsigned remoteReconnectAttempts=0;std::wstring remoteRecoveryMessage;
@@ -112,5 +116,7 @@ private:
     std::atomic<int> comparisonMode_{0};std::atomic<bool> comparisonBase_{false};std::atomic<float> comparisonSplit_{.5f};
     // Guarded by mutex_: DLSSG MultiFrameCountMax of the active session.
     int fgMultiFrameMaxCap_=0;
+    // Guarded by mutex_: XeSS provider ceiling of the active session (0 = unknown).
+    int xessMaxInterpolatedFramesCap_=0;
 };
 }

@@ -1,6 +1,7 @@
 #include "veyra/gfx/XessPresenter.h"
 #include "veyra/Log.h"
 #include "veyra/RuntimePaths.h"
+#include "veyra/gfx/XessMfgUnlock.h"
 #ifdef VEYRA_HAS_XESS
 #include <xess_fg/xefg_swapchain_d3d12.h>
 #include <xell/xell_d3d12.h>
@@ -9,6 +10,8 @@
 namespace veyra::gfx {
 struct XessPresenter::Impl {
     uint64_t generated=0,presented=0;
+    uint32_t requestedGenerated=0;   // generated frames requested by the user (0 = 2X stock)
+    uint32_t maxInterpolations=1;    // runtime-reported ceiling after the unlock
 #ifdef VEYRA_HAS_XESS
     HMODULE fgDll=nullptr,llDll=nullptr;
     xefg_swapchain_handle_t fg=nullptr;
@@ -17,6 +20,8 @@ struct XessPresenter::Impl {
 #define XESS_PROC(name) decltype(&name) name##Fn=nullptr
     XESS_PROC(xefgSwapChainD3D12CreateContext);
     XESS_PROC(xefgSwapChainD3D12GetProperties);
+    XESS_PROC(xefgSwapChainGetProperties);
+    XESS_PROC(xefgSwapChainSetNumInterpolatedFrames);
     XESS_PROC(xefgSwapChainD3D12InitFromSwapChainDesc);
     XESS_PROC(xefgSwapChainD3D12GetSwapChainPtr);
     XESS_PROC(xefgSwapChainD3D12TagFrameResource);
@@ -40,13 +45,15 @@ struct XessPresenter::Impl {
     ~Impl(){
         if(fg&&xefgSwapChainDestroyFn)check(xefgSwapChainDestroyFn(fg),"Destroy",true);
         if(ll&&xellDestroyContextFn)check(xellDestroyContextFn(ll),"XeLL destroy",true);
+        // Restore the provider bytes only after every XeFG/XeLL context is gone.
+        XessMfgUnlock::release();
         if(fgDll)FreeLibrary(fgDll);if(llDll)FreeLibrary(llDll);
     }
 #endif
 };
 XessPresenter::XessPresenter():p_(std::make_unique<Impl>()){}
 XessPresenter::~XessPresenter()=default;
-bool XessPresenter::initialize(ID3D12Device* device,ID3D12CommandQueue* queue,IDXGIFactory2* factory,HWND window,const DXGI_SWAP_CHAIN_DESC1& desc,IDXGISwapChain3** swapchain){
+bool XessPresenter::initialize(ID3D12Device* device,ID3D12CommandQueue* queue,IDXGIFactory2* factory,HWND window,const DXGI_SWAP_CHAIN_DESC1& desc,IDXGISwapChain3** swapchain,uint32_t fgMultiplier){
     if(GetEnvironmentVariableW(L"VEYRA_TEST_XESS_INIT_FAILURE",nullptr,0)){
         log::warn("xess-fg","test-only initialization rejection; runtime not loaded");return false;
     }
@@ -60,6 +67,8 @@ bool XessPresenter::initialize(ID3D12Device* device,ID3D12CommandQueue* queue,ID
 #define LOAD(module,name) p.name##Fn=reinterpret_cast<decltype(p.name##Fn)>(GetProcAddress(p.module,#name));if(!p.name##Fn){log::error("xess-fg","missing export " #name);return false;}
     LOAD(fgDll,xefgSwapChainD3D12CreateContext)
     LOAD(fgDll,xefgSwapChainD3D12GetProperties)
+    LOAD(fgDll,xefgSwapChainGetProperties)
+    LOAD(fgDll,xefgSwapChainSetNumInterpolatedFrames)
     LOAD(fgDll,xefgSwapChainD3D12InitFromSwapChainDesc)
     LOAD(fgDll,xefgSwapChainD3D12GetSwapChainPtr)
     LOAD(fgDll,xefgSwapChainD3D12TagFrameResource)
@@ -75,18 +84,45 @@ bool XessPresenter::initialize(ID3D12Device* device,ID3D12CommandQueue* queue,ID
     LOAD(llDll,xellSleep)
     LOAD(llDll,xellAddMarkerData)
 #undef LOAD
+    // Multi-frame generation needs the audited OptiScaler unlock before the
+    // first XeFG context exists; 2X deliberately leaves the provider untouched.
+    p.requestedGenerated=fgMultiplier>1?fgMultiplier-1:0;
+    if(p.requestedGenerated>0){
+        const auto unlock=XessMfgUnlock::apply(p.fgDll,p.requestedGenerated);
+        p.maxInterpolations=unlock.maxInterpolations;
+        veyra::log::info("xess-mfg",std::format("unlock requestedGenerated={} applied={} identityVerified={} recognisedBuild={}",
+            p.requestedGenerated,unlock.applied,unlock.identityVerified,unlock.recognisedBuild));
+        if(!unlock.applied){
+            log::error("xess-mfg",std::format("unlock unavailable for {}X request; keeping stock presentation",p.requestedGenerated+1));
+            return false;
+        }
+    }
     if(!p.check(p.xellD3D12CreateContextFn(device,&p.ll),"XeLL create",true)||!p.check(p.xefgSwapChainD3D12CreateContextFn(device,&p.fg),"Create",true))return false;
     if(!p.check(p.xefgSwapChainSetLatencyReductionFn(p.fg,p.ll),"Attach XeLL",true))return false;
     xell_sleep_params_t sleep{};sleep.bLowLatencyMode=1;
     if(!p.check(p.xellSetSleepModeFn(p.ll,&sleep),"XeLL sleep mode",true))return false;
-    xefg_swapchain_d3d12_init_params_t init{};init.maxInterpolatedFrames=1;init.uiMode=XEFG_SWAPCHAIN_UI_MODE_AUTO;
+    // Query the real ceiling before deciding what to request. The unlock (U5)
+    // is what makes this report more than 1 on a non-Intel GPU.
+    {
+        xefg_swapchain_properties_t runtimeProperties{};
+        if(p.check(p.xefgSwapChainGetPropertiesFn(p.fg,&runtimeProperties),"GetProperties(runtime)",true)){
+            p.maxInterpolations=runtimeProperties.maxSupportedInterpolations>0?runtimeProperties.maxSupportedInterpolations:1;
+            XessMfgUnlock::reportRuntimeCeiling(p.maxInterpolations);
+        }
+        if(p.requestedGenerated>0&&p.maxInterpolations<p.requestedGenerated){
+            log::error("xess-mfg",std::format("requested {}X but the runtime reports maxInterpolatedFrames={}",p.requestedGenerated+1,p.maxInterpolations));
+            return false;
+        }
+    }
+    xefg_swapchain_d3d12_init_params_t init{};init.maxInterpolatedFrames=p.requestedGenerated>0?p.requestedGenerated:1;init.uiMode=XEFG_SWAPCHAIN_UI_MODE_AUTO;
     xefg_swapchain_properties_t properties{};
     if(!p.check(p.xefgSwapChainD3D12GetPropertiesFn(p.fg,&init,desc.Width,desc.Height,desc.Format,&properties),"Properties",true)||properties.maxSupportedInterpolations<1)return false;
     log::info("xess-fg",std::format("swapchain={}x{} maxInterpolations={} bufferHeap={} textureHeap={} estimated-motion constant-depth experimental",desc.Width,desc.Height,properties.maxSupportedInterpolations,properties.tempBufferHeapSize,properties.tempTextureHeapSize));
     if(!p.check(p.xefgSwapChainD3D12InitFromSwapChainDescFn(p.fg,window,&desc,nullptr,queue,factory,&init),"Init",true))return false;
+    if(p.requestedGenerated>0&&!p.check(p.xefgSwapChainSetNumInterpolatedFramesFn(p.fg,p.requestedGenerated),"SetNumInterpolatedFrames",true))return false;
     return p.check(p.xefgSwapChainD3D12GetSwapChainPtrFn(p.fg,__uuidof(IDXGISwapChain3),reinterpret_cast<void**>(swapchain)),"GetSwapChain",true);
 #else
-    (void)device;(void)queue;(void)factory;(void)window;(void)desc;(void)swapchain;
+    (void)device;(void)queue;(void)factory;(void)window;(void)desc;(void)swapchain;(void)fgMultiplier;
     log::error("xess-fg","Intel XeSS SDK unavailable at build time");return false;
 #endif
 }
@@ -147,4 +183,5 @@ bool XessPresenter::afterPresent(){
 }
 uint64_t XessPresenter::generatedCount()const{return p_->generated;}
 uint64_t XessPresenter::presentedCount()const{return p_->presented;}
+uint32_t XessPresenter::maxInterpolatedFrames()const{return p_->maxInterpolations;}
 }

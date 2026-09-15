@@ -114,7 +114,10 @@ struct EnhancementSettings {
         if(model.style<0||model.style>2||model.autoMask<0||model.autoMask>1||model.uiCorrection<0||model.uiCorrection>1)return "invalid experimental parameter";
         for(float v:{residual.total,residual.darken,residual.brighten,residual.color,residual.luminance})if(!range(v,2))return "residual parameter out of range";
         if(frameGenerationBackend<FrameGenerationBackend::Dlss||frameGenerationBackend>FrameGenerationBackend::XeSS)return "invalid frame generation backend";
-        if(frameGenerationBackend==FrameGenerationBackend::XeSS&&multiplier>2)return "XeSS preview currently supports 2X only";
+        // The XeSS provider reports its own generated-frame ceiling at session
+        // start; the engine clamps/rejects above it, so validation only guards
+        // the absolute API range here.
+        if(frameGenerationBackend==FrameGenerationBackend::XeSS&&multiplier>4)return "XeSS frame generation supports up to 4X";
         if(videoSrQuality>4)return "invalid video SR quality";
         if(!pipeline::validSrTarget(srTarget))return "invalid SR target";
         if(opticalFlowBackend!=OpticalFlowBackend::Nvidia&&opticalFlowBackend!=OpticalFlowBackend::AmdFidelityFx&&opticalFlowBackend!=OpticalFlowBackend::GpuDis)return "invalid optical flow backend";

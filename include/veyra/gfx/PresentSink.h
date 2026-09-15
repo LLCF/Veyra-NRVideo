@@ -39,6 +39,9 @@ public:
         bool captureCompatible = false;
         bool hdr = false;
         bool hdr10 = false;
+        // Requested frame-generation multiplier (2 = one generated frame).
+        // Only the XeSS path consumes it today; >2 requires the provider unlock.
+        uint32_t fgMultiplier = 1;
         // Probe runs create their own window class name per process.
         std::wstring title = L"Veyra";
         HWND targetWindow = nullptr; // borrowed UI-owned child HWND; never destroyed by sink

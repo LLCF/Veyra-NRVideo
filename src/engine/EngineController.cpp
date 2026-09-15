@@ -20,6 +20,7 @@
 #endif
 #include "veyra/pipeline/EnhanceGraph.h"
 #include "veyra/pipeline/ResetCoordinator.h"
+#include "veyra/gfx/XessMfgUnlock.h"
 #include "veyra/diagnostics/ResetCause.h"
 #include "veyra/sink/WasapiAudioSink.h"
 #include "veyra/sink/ImageExportSink.h"
@@ -61,7 +62,7 @@ bool EngineController::idle()const{std::lock_guard lock(mutex_);return !busy_&&!
 void EngineController::open(HWND video,const std::wstring& path,PlayerOptions opts){
     const bool captureReplay=opts.captureReplayForTest;
     const bool disableAdmission=opts.captureReplayDisableFgAdmissionForTest;
-    {std::lock_guard lock(mutex_);snapshot_={};activeFlow_.reset();previewView_={};fgMultiFrameMaxCap_=0;snapshot_.sessionId=++sessionId_;snapshot_.transport=TransportState::Opening;savePath_.clear();desired_=opts.snapshot();desired_.revision=++nextRevision_;snapshot_.desired=desired_;opts=PlayerOptions::from(desired_);}
+    {std::lock_guard lock(mutex_);snapshot_={};activeFlow_.reset();previewView_={};fgMultiFrameMaxCap_=0;xessMaxInterpolatedFramesCap_=0;snapshot_.sessionId=++sessionId_;snapshot_.transport=TransportState::Opening;savePath_.clear();desired_=opts.snapshot();desired_.revision=++nextRevision_;snapshot_.desired=desired_;opts=PlayerOptions::from(desired_);}
     opts.captureReplayForTest=captureReplay;
     opts.captureReplayDisableFgAdmissionForTest=disableAdmission;
     post([this,video,path,opts]{paused_=false;seekSeconds_=-1;run(video,path,opts);});
@@ -69,7 +70,7 @@ void EngineController::open(HWND video,const std::wstring& path,PlayerOptions op
 #ifdef VEYRA_ENABLE_REMOTEPLAY
 void EngineController::openRemotePlay(HWND window,source::RemotePlayConnectDesc desc,PlayerOptions opts){
     auto request=std::make_shared<source::RemotePlayConnectDesc>(std::move(desc));
-    {std::lock_guard lock(mutex_);snapshot_={};activeFlow_.reset();previewView_={};fgMultiFrameMaxCap_=0;snapshot_.sessionId=++sessionId_;snapshot_.transport=TransportState::Opening;snapshot_.remotePlay=true;snapshot_.capture=true;savePath_.clear();desired_=opts.snapshot();desired_.revision=++nextRevision_;snapshot_.desired=desired_;opts=PlayerOptions::from(desired_);}
+    {std::lock_guard lock(mutex_);snapshot_={};activeFlow_.reset();previewView_={};fgMultiFrameMaxCap_=0;xessMaxInterpolatedFramesCap_=0;snapshot_.sessionId=++sessionId_;snapshot_.transport=TransportState::Opening;snapshot_.remotePlay=true;snapshot_.capture=true;savePath_.clear();desired_=opts.snapshot();desired_.revision=++nextRevision_;snapshot_.desired=desired_;opts=PlayerOptions::from(desired_);}
     post([this,window,request,opts]{paused_=false;seekSeconds_=-1;run(window,L"remoteplay:",opts,request);});
 }
 remoteplay::ControllerFeedback EngineController::remotePlayFeedback(){std::lock_guard lock(mutex_);return activeRemote_?activeRemote_->takeFeedback():remoteplay::ControllerFeedback{};}
@@ -90,6 +91,13 @@ bool EngineController::requestSettings(EnhancementSettings s){
         snapshot_.status=std::format(L"此显卡最多支持 {}X 帧生成；请求未应用",fgMultiFrameMaxCap_+1);
         snapshot_.failed=false;
         veyra::log::info("settings",std::format("multiplier gate: requested={} maxGeneratedFrames={} applied=unchanged",s.multiplier,fgMultiFrameMaxCap_));
+        return false;
+    }
+    if(s.multiplier>1&&s.frameGenerationBackend==FrameGenerationBackend::XeSS&&xessMaxInterpolatedFramesCap_>0&&
+       int(s.multiplier)-1>xessMaxInterpolatedFramesCap_){
+        snapshot_.status=std::format(L"XeSS 帧生成上限为 {}X；请求未应用",xessMaxInterpolatedFramesCap_+1);
+        snapshot_.failed=false;
+        veyra::log::info("settings",std::format("xess multiplier gate: requested={} maxInterpolatedFrames={} applied=unchanged",s.multiplier,xessMaxInterpolatedFramesCap_));
         return false;
     }
     // Revision partitions GPU history and measurements. Audio-only edits must
@@ -258,14 +266,21 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 // generation entirely (the old behaviour users saw as "选了 4X
                 // 之后补帧直接没了").
                 bool clampedOverCapability=false;
-                if(failure==FailedBackend::Fg&&reduced.multiplier>1&&graph.fgMultiFrameCountMax()>0&&
-                   int(reduced.multiplier)-1>graph.fgMultiFrameCountMax()){
-                    const uint32_t clamped=uint32_t(graph.fgMultiFrameCountMax()+1);
-                    veyra::log::warn("backend-recovery",std::format("requested multiplier {} exceeds GPU capability maxGeneratedFrames={}; applying {}X with frame generation kept",reduced.multiplier,graph.fgMultiFrameCountMax(),clamped));
+                int capabilityGeneratedFrames=-1;
+                if(failure==FailedBackend::Fg&&reduced.multiplier>1){
+                    if(reduced.frameGenerationBackend==FrameGenerationBackend::Dlss)capabilityGeneratedFrames=graph.fgMultiFrameCountMax();
+                    else if(reduced.frameGenerationBackend==FrameGenerationBackend::XeSS){
+                        const auto xessState=gfx::XessMfgUnlock::snapshot();
+                        if(xessState.applied)capabilityGeneratedFrames=int(xessState.maxInterpolations);
+                    }
+                }
+                if(capabilityGeneratedFrames>0&&int(reduced.multiplier)-1>capabilityGeneratedFrames){
+                    const uint32_t clamped=uint32_t(capabilityGeneratedFrames+1);
+                    veyra::log::warn("backend-recovery",std::format("requested multiplier {} exceeds capability maxGeneratedFrames={}; applying {}X with frame generation kept",reduced.multiplier,capabilityGeneratedFrames,clamped));
                     reduced.multiplier=clamped;
                     clampedOverCapability=true;
                     if(!backendRecoveryWarning.empty())backendRecoveryWarning+=L"；";
-                    backendRecoveryWarning+=std::format(L"此显卡最多支持 {}X 帧生成，已按 {}X 应用",clamped,clamped);
+                    backendRecoveryWarning+=std::format(L"当前最多支持 {}X 帧生成，已按 {}X 应用",clamped,clamped);
                 }
                 if(FAILED(ctx.device()->GetDeviceRemovedReason()))return false;
                 if(!clampedOverCapability&&!disableFailedBackend(reduced,failure))return false;
@@ -292,7 +307,13 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 fgMultiFrameMaxCap_=graph.fgMultiFrameCountMax();
                 snapshot_.fgMultiFrameMax=fgMultiFrameMaxCap_;
                 snapshot_.fgCapabilityKnown=fgMultiFrameMaxCap_>0;
+                const auto xessState=gfx::XessMfgUnlock::snapshot();
+                // Unknown until the XeSS provider actually ran: a DLSS-only
+                // session must not restrict the XeSS choices in the UI.
+                xessMaxInterpolatedFramesCap_=xessState.providerLoaded?(xessState.applied&&xessState.maxInterpolations>0?int(xessState.maxInterpolations):1):0;
+                snapshot_.xessMaxInterpolatedFrames=xessMaxInterpolatedFramesCap_;
                 if(fgMultiFrameMaxCap_>0)veyra::log::info("settings",std::format("frame-generation capability: maxGeneratedFrames={} maxMultiplier={}",fgMultiFrameMaxCap_,fgMultiFrameMaxCap_+1));
+                veyra::log::info("settings",std::format("xess capability: maxInterpolatedFrames={} unlockApplied={} => maxMultiplier={}",xessState.maxInterpolations,xessState.applied,xessMaxInterpolatedFramesCap_+1));
             }
             if(!previewInitialized){status(L"视频初始化失败，请查看对应组件的诊断日志",true);break;}
             if(!backendRecoveryWarning.empty()){
