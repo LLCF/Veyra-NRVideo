@@ -269,7 +269,7 @@ LRESULT CALLBACK interaction(HWND h,UINT m,WPARAM w,LPARAM l,UINT_PTR id,DWORD_P
     if(id==VideoSurface&&m==WM_LBUTTONUP&&GetCapture()==h){ReleaseCapture();return 0;}
     return DefSubclassProc(h,m,w,l);
 }
-veyra::engine::PlayerOptions options(){return veyra::engine::PlayerOptions::from(engine.snapshot().desired);}
+veyra::engine::PlayerOptions options(){auto o=veyra::engine::PlayerOptions::from(engine.snapshot().desired);o.captureCpuUnpack=initialOptions.captureCpuUnpack;o.captureDirectIngress=initialOptions.captureDirectIngress;return o;}
 
 // Win32 dispatch reenters during move/resize and modal dialogs. Large path
 // buffers must be per-operation heap storage, never part of every WndProc frame.

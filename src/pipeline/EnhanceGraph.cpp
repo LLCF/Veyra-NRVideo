@@ -1577,6 +1577,14 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
     failedBackend_=engine::FailedBackend::None;
     if(runFg)fgHistorySkipped_=false;
     uploadFences_[parity]=ring_.lastSignaledValue();
+    // N2 direct ingress: the producer wrote straight into one of the mapped
+    // buffers, so record this submission's fence under that buffer's own slot
+    // too; the source waits it before overwriting the buffer (its slot and the
+    // graph parity can drift apart once a frame is dropped).
+    if(frame&&frame->data[0]){
+        if(frame->data[0]==mappedRgb_[0])uploadFences_[0]=ring_.lastSignaledValue();
+        else if(frame->data[0]==mappedRgb_[1])uploadFences_[1]=ring_.lastSignaledValue();
+    }
 
     prevPtsMs_ = ptsMs;
     prevValid_ = true;

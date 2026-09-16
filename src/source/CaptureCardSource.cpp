@@ -160,6 +160,7 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
     double directTime=0;Clock::time_point directArrival{};pipeline::Rational directDuration;bool directPending=false;
     int directSlot=-1;                  // consumer slot handed out by read()
     uint64_t directDrops=0;
+    uint64_t directCommits=0,directFallbacks=0;
     // Manual capture flip; read by the DirectShow callback thread.
     std::atomic<bool> verticalFlip{false};
     std::unique_ptr<WasapiAudioInput> wasapi;
@@ -198,6 +199,7 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
                         directCommitted[directSlot]=buffer;
                     }
                 }
+                if(useDirect)++directCommits;else if(directActive.load())++directFallbacks;
                 // Copy directly into the destination; read() hands the buffer
                 // out under this lock, so the frame consumed by the GPU is not
                 // overwritten while it is in use.
@@ -219,6 +221,7 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
                 if(useDirect)directDuration=pendingDuration;
                 if(!received)firstArrival=arrival;
                 ++received;latestArrival=arrival;
+                if(directActive.load()&&(received%120)==0)log::info("capture-direct",std::format("commits={} fallbacks={} drops={} (direct ingress counters)",directCommits,directFallbacks,directDrops));
             }
         }
         wake.notify_one();return S_OK;
