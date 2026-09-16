@@ -30,7 +30,12 @@ function Run([string]$Name,[string]$Exe,[string[]]$Argv,[int]$Limit=30,[int]$Exp
         if($PortablePlayer -and $Exe -eq $PlayerExe){$env:PATH="$env:SystemRoot/System32;$env:SystemRoot"}
         $workingDirectory=$Root
         if($PortablePlayer -and $Exe -eq $PlayerExe){$workingDirectory=Split-Path $Exe}
-        $p=Start-Process -FilePath $Exe -ArgumentList @($Argv|ForEach-Object{'"'+$_.Replace('"','\"')+'"'}) -WorkingDirectory $workingDirectory -PassThru -WindowStyle $windowStyle -RedirectStandardOutput "$dir/$Name.stdout.log" -RedirectStandardError "$dir/$Name.stderr.log"
+        # A test with no arguments is valid; Start-Process rejects an empty
+        # -ArgumentList, so only pass it when there is something to pass.
+        $startArgs=@{FilePath=$Exe;WorkingDirectory=$workingDirectory;PassThru=$true;WindowStyle=$windowStyle;RedirectStandardOutput="$dir/$Name.stdout.log";RedirectStandardError="$dir/$Name.stderr.log"}
+        $forwarded=@($Argv|ForEach-Object{'"'+$_.Replace('"','\"')+'"'})
+        if($forwarded.Count -gt 0){$startArgs.ArgumentList=$forwarded}
+        $p=Start-Process @startArgs
     } finally {$env:PATH=$savedPath}
     $processHandle=$p.Handle
     if(-not $p.WaitForExit($timeout*1000)){Stop-Process -Id $p.Id -Force;throw "$Name timeout"}
@@ -73,6 +78,12 @@ try{
     }
     Run cancel $PlayerExe @($clip4k,'--nr','--export-out',"$dir/cancel.mp4",'--cancel-after-ms','3000') 15 3
     Check cancel-not-success ((-not (Test-Path "$dir/cancel.mp4")) -and (Test-Path "$dir/cancel.mp4.partial")) 'cancel drains with live callback; never promotes incomplete output'
+    # Compressed capture payload decoder: the exact backend the capture worker
+    # uses, driven with local H.264/HEVC elementary streams. Exits 0 with an
+    # explicit SKIP when the git-ignored local corpus is absent.
+    Run capture-decode "$bin/veyra_capture_compressed_tests.exe" @() 30
+    $decodeLog=Get-Content "$dir/capture-decode.stdout.log" -Raw
+    Check capture-decode-result (($decodeLog -match 'ALL PASS') -or ($decodeLog -match 'SKIP')) 'hardware+software decode parity for H.264/HEVC, or an explicit skip'
     Check test-budget ($timer.Elapsed.TotalSeconds -lt 300) "$($timer.Elapsed.TotalSeconds)s; short validation is not endurance proof"
     $result=[ordered]@{runId=$run;status='software_short_gate_passed';capture='awaiting_user_capture_test';distribution='not_assessed_by_software_gate';seconds=$timer.Elapsed.TotalSeconds;exeHash=(Get-FileHash $PlayerExe -Algorithm SHA256).Hash;checks=$checks}
     $result|ConvertTo-Json -Depth 8|Set-Content "$dir/result.json" -Encoding UTF8

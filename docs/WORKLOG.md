@@ -1,5 +1,34 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-16 MPEG/压缩链路收工：解码 worker + D3D12VA 后端 + 帧池契约（2 分钟真机复测）
+
+用户要求"一次性修完，不要停"，本轮把压缩（MJPEG/H.264/HEVC/AV1/VP9）族从"系统解码器 + RGB32 兼容路径"
+整体换成自有解码链路。完整报告：`docs/CAPTURE_MPEG_CHAIN_REPAIR_2026-09-16.md`。
+
+- 提交：`2a4f44f`（压缩 sink + codec 识别）→ `f0636f9`（MJPEG 直连 + 自解码）→ `b10e5c2`（解码 worker）
+  → `705e907`（D3D12VA/软解后端 + extradata 解析 + 低延迟标志 + 新测试）→ `35e5593`（帧池契约 + probe 越界修复）。
+- **MJPEG 2 分钟真机（口径不可比项已标注）**：1080p60 7175–7184 帧 / 0 丢帧 / 图侧 processCpuP95
+  1.987→0.364–0.375ms（−81%）；4K18 2150 帧 / 0 丢帧 / 6.218→0.912–0.936ms（−85%）；
+  解码器 `errors=0 queueDrops=0`。`callback→Present`/`readAgeMs` 新旧窗口一个不含解码、一个含解码，
+  **不可直接比较**（正文表格逐项标注）。
+- **H.264/HEVC 合成验证**（本机卡无此格式）：新测试用本地文件的 Annex-B 数据逐包驱动采集解码器，
+  H.264 硬解 900 + 软解 900、HEVC 252 + 252，帧数一致、D3D12 帧可导入图。测试已加入 delivery 门禁
+  （无素材时显式 SKIP）。
+- **帧池修复**：旧 swap 轮换允许 worker 在 read 停止后第 3 帧写调用方仍持有的帧；改为 4 帧池 +
+  read() 释放回收，worker 只写"从未交付/已被释放"的帧。代价：4K18 readAge 20.2–22.9ms vs worker 版
+  单次 19.8ms（spare 数不单调，无法定性为回归，详见报告 §4 注记）。
+- **probe 越界修复**：`capture_color_probe` 在双平面格式上 `AV_CEIL_RSHIFT(uint32_t)` 溢出成 21 亿行
+  直接崩溃；修复后新/旧两条路径都能输出 `source.raw/gpu.png/present.png`。颜色 A/B：当前采集信号是
+  动态画面，跨路径差异（mean 5.4）与同路径重复差异（mean 4.6–5.0）同量级，未发现系统性色偏，
+  但逐像素 ≤2 code 需静止画面，验收步骤见报告 §5。
+- **不做项（附理由）**：MJPEG 并行软解池（单 worker 已 0 丢帧、吞吐远超需求，并行不降低单帧延迟）；
+  `CODECAPI_AVLowLatencyMode`（作用于系统解码器，新链路已不使用系统解码器）；10bit/HDR 压缩采集
+  （需 P010 合同，本机无素材可验证）。
+- 验证：构建 exit 0；capture color tests failures=0；修复合同 191/0；compressed tests ALL PASS；
+  delivery 短测 PASS（含新增 capture-decode 检查）；真机烟测与 2 分钟复测均 0 丢帧。
+- 未验证（如实）：端到端光子延迟（相机法）、OBS/PotPlayer 同源对比、真 H.264/HEVC 采集卡、
+  10bit/HDR、AV1/VP9 采集。
+
 ## 2026-09-16 MPEG/压缩链路阶段 1+2+解码 worker（MJPEG 设备直连自解码，2 分钟真机复测）
 
 用户要求：先跑基线并记录 → 建 Git 存档 → 一次性实施 MPEG 链路修复 → 同协议复测对比。基线与存档见下方条目（`checkpoint/pre-mpeg-chain-20260916`）。
