@@ -60,7 +60,7 @@ std::wstring smokeView;bool smokeViewApplied=false;
 std::wstring smokeDualOutput;bool smokeEmpty=false;DWORD modeGdiStart=0,modeHandlesStart=0;SIZE_T modePrivateStart=0;
 bool smokeDual=false,smokeDualPause=false,smokeMaster=false,smokeMasterReject=false,smokeAudio=false,smokeJob=false,smokeJobCancel=false,smokeJobExit=false;int dualStep=0,masterStep=0,audioStep=0,jobStep=0;double pausedPosition=-1,jobPosition=0;uint64_t pausedFrames=0;ULONGLONG jobPauseTick=0;HANDLE workerMapping=nullptr;
 void switchMode();void selectInspector(int);void refreshDailyPresets();
-bool applySettings(veyra::engine::EnhancementSettings s){if(masterPendingRevision)return false;uiState.configured=s;if(uiState.enhanced)engine.requestSettings(s);else {auto effective=engine.snapshot().desired;if(effective.captureCompatible!=s.captureCompatible||effective.forceSdrPreview!=s.forceSdrPreview){effective.captureCompatible=s.captureCompatible;effective.forceSdrPreview=s.forceSdrPreview;engine.requestSettings(effective);}veyra::log::info("ui-settings","enhancement off: draft saved; presentation setting applied independently");}veyra::ui::settingsEnabled(uiState.enhanced,uiState.configured);return true;}
+bool applySettings(veyra::engine::EnhancementSettings s){if(masterPendingRevision)return false;uiState.configured=s;if(uiState.enhanced)engine.requestSettings(s);else {auto effective=engine.snapshot().desired;if(effective.captureCompatible!=s.captureCompatible||effective.forceSdrPreview!=s.forceSdrPreview||effective.captureFlipVertical!=s.captureFlipVertical){effective.captureCompatible=s.captureCompatible;effective.forceSdrPreview=s.forceSdrPreview;effective.captureFlipVertical=s.captureFlipVertical;engine.requestSettings(effective);}veyra::log::info("ui-settings","enhancement off: draft saved; presentation setting applied independently");}veyra::ui::settingsEnabled(uiState.enhanced,uiState.configured);return true;}
 
 struct ToolbarItem{HWND hwnd;int width;};std::vector<ToolbarItem> toolbar;
 bool full=false,holdOriginal=false,referenceBase=false;int compareMode=0;float compareSplit=.5f;WINDOWPLACEMENT windowPlacement{sizeof(windowPlacement)};
@@ -587,7 +587,7 @@ case RemotePlay:veyra::ui::showRemotePlayPanel(hwnd,[](veyra::source::RemotePlay
     }return result;
 },[]{engine.stop();},[]{return remoteController.calibrate();});break;
 #endif
-case Capture:case ProRailCapture:veyra::ui::showCapturePanel(hwnd,[](const std::wstring& path){openFile(path);layout();},[]{return (uiState.enhanced?engine.snapshot().desired:uiState.configured).forceSdrPreview;},[](bool enabled){auto s=uiState.enhanced?engine.snapshot().desired:uiState.configured;s.forceSdrPreview=enabled;return applySettings(s);},[]{return int((uiState.enhanced?engine.snapshot().desired:uiState.configured).captureAudio);},[](int mode){auto s=uiState.enhanced?engine.snapshot().desired:uiState.configured;s.captureAudio=static_cast<veyra::engine::CaptureAudioIngress>(std::clamp(mode,0,2));return applySettings(s);});break;
+case Capture:case ProRailCapture:veyra::ui::showCapturePanel(hwnd,[](const std::wstring& path){openFile(path);layout();},[]{return (uiState.enhanced?engine.snapshot().desired:uiState.configured).forceSdrPreview;},[](bool enabled){auto s=uiState.enhanced?engine.snapshot().desired:uiState.configured;s.forceSdrPreview=enabled;return applySettings(s);},[]{return int((uiState.enhanced?engine.snapshot().desired:uiState.configured).captureAudio);},[](int mode){auto s=uiState.enhanced?engine.snapshot().desired:uiState.configured;s.captureAudio=static_cast<veyra::engine::CaptureAudioIngress>(std::clamp(mode,0,2));return applySettings(s);},[]{return (uiState.enhanced?engine.snapshot().desired:uiState.configured).captureFlipVertical;},[](bool enabled){auto s=uiState.enhanced?engine.snapshot().desired:uiState.configured;s.captureFlipVertical=enabled;return applySettings(s);});break;
 case Export:if(uiState.mode==veyra::ui::Mode::Professional)startVideoExport(false);break;
 case Info:showDiagnostics=!showDiagnostics;layout();break;
 }return 0;
@@ -788,6 +788,9 @@ int argc=0;auto argv=CommandLineToArgvW(GetCommandLineW(),&argc);for(int i=1;i<a
 // every value-taking flag known, so --fg-xess / --fg-fsr / --fg-dlss work
 // anywhere on the command line instead of only at the end.
 {
+    // --capture-flip: diagnostics/smoke only; the interactive path uses the
+    // capture panel checkbox and persists captureFlipVertical with presets.
+    {int flipArgc=0;auto flipArgv=CommandLineToArgvW(GetCommandLineW(),&flipArgc);for(int i=1;i<flipArgc;++i)if(!_wcsicmp(flipArgv[i],L"--capture-flip"))initialOptions.settings.captureFlipVertical=true;LocalFree(flipArgv);}
     int positionalArgc=0;auto positionalArgv=CommandLineToArgvW(GetCommandLineW(),&positionalArgc);std::wstring positional;
     const wchar_t* valueFlags[]={L"--export-worker",L"--smoke-view",L"--smoke-dual-export",L"--smoke-seconds",L"--export-out",L"--max-frames",L"--cancel-after-ms",L"--smoke-save",L"--fg-multiplier",L"--capture-audio",L"--video-sr",L"--bitrate-mbps",L"--subtitle-primary",L"--subtitle-secondary",L"--subtitle-offset-ms",L"--subtitle-font-size"};
     for(int i=1;i<positionalArgc;++i){const std::wstring a=positionalArgv[i];

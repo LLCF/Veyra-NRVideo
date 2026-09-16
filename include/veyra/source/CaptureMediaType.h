@@ -22,6 +22,20 @@ struct CaptureMediaLayout {
     unsigned planes=1,chromaStride=0,chromaRowBytes=0;
     size_t chromaOffset=0,secondChromaOffset=0;
 };
+// Walk the AM_MEDIA_TYPE's format block without assuming VideoInfo vs
+// VideoInfo2; used to read/rewrite the DIB orientation flag in place.
+inline BITMAPINFOHEADER* captureBitmapHeader(AM_MEDIA_TYPE& type){
+    if(!type.pbFormat)return nullptr;
+    if(type.formattype==FORMAT_VideoInfo&&type.cbFormat>=sizeof(VIDEOINFOHEADER))return &reinterpret_cast<VIDEOINFOHEADER*>(type.pbFormat)->bmiHeader;
+    if(type.formattype==FORMAT_VideoInfo2&&type.cbFormat>=sizeof(VIDEOINFOHEADER2))return &reinterpret_cast<VIDEOINFOHEADER2*>(type.pbFormat)->bmiHeader;
+    return nullptr;
+}
+// RGB DIB packings are the only ones whose biHeight sign describes storage
+// order; YUV formats are always top-down (see captureMediaLayout).
+constexpr bool captureIsRgbDib(CapturePacking packing){
+    return packing==CapturePacking::Bgr32||packing==CapturePacking::Bgra32||packing==CapturePacking::Bgr24||
+        packing==CapturePacking::Rgb555||packing==CapturePacking::Rgb565;
+}
 // Parse negotiated memory layout, not the UI's requested dimensions. YUV is
 // top-down for either sign of biHeight; only RGB DIBs use bottom-up storage.
 inline bool captureMediaLayout(const AM_MEDIA_TYPE& type,CaptureMediaLayout& out){
@@ -97,13 +111,17 @@ inline bool captureMediaLayout(const AM_MEDIA_TYPE& type,CaptureMediaLayout& out
     }
     return true;
 }
-inline bool copyCaptureSample(const CaptureMediaLayout& layout,const uint8_t* src,size_t bytes,AVFrame& dst){
+// flipVertical is the manual capture override: it inverts whatever the DIB
+// header claims (and reverses chroma rows for planar YUV), so a device whose
+// declared orientation does not match its samples can still be watched.
+inline bool copyCaptureSample(const CaptureMediaLayout& layout,const uint8_t* src,size_t bytes,AVFrame& dst,bool flipVertical=false){
     if(!src||bytes<layout.sampleBytes||dst.format!=layout.format||dst.width!=int(layout.width)||dst.height!=int(layout.height)||!dst.data[0]||dst.linesize[0]<int(layout.rowBytes))return false;
     if(layout.format==AV_PIX_FMT_BGR0&&dst.linesize[0]<int(layout.width*4))return false;
     if(layout.planes>1&&(!dst.data[1]||dst.linesize[1]<int(layout.chromaRowBytes)))return false;
     if(layout.planes>2&&(!dst.data[2]||dst.linesize[2]<int(layout.chromaRowBytes)))return false;
+    const bool flip=layout.bottomUp!=flipVertical;
     for(unsigned y=0;y<layout.height;++y){
-        const auto* s=src+size_t(layout.bottomUp?layout.height-1-y:y)*layout.stride;auto* d=dst.data[0]+ptrdiff_t(y)*dst.linesize[0];
+        const auto* s=src+size_t(flip?layout.height-1-y:y)*layout.stride;auto* d=dst.data[0]+ptrdiff_t(y)*dst.linesize[0];
         if(layout.packing==CapturePacking::Bgr24){for(unsigned x=0;x<layout.width;++x){d[x*4]=s[x*3];d[x*4+1]=s[x*3+1];d[x*4+2]=s[x*3+2];d[x*4+3]=255;}}
         else if(layout.packing==CapturePacking::Rgb555||layout.packing==CapturePacking::Rgb565){
             const bool six=layout.packing==CapturePacking::Rgb565;
@@ -113,7 +131,7 @@ inline bool copyCaptureSample(const CaptureMediaLayout& layout,const uint8_t* sr
         }else std::memcpy(d,s,layout.rowBytes);
     }
     for(unsigned p=1;p<layout.planes;++p)for(unsigned y=0;y<layout.height/2;++y){
-        const auto* s=src+(p==1?layout.chromaOffset:layout.secondChromaOffset)+size_t(y)*layout.chromaStride;auto* d=dst.data[p]+ptrdiff_t(y)*dst.linesize[p];
+        const auto* s=src+(p==1?layout.chromaOffset:layout.secondChromaOffset)+size_t(flip?layout.height/2-1-y:y)*layout.chromaStride;auto* d=dst.data[p]+ptrdiff_t(y)*dst.linesize[p];
         if(layout.packing==CapturePacking::Nv21){for(unsigned x=0;x<layout.chromaRowBytes;x+=2){d[x]=s[x+1];d[x+1]=s[x];}}
         else std::memcpy(d,s,layout.chromaRowBytes);
     }

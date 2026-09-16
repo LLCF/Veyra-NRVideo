@@ -141,6 +141,8 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
     // 0 automatic, 1 PCM only, 2 bitstream preferred (see
     // engine::CaptureAudioIngress). Read when the audio graph is built.
     unsigned audioIngressMode=0;
+    // Manual capture flip; read by the DirectShow callback thread.
+    std::atomic<bool> verticalFlip{false};
     std::unique_ptr<WasapiAudioInput> wasapi;
     std::wstring audioError;
     AudioInputRecovery audioRecovery;
@@ -159,7 +161,7 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
             else {
                 // Copy directly into our bounded mailbox; read() swaps frames
                 // under this lock, so the frame consumed by the GPU is untouched.
-                if(!copyCaptureSample(layout,data,size_t(sample->GetActualDataLength()),*pendingFrame)){callbackError=true;wake.notify_one();return S_OK;}
+                if(!copyCaptureSample(layout,data,size_t(sample->GetActualDataLength()),*pendingFrame,verticalFlip.load())){callbackError=true;wake.notify_one();return S_OK;}
                 if(pending)++dropped;
                 // Inspect consecutive callbacks, not consecutive mailbox reads.
                 // Preserve a driver/clock break when its sample is overwritten.
@@ -231,6 +233,11 @@ void CaptureCardSource::setAudioIngress(unsigned mode){
     log::info("capture-audio-ingress",std::format("mode={} ({}) takes effect on the next connect",clamped,
         clamped==1?"PCM only":clamped==2?"bitstream preferred":"automatic"));
 }
+void CaptureCardSource::setVerticalFlip(bool enabled){
+    auto& p=*p_;
+    if(p.verticalFlip.exchange(enabled)==enabled)return;
+    log::info("capture-flip",std::format("manual vertical flip={} (applies to the next sample; ingest only)",enabled?1:0));
+}
 bool CaptureCardSource::setAudioGain(float gain){
     if(p_->wasapi){p_->wasapi->setGain(gain);return p_->wasapi->snapshot().available;}
     auto& p=*p_;if(p.audioSession){p.audioSession->setGain(gain);return p.audioSession->snapshot().available;}if(!p.graph||!p.audioFilter)return false;
@@ -259,6 +266,28 @@ bool CaptureCardSource::configure(const SourceOpenDesc& desc){close();p_->lastAu
     CaptureMediaLayout nativeLayout;const bool nativeSupported=captureMediaLayout(*native,nativeLayout);
     if(!nativeSupported&&capturePacking(native->subtype)!=CapturePacking::Unknown){log::error("capture","Known raw format has unsupported layout/color metadata; refusing implicit RGB conversion");freeType(native);return false;}
     if(nativeSupported&&(nativeLayout.format==AV_PIX_FMT_P010||nativeLayout.format==AV_PIX_FMT_P016)&&desc.legacyCaptureRgbForDiagnostic){log::error("capture","10/16-bit capture cannot use the legacy 8-bit RGB diagnostic converter");freeType(native);return false;}
+    // Some drivers advertise a bottom-up DIB (biHeight>0) while their samples
+    // actually arrive top-down, which users reported as "RGB24 captures upside
+    // down". Ask for an explicit top-down connection first: an accepted request
+    // normalizes the mismatch (connected type is then negative and no flip is
+    // applied), a refusal keeps the driver-declared sign and the existing flip.
+    // Truthful bottom-up devices stay correct in both cases.
+    if(nativeSupported&&captureIsRgbDib(nativeLayout.packing)){
+        if(auto* header=captureBitmapHeader(*native);header&&header->biHeight>0){
+            const LONG advertised=header->biHeight;header->biHeight=-advertised;
+            const HRESULT topDownHr=p.config->SetFormat(native);
+            if(SUCCEEDED(topDownHr)){
+                AM_MEDIA_TYPE* refreshed=nullptr;CaptureMediaLayout refreshedLayout;
+                if(SUCCEEDED(p.config->GetFormat(&refreshed))&&refreshed&&captureMediaLayout(*refreshed,refreshedLayout)){
+                    freeType(native);native=refreshed;nativeLayout=refreshedLayout;
+                }else freeType(refreshed);
+                log::info("capture",std::format("DIB top-down request hr=0x{:08X} subtype=0x{:08X} accepted=1 bottomUp={}",uint32_t(topDownHr),native->subtype.Data1,nativeLayout.bottomUp));
+            }else{
+                header->biHeight=advertised;
+                log::info("capture",std::format("DIB top-down request hr=0x{:08X} subtype=0x{:08X} accepted=0 bottomUp={} (keeping driver-declared orientation)",uint32_t(topDownHr),native->subtype.Data1,nativeLayout.bottomUp));
+            }
+        }
+    }
     const bool direct=nativeSupported&&!desc.legacyCaptureRgbForDiagnostic;
     AM_MEDIA_TYPE connected{};
     if(direct){

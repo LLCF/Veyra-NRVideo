@@ -50,6 +50,28 @@ template<class Check> void captureFormatCases(Check check){
         for(unsigned y=0;y<4;++y){raw[y*l.stride]=0;raw[y*l.stride+1]=id==MEDIASUBTYPE_RGB565?0xf8:0x7c;}
         check(copyCaptureSample(l,raw.data(),raw.size(),*f)&&f->data[0][0]==0&&f->data[0][1]==0&&f->data[0][2]==255,"RGB555/565 red channel masks");av_frame_free(&f);
     }
+    // Orientation contract: the DIB sign decides whether ingest flips, the
+    // manual override inverts that decision, and planar chroma follows luma.
+    {
+        vi.bmiHeader.biWidth=4;vi.bmiHeader.biHeight=4;vi.bmiHeader.biSizeImage=0;t.subtype=MEDIASUBTYPE_RGB24;CaptureMediaLayout rgb;
+        check(captureMediaLayout(t,rgb),"RGB24 bottom-up layout for the orientation cases");
+        std::vector<uint8_t> raw(rgb.sampleBytes,0);
+        for(unsigned y=0;y<4;++y)raw[size_t(y)*rgb.stride]=uint8_t(y+1);
+        AVFrame* f=av_frame_alloc();f->width=4;f->height=4;f->format=rgb.format;av_frame_get_buffer(f,32);
+        check(rgb.bottomUp&&copyCaptureSample(rgb,raw.data(),raw.size(),*f)&&f->data[0][0]==4,"bottom-up RGB24 ingest reads the last memory row first");
+        check(copyCaptureSample(rgb,raw.data(),raw.size(),*f,true)&&f->data[0][0]==1,"manual flip inverts bottom-up RGB24 ingest");
+        vi.bmiHeader.biHeight=-4;
+        check(captureMediaLayout(t,rgb)&&!rgb.bottomUp&&copyCaptureSample(rgb,raw.data(),raw.size(),*f)&&f->data[0][0]==1,"top-down RGB24 ingest passes rows through");
+        check(copyCaptureSample(rgb,raw.data(),raw.size(),*f,true)&&f->data[0][0]==4,"manual flip inverts top-down RGB24 ingest");
+        av_frame_free(&f);
+        t.subtype=fourcc("NV12");vi.bmiHeader.biWidth=4;vi.bmiHeader.biHeight=4;vi.bmiHeader.biSizeImage=0;CaptureMediaLayout yuv;
+        check(captureMediaLayout(t,yuv),"NV12 layout for the chroma flip case");
+        std::vector<uint8_t> plane(yuv.sampleBytes,0);plane[yuv.chromaOffset]=10;plane[yuv.chromaOffset+yuv.chromaStride]=11;
+        AVFrame* g=av_frame_alloc();g->width=4;g->height=4;g->format=yuv.format;av_frame_get_buffer(g,32);
+        check(copyCaptureSample(yuv,plane.data(),plane.size(),*g)&&g->data[1][0]==10,"YUV ingest stays top-down without the override");
+        check(copyCaptureSample(yuv,plane.data(),plane.size(),*g,true)&&g->data[1][0]==11,"manual flip reverses chroma rows too");
+        av_frame_free(&g);
+    }
     t.subtype=fourcc("P010");DXVA2_ExtendedFormat ext{};ext.VideoTransferFunction=16;vi.dwControlFlags=ext.value|AMCONTROL_COLORINFO_PRESENT;
     check(captureMediaLayout(t,l)&&l.color.transfer==veyra::pipeline::TransferFunction::HLG&&!l.color.transferAssumed,"capture HLG metadata is retained, never silently interpreted as SDR");vi.dwControlFlags=0;
     t.subtype=fourcc("ABCD");check(capturePixelName(t.subtype)==L"ABCD"&&!captureMediaLayout(t,l),"unknown FourCC readable but not advertised as native");

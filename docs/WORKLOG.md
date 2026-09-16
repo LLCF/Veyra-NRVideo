@@ -1,5 +1,43 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-16 RGB24 采集倒像：直连 top-down 协商 + 手动上下翻转（用户选 A+B，不做强制转换 C）
+
+用户反馈部分设备用 RGB24 时画面上下颠倒，其他格式正常、其他软件正常。判定：全链路只有 `captureMediaLayout` 按 DIB 的 `biHeight` 符号决定是否翻转（`copyCaptureSample`），YUV 一律按 top-down 读、不看符号；这些设备的 RGB24 媒体类型声明方向与实际样本不一致。RGB24 自 1.1.0 起是原生直连（1.0.x 走系统 RGB32 转换），因此只有该格式暴露该矛盾。旧测试是自证式（单元用例用同一公式算期望）或用等值横条纹（GPU 用例），方向没有任何断言。
+
+**A. 直连 RGB DIB 先协商 top-down**（`src/source/CaptureCardSource.cpp`）：对 Bgr32/Bgra32/Bgr24/RGB555/565 且 `biHeight>0` 的 caps 类型，先把 `biHeight` 取负再 `SetFormat`；成功则重新 `GetFormat` 并按实际连接类型解析（负高度→不翻转），失败则恢复原符号、保持按符号翻转。新增日志 `[capture] DIB top-down request hr=0x… accepted=0/1 bottomUp=…`。诚实的 bottom-up 设备两种结果都保持正确。
+
+**B. 采集面板"画面上下翻转"开关**（立即生效）：新增 `EnhancementSettings::captureFlipVertical`（默认关；加入 `sameVideoConfiguration` 的实时字段，切换不重建图）；`CaptureCardSource::setVerticalFlip`（原子标志，DirectShow 回调按样本生效，RGB 与 YUV 都支持，YUV 连色度行一起翻转；`copyCaptureSample` 增加可选 flip 参数）；引擎在 configure 前、start 前、重连、每帧与实时设置块同步；采集面板新增 checkbox 15 与帮助文本，AppShell 接线；`--capture-flip` 仅作诊断/烟测。预设 schema v15→v16（行尾追加 bool；v1–v15 旧文件仍可读，老版本读到 v16 会拒绝并保留原文件）。
+
+**验证**：
+
+- `veyra_capture_color_tests.exe`：failures=0；新增方向断言全部 PASS（bottom-up RGB24 读最后一行、top-down 直通、手动翻转对两种输入都反相、NV12 色度行跟随翻转）。
+- `veyra_repair_contract_tests.exe`：181 checks 0 failures（含 "capture vertical flip defaults off"）。
+- `veyra_repair_preset_tests.exe <tmp>`：66 组 v4–v14 迁移 + 全字段往返（含 v16 翻转字段）通过，exit 0；测试内的 schema 版本断言同步改为 16。
+- `cmd.exe /c out\build\veyra-build-x64-release.cmd` exit 0（93/93）。
+- 实卡烟测：`veyra.exe "capture:0:0:-1:0" --smoke-seconds 10 --no-nr --no-sr --no-fg --capture-flip` exit 0、`frames=573`、`failed=false`、`captureDropped=0`，日志 `[capture-flip] manual vertical flip=1`（YUY2 路径翻转后仍稳定）；最终构建再复测 8 秒 exit 0。
+- 总开关关闭时也立即生效：`applySettings` 的 enhancement-off 分支改为与 `forceSdrPreview` 一起转发 `captureFlipVertical`（否则首次默认"全关"状态下勾选不会下发）。
+- delivery 短测 PASS，42.84 秒，`logs/delivery/3f749a7819ae4ae6842eab73ed04e235/result.json`，最终 EXE SHA256 `D7539CBC7CC8D5728DAE559175912181375E1FF62FE0C9F1D15A937FAC93098A`（gate 自身仍标 `capture=awaiting_user_capture_test`）。
+
+**未执行（如实记录）**：本机没有 RGB24 设备，"A 的 top-down 协商在问题卡上是否被接受"仍须受影响用户实机验证；若驱动拒绝协商，B 的开关可立即救场。未打包、未发布、未提交/推送。
+
+## 2026-09-16 PS5 串流"无法打开视频"回归修复（音频入口插入语句改坏 else 绑定）
+
+用户反馈 1.2 能串流、1.3.1beta 测试包不行，面板提示"无法打开视频，请查看诊断"。
+
+**根因（代码与日志双向确认）**：`2ffb5c7`（2026-09-16 10:40 采集音频手动入口）在 `EngineController::run()` 的 `#ifdef VEYRA_ENABLE_REMOTEPLAY … }else` 与"打开源"检查之间插入 `if(physicalCapture)captureSource.setAudioIngress(...)`。C++ 的 `else` 只绑定紧随其后的单条语句，这一插入把原本绑定 open 检查的 `else` 静默改绑到新语句上，导致 **PS5 串流也执行 `activeSource->open(od)`**；`RemotePlaySessionSource::open()` 固定返回 false → `status("无法打开视频，请查看诊断",true)` → break。因为 remote 分支先阻塞等待第一帧，失败固定发生在解码器产出第一帧后 3~5ms：日志只见 `teardown begin … cancelled=true`，没有任何 graph/present 行。失败包为 `E:\App\Veyra-1.3.1beta-win64-portable`（= `final-30x86-r4`，EXE SHA256 `2DF130AC…`），日志 `E:\App\Veyra-1.3.1beta-win64-portable\logs\veyra-app.log`（三次尝试 10:49:57 / 10:50:16 / 10:50:29，另 11:18–11:19 两次干净进程复现）。
+
+**版本对照（git 验证）**：v1.2.0 与 v1.3.0 tag 的 `}else` 直接绑定 open 检查（结构正常；1.2.0 桌面测试版本机 18:51 实测串流可用，仓库 `logs\veyra-app.log` 10:51:49–10:56:11 段）；含 `2ffb5c7` 的 r2/r3/r4 与 `final/` 1.3.1beta 包全部中招。文件/采集卡不受影响（它们的路径本来就要走这条检查）。
+
+**修复**（`src/engine/EngineController.cpp`，+11/-5）：把 `setAudioIngress` 移到 `#ifdef` 分支链之前（仍早于 `captureSource.configure`，采集语义不变），并给 `}else{ … }` 补大括号，防止以后再次插入语句改变绑定。
+
+**验证**：
+
+- `cmd.exe /c out\build\veyra-build-x64-release.cmd` exit 0（增量 23/23，RemotePlay ON，patched FFmpeg/dav1d 保持）。
+- `scripts/gates/delivery.ps1 -Root . -BuildDirectory out/build/audio-continuity-repair-20260915` PASS，46.98 秒，`logs/delivery/206a0c5ffe7f4e2eb4f72f42146455f3/result.json`，EXE SHA256 `91A7116F78A3ACE3105C20894A3E9332A04C3CDA4E997FB6E897955297E5B6D1`（gate 自身仍标 `capture=awaiting_user_capture_test`）。
+- 实机采集卡烟测 `veyra.exe "capture:0:0:-1:0" --smoke-seconds 12 --no-nr --no-sr --no-fg`：exit 0、`frames=694`、`failed=false`、`captureDropped=0`，音频入口调用顺序未回归。
+
+**未执行（如实记录）**：真实 PS5 串流复测（需要主机；修复后第一次连接须由实机确认能到 `display-color`/图初始化）；未重打 1.3.1beta 测试包（等实机确认后再打包替换）。工作区改动未提交、未推送。
+
 ## 2026-09-16 帧生成 / FSR / 杜比：隔离分支夜间施工（未合并 main）
 
 用户要求"开工前创建 GIT 存档、建立隔离区分支、所有操作在隔离区进行、人工验收合格前不允许合并 main"。已建 tag `checkpoint/pre-framegen-fsr-dolby-2026-09-16`（main `693db07`）与分支 `codex/framegen-fsr-dolby-20260916`。

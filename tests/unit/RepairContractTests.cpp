@@ -206,6 +206,7 @@ int main(){
     {
         engine::EnhancementSettings settings;
         check(settings.captureAudio==engine::CaptureAudioIngress::Auto,"capture audio ingress defaults to automatic");
+        check(!settings.captureFlipVertical,"capture vertical flip defaults off");
         for(auto mode:{engine::CaptureAudioIngress::Auto,engine::CaptureAudioIngress::PcmOnly,engine::CaptureAudioIngress::BitstreamPreferred}){
             settings.captureAudio=mode;
             check(settings.validate().empty(),"capture audio ingress modes validate");

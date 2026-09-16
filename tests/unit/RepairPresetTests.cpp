@@ -42,7 +42,7 @@ bool legacyBackends(const std::filesystem::path& path) {
    if(version>=7&&(value.audioSync!=AudioSyncMode::Manual||value.audioOffsetMs!=137))return false;
    if(!store.put(L"legacy",value,true))return false;
    std::ifstream file(path);std::string magic;int savedVersion=0;file>>magic>>savedVersion;
-   if(magic!="VEYRA_PRESETS"||savedVersion!=15)return false;
+   if(magic!="VEYRA_PRESETS"||savedVersion!=16)return false;
    PresetStore reloaded(path);
    if(!reloaded.load()||reloaded.defaultSettings()!=value)return false;
   }else{
@@ -106,6 +106,9 @@ ok=ok&&a.put(L"test",s)&&a.setDefault(0)&&!a.put(L"test",s);PresetStore b(p);ok=
  auto ingress=s;ingress.captureAudio=CaptureAudioIngress::BitstreamPreferred;ok=ok&&b.put(L"audio bitstream",ingress);
  PresetStore ingressReload(p);ok=ok&&ingressReload.load()&&ingressReload.entries().size()==1&&ingressReload.entries().back().settings.captureAudio==CaptureAudioIngress::BitstreamPreferred&&b.erase(0);
  auto badIngress=s;badIngress.captureAudio=static_cast<CaptureAudioIngress>(3);ok=ok&&!b.put(L"invalid ingress",badIngress);
+ // Manual capture vertical flip (v16) round-trips with the rest of the preset.
+ auto flipped=s;flipped.captureFlipVertical=true;ok=ok&&b.put(L"capture flip",flipped);
+ PresetStore flipReload(p);ok=ok&&flipReload.load()&&flipReload.entries().size()==1&&flipReload.entries().back().settings.captureFlipVertical&&b.erase(0);
  {std::ofstream legacy(p);legacy<<"VEYRA_PRESETS 1\n\"legacy\" 1\n\"legacy\" 1 1 1 -1 0 0 0 1 1 1 1 1 1 0 1 0 1 0\n";}
  PresetStore old(p);ok=ok&&old.load()&&!old.defaultSettings().protection.enabled&&old.defaultSettings().srTarget==veyra::pipeline::SrTarget::Uhd4K&&old.put(L"v2",s);
  PresetStore upgraded(p);ok=ok&&upgraded.load()&&upgraded.entries().size()==2&&upgraded.entries()[1].settings==s;
