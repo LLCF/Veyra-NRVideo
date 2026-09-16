@@ -1,5 +1,13 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-16 采集链路 N3：格式排序与延迟标注
+
+- `include/veyra/source/CaptureFormatRank.h`（新）：`captureFormatRank` / `captureFormatTier` / `captureFormatTierLabel` / `captureFormatNeedsCostHint`。推荐顺序：NV12/P010 → YUY2 → RGB24/RGB32/ARGB32 → UYVY/YVYU/RGB555/RGB565 → 压缩/需解码（rank 100）。
+- `enumerateFormats`：按 rank `stable_sort`（同 rank 保留驱动枚举顺序），每行 label 追加延迟档位（低延迟 / 中延迟 / 高延迟·需 CPU 拆包 / 需系统解码·较高延迟）；`CaptureFormat` 增加 `rank`/`tier` 字段供面板使用。
+- 采集面板：选中高成本或解码格式时给**一次性**提示（`CapturePreferences` v1→v2，新增 `formatHintDismissed`，v1 旧文件仍可读）；提示写入状态栏并持久化"只提示一次"。
+- 验证：构建 exit 0；修复合同 191 项 0 失败（新增 4 项：rank 链 NV12<YUY2<RGB24<RGB565<解码、tier 分级、提示门槛、合成列表里 YUY2 排在 RGB565 前）；预设 66 组 exit 0。真卡 `veyra_capture_tests --list`：YUY2（0–23，含 4K18）排在 MJPEG（24+）之前，每行带档位标注（控制台中文乱码是既有 probe 编码问题，GUI 走 wstring）。
+- 未做（如实）：UI 提示的自动化点击测试（判定逻辑已被单元测试覆盖）；N1/N2 与压缩解码链路尚未开工。
+
 ## 2026-09-16 采集链路优化开工：隔离分支 + N4 视频 pin 缓冲协商
 
 用户指令："直接开隔离区分支，开始优化采集链路"。已建 tag `checkpoint/pre-capture-decode-latency-20260916`（main `2406f81`）与分支 `codex/capture-decode-latency-20260916`，按 `docs/CAPTURE_DECODE_LATENCY_PLAN_2026-09-16.md` 的 N4→N3→N1→N2 顺序开工。

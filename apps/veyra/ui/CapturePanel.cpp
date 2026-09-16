@@ -5,6 +5,7 @@
 #include "veyra/RuntimePaths.h"
 #include "veyra/Log.h"
 #include "veyra/source/CaptureCardSource.h"
+#include "veyra/source/CaptureFormatRank.h"
 #include <future>
 #include <format>
 namespace veyra::ui {
@@ -39,6 +40,16 @@ int selectedAudio(HWND h,int device){
     const bool videoSelected=device>=0&&size_t(device)<videoDevices.size();
     if(videoSelected&&selection==1)return source::kCaptureAudioFromVideoDevice;
     return selection-1-(videoSelected?1:0);
+}
+void maybeShowFormatHint(HWND h){
+    const int index=int(SendDlgItemMessageW(h,2,CB_GETCURSEL,0,0));
+    if(index<0||size_t(index)>=formats.size()||remembered.formatHintDismissed)return;
+    const auto& format=formats[size_t(index)];
+    const auto tier=static_cast<source::CaptureFormatTier>(format.tier);
+    if(!source::captureFormatNeedsCostHint(tier))return;
+    SetDlgItemTextW(h,8,std::format(L"提示：{} 在高分辨率/高帧率下比低延迟格式多一道处理环节（{}）。建议优先选低延迟格式；此提示只出现一次。",format.label,source::captureFormatTierLabel(tier)).c_str());
+    remembered.formatHintDismissed=true;
+    CapturePreferenceStore(runtime::localDataDirectory()).save(remembered);
 }
 void query(int device){if(busy)return;busy=true;queriedDevice=device;queryStarted=GetTickCount64();SetDlgItemTextW(window,8,L"正在查询设备能力…当前播放继续");EnableWindow(GetDlgItem(window,4),FALSE);EnableWindow(GetDlgItem(window,5),FALSE);EnableWindow(GetDlgItem(window,1),FALSE);
     const std::wstring videoPath=device>=0&&size_t(device)<videoDevices.size()?videoDevices[size_t(device)].path:L"";
@@ -120,6 +131,7 @@ case WM_COMMAND:
         const int device=int(SendDlgItemMessageW(h,1,CB_GETCURSEL,0,0));rebuildAudioList(h,device);query(device);
     }else if((LOWORD(wp)==2||LOWORD(wp)==3)&&HIWORD(wp)==CBN_SELCHANGE){
         EnableWindow(GetDlgItem(h,4),!busy&&SendDlgItemMessageW(h,2,CB_GETCURSEL,0,0)!=CB_ERR&&SendDlgItemMessageW(h,3,CB_GETCURSEL,0,0)!=CB_ERR);
+        if(LOWORD(wp)==2)maybeShowFormatHint(h);
     }else if(LOWORD(wp)==5){
         query(-1);
     }else if(LOWORD(wp)==4){
@@ -131,7 +143,7 @@ case WM_COMMAND:
             const auto* audioDevice=audio>=0?&audioDevices[size_t(audio)]:nullptr;
             const auto path=source::CaptureCardSource::makeCapturePath(unsigned(device),videoDevices[size_t(device)],formats[size_t(format)].index,audio,audioDevice,unsigned(SendDlgItemMessageW(h,10,CB_GETCURSEL,0,0)));
             if(!path.empty()){
-                remembered={videoDevices[size_t(device)].path,formats[size_t(format)].key,audioDevice?audioDevice->path:L"",audioDevice?(audioDevice->wasapi?source::kCaptureAudioWasapi:0):audio,unsigned(SendDlgItemMessageW(h,10,CB_GETCURSEL,0,0))};
+                remembered={videoDevices[size_t(device)].path,formats[size_t(format)].key,audioDevice?audioDevice->path:L"",audioDevice?(audioDevice->wasapi?source::kCaptureAudioWasapi:0):audio,unsigned(SendDlgItemMessageW(h,10,CB_GETCURSEL,0,0)),remembered.formatHintDismissed};
                 if(!CapturePreferenceStore(runtime::localDataDirectory()).save(remembered))log::warn("capture","Failed to save capture selection");
                 start(path);DestroyWindow(h);
             }

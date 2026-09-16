@@ -4,6 +4,7 @@
 #include "veyra/source/CaptureMediaType.h"
 #include "veyra/source/NativeCaptureSink.h"
 #include "veyra/source/CaptureBuffer.h"
+#include "veyra/source/CaptureFormatRank.h"
 #include "veyra/pipeline/ColorMetadata.h"
 #include "veyra/Log.h"
 #include "veyra/sink/AudioFormat.h"
@@ -218,12 +219,17 @@ std::vector<CaptureFormat> enumerateFormats(IAMStreamConfig* config){
         if(bitmap&&bitmap->biWidth>0&&bitmap->biWidth<=3840&&std::abs(int64_t(bitmap->biHeight))>0&&std::abs(int64_t(bitmap->biHeight))<=2160&&duration>0){unsigned width=bitmap->biWidth,height=unsigned(std::abs(int64_t(bitmap->biHeight)));double fps=1e7/duration;
             const auto pixel=capturePixelName(type->subtype);CaptureMediaLayout layout;const bool valid=captureMediaLayout(*type,layout);const bool knownRaw=capturePacking(type->subtype)!=CapturePacking::Unknown;
             const wchar_t* support=valid?((layout.format==AV_PIX_FMT_P010||layout.format==AV_PIX_FMT_P016)?L"原生 · SDR":L"原生"):knownRaw?L"布局/颜色暂不支持":L"需系统解码/转换";
+            // N3: latency tier + recommended rank; compressed/unknown sorts last.
+            const auto tier=valid?captureFormatTier(layout.packing):CaptureFormatTier::Decoded;
+            const int rank=valid?captureFormatRank(layout.packing):captureFormatRank(CapturePacking::Unknown);
             wchar_t subtype[40]{},formatType[40]{};StringFromGUID2(type->subtype,subtype,40);StringFromGUID2(type->formattype,formatType,40);
             const auto key=std::format(L"{}:{}:{}:{}:{}:{}:{}",width,bitmap->biHeight,duration,subtype,formatType,bitmap->biBitCount,bitmap->biCompression);
-            out.push_back({i,width,height,fps,std::format(L"{} x {} @ {:.2f} fps · {} · {} [format {}]",width,height,fps,pixel,support,i),key});
+            out.push_back({i,width,height,fps,std::format(L"{} x {} @ {:.2f} fps · {} · {} · {} [format {}]",width,height,fps,pixel,support,captureFormatTierLabel(tier),i),key,rank,int(tier)});
         }
         freeType(type);
     }
+    // Recommended order first; equal ranks keep the driver's enumeration order.
+    std::stable_sort(out.begin(),out.end(),[](const CaptureFormat& a,const CaptureFormat& b){return a.rank<b.rank;});
     return out;
 }
 std::vector<CaptureFormat> CaptureCardSource::formats(unsigned device){ComPtr<IGraphBuilder> g;ComPtr<ICaptureGraphBuilder2>b;ComPtr<IBaseFilter>f;ComPtr<IAMStreamConfig>c;if(!configuration(device,g,b,f,c))return {};return enumerateFormats(c.Get());}
