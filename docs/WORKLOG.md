@@ -39,7 +39,7 @@
 - **产品接入**（提交 `3dd5add`）：`EnhanceGraph::applyAmpereMfgUnlock()` 在 FG 能力查询前调用（仅 RTX 30 设备窗口触发）；provider 在 30 系上仍会报 FG 不可用（Ada/Blackwell 门控），当审计版解锁已安装时宽限继续并把缺失的 MultiFrameCountMax 补为审计上限 5（显式更小的报告值仍被尊重）；shutdown 与 Ada 解锁对称释放。
 - **本机证据**（仅结构与机制）：probe `veyra_dlssg_ampere_probe` → scan 全绿（runs=8/200 槽/25+38+6 fatbin/44 lea/2 gate/temporal 唯一）、apply `applied=1 preflight=69/69 readBack=1 restored=1`；delivery 短测 PASS `logs/delivery/548a606d92484286806f272d4744d2a7/result.json`。
 - **未验证（如实）**：RTX 30 实机行为——provider 是否还有 310.7 特有的额外 gate、sm_86 内核的实际插帧质量/性能、以及 dashdogy 自述的 "very early and experimental" 风险（可能部分配置不工作）。需要 30 系机器按 `Veyra.exe --fg-multiplier 6 --smoke-seconds 15 <视频>` 取证并回传日志。
-- **测试包（含 30 系解锁）**：`C:\veyra-test-packages\final-30x86\Veyra-1.3.1beta-win64-portable.zip`，469,773,588 字节，SHA256 `442CC876465241259DBA57DD2A4A14A74CDCBDA283C271477644C1FCF505310D`；包内 EXE 4K30 烟测 exit 0。此包同时包含 40 系 6X、50 系 6X、XeSS、FSR、杜比兜底与采集音频手动选择，可一次覆盖 30/40/50 三台机器验收。
+- **测试包（含 30 系解锁，当前交付版）**：`C:\veyra-test-packages\final-30x86-r2\Veyra-1.3.1beta-win64-portable.zip`，469,773,588 字节，SHA256 `8933605B22527E6393BC0995CE5A8E0A0317716E90C1F7A57FB9BFF9ED1B2E80`；包内 `Veyra.exe` SHA256 `1C19D80EC6A4A4FCDCACC05121C35EF7A153CBD004986F33F0C13CA71B7AF389`（与构建树一致）、`nvngx_dlssg.dll` 仍为审计原版 `135EAF07…`；包内 EXE 4K30 烟测 exit 0。此包同时包含 40 系 6X、50 系 6X、XeSS、FSR、杜比兜底与采集音频手动选择，可一次覆盖 30/40/50 三台机器验收。较早的 `final-30x86\` 包同内容、旧 zip 时间戳，保留作存档。
 
 ## 2026-09-15 采集卡直播窗口标题修复（第三方工具“识别不到 Veyra”）
 
