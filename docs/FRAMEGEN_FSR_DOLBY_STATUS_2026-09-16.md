@@ -116,7 +116,12 @@ $env:VEYRA_TEST_FG_FORCE_MULTIPLIER='1'
 
 0. `git log --oneline -12` 确认全部提交都在 `codex/framegen-fsr-dolby-20260916`，`main` 仍是 `693db07`、未推送、未发布。
    最终构建 `cmd.exe /c out\build\veyra-build-x64-release.cmd` exit 0；最终
-   `veyra.exe` SHA256 `7ADDF839F22E31C0D1BC52434B7CAC09C1AF9BA06A3E4DAD4733D7E79BEB28AD`；
+   `veyra.exe` SHA256 `38ACCF32FB182D71AEBCB47A13F327ADFC25A8580703CCEA882B3B3CBAB904A9`；
+   delivery 短测 PASS（`logs/delivery/622908bcc14b47a381340e8662c5b0a2/result.json`）。
+   40 系解锁验收：在 40 系机器上跑 `veyra.exe --fg-multiplier 4 --smoke-seconds 15 <视频>`，
+   期望 `[ada-mfg] ... unlock applied=1 gates=2 descriptors=8 kernel=1` 与 `multiFrameMax=5`；
+   杜比验收：在支持位流的采集卡上跑一次采集，期望 `capture-audio-bitstream passthrough selected kind=...`
+   与面板里"位流解码为 N 声道 (kind)"。
    delivery 短测 PASS（`logs/delivery/7180a557fe934a27a225f6367a1b06e9/result.json`）；
    `veyra_repair_contract_tests` 157 项 0 失败；`veyra_repair_preset_tests` 60 组迁移全通过。
 1. **AMD FSR 补帧**：`out\build\audio-continuity-repair-20260915\veyra.exe --fg-fsr --smoke-seconds 10 <视频>`，
