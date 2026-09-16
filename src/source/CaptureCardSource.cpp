@@ -249,6 +249,11 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
     std::deque<CompressedSample> compressedQueue;size_t compressedQueueLimit=3;
     std::thread decodeThread;std::condition_variable decodeWake;bool decodeStop=false;
     AVFrame* workerFrame=nullptr;uint64_t compressedDropped=0;double lastCallbackTime=0;
+    // NV12 frames the decode worker may write into. A frame enters this pool
+    // only when it was never delivered, or when a read() call released it
+    // (the caller's ownership ends at the next read), so a frame the caller
+    // still holds is never overwritten underneath it.
+    std::vector<AVFrame*> compressedFree;
     // Manual capture flip; read by the DirectShow callback thread.
     std::atomic<bool> verticalFlip{false};
     std::unique_ptr<WasapiAudioInput> wasapi;
@@ -262,33 +267,44 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
     // result to the mailbox. No source lock is held during decoding.
     void decodeLoop(){
         for(;;){
-            CompressedSample sample;
+            CompressedSample sample;AVFrame* target=nullptr;
             {
                 std::unique_lock lock(mutex);
-                decodeWake.wait(lock,[&]{return decodeStop||!compressedQueue.empty();});
-                if(decodeStop&&compressedQueue.empty())return;
+                // The worker needs both a payload and a frame it may write
+                // into; the pool is refilled by read() releasing the caller's
+                // previous frame.
+                decodeWake.wait(lock,[&]{return decodeStop||(!compressedQueue.empty()&&workerFrame!=nullptr);});
+                if(decodeStop)return; // close() clears the queue; do not decode without a write target
                 sample=std::move(compressedQueue.front());compressedQueue.pop_front();
+                target=workerFrame;workerFrame=nullptr;
             }
             AVFrame* decodedFrame=nullptr;bool hardware=false;
             const bool produced=compressedDecoder.decode(sample.payload.data(),sample.payload.size(),
-                int64_t(sample.time*1e7),workerFrame,&decodedFrame,hardware);
+                int64_t(sample.time*1e7),target,&decodedFrame,hardware);
             if(!produced){
                 // A decoder that needs more input before it can emit a frame is
                 // normal for the first payload; a real error is not.
                 if(!compressedDecoder.waitingForInput())++compressedErrors;
+                std::lock_guard lock(mutex);
+                workerFrame=target; // no output consumed the frame
                 continue;
             }
             {
                 std::lock_guard lock(mutex);
                 if(hardware){
                     AVFrame* cloned=av_frame_clone(decodedFrame);
-                    if(!cloned){++compressedErrors;continue;}
+                    if(!cloned){++compressedErrors;workerFrame=target;continue;}
                     if(pending)++dropped;          // mailbox semantics: newest wins
                     if(pendingHardware)av_frame_free(&pendingHardware);
                     pendingHardware=cloned;
+                    workerFrame=target;
                 }else{
-                    if(pending)++dropped;
-                    std::swap(pendingFrame,workerFrame);
+                    // The caller only releases its frame on the next read, so
+                    // a replaced pending frame goes back to the pool instead of
+                    // being reused directly.
+                    if(pending){compressedFree.push_back(pendingFrame);++dropped;}
+                    pendingFrame=target;
+                    if(!compressedFree.empty()){workerFrame=compressedFree.back();compressedFree.pop_back();}
                 }
                 pendingIsHardware=hardware;
                 pending=true;pendingTime=sample.time;pendingArrival=sample.arrival;
@@ -297,7 +313,7 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
                 ++compressedDecoded;
                 if((compressedDecoded%600)==0)log::info("capture-decode",std::format("decoded={} errors={} queueDrops={} backend={} (decode worker)",compressedDecoded,compressedErrors,compressedDropped,compressedDecoder.backendName()));
             }
-            wake.notify_one();
+            wake.notify_one();decodeWake.notify_one();
         }
     }
     HRESULT STDMETHODCALLTYPE SampleCB(double time,IMediaSample* sample)override{
@@ -309,7 +325,10 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
         bool enqueued=false;
         {
             std::lock_guard lock(mutex);
-            if(!valid||!pendingFrame){callbackError=true;}
+            // The compressed path decodes in its own worker and keeps its own
+            // frame pool, so the preallocated NV12 mailbox is legitimately
+            // empty between reads; only the native path requires it here.
+            if(!valid||(!compressedPath&&!pendingFrame)){callbackError=true;}
             else {
                 // Copy directly into our bounded mailbox; read() swaps frames
                 // under this lock, so the frame consumed by the GPU is untouched.
@@ -611,9 +630,19 @@ bool CaptureCardSource::configure(const SourceOpenDesc& desc){close();p_->lastAu
         if(av_frame_get_buffer(*f,32)<0)return false;
     }
     if(compressedPath){
-        p.workerFrame=av_frame_alloc();if(!p.workerFrame)return false;
-        p.workerFrame->format=AV_PIX_FMT_NV12;p.workerFrame->width=int(p.layout.width);p.workerFrame->height=int(p.layout.height);
-        if(av_frame_get_buffer(p.workerFrame,32)<0)return false;
+        // Write targets: the frame the worker is filling plus one spare handed
+        // out by read(). Frames are never reused while the caller still owns
+        // them (see the pool contract in Impl).
+        // Four frames total (delivered / pending / worker / one spare). A
+        // larger pool was measured with two and three spares: the 4K18
+        // read-age effect was not monotonic (23.6 vs 25.2 ms across runs), so
+        // the extra memory buys nothing reproducible.
+        for(int i=0;i<2;++i){
+            AVFrame* frame=av_frame_alloc();if(!frame)return false;
+            frame->format=AV_PIX_FMT_NV12;frame->width=int(p.layout.width);frame->height=int(p.layout.height);
+            if(av_frame_get_buffer(frame,32)<0){av_frame_free(&frame);return false;}
+            if(i==0)p.workerFrame=frame;else p.compressedFree.push_back(frame);
+        }
         p.decodeStop=false;p.decodeThread=std::thread([&p]{p.decodeLoop();});
         log::info("capture-decode",std::format("decode worker started queue={} backend={} (single decode thread; the parallel pool is a later refinement)",p.compressedQueueLimit,p.compressedDecoder.backendName()));
     }
@@ -915,7 +944,7 @@ SourceReadStatus CaptureCardSource::read(pipeline::FramePacket& packet,const AVF
 SourceReadStatus CaptureCardSource::tryRead(pipeline::FramePacket& packet,const AVFrame** frame){return readWithWait(packet,frame,0);}
 SourceReadStatus CaptureCardSource::readWithWait(pipeline::FramePacket& packet,const AVFrame** frame,unsigned milliseconds){auto& p=*p_;*frame=nullptr;if(!p.info.opened)return SourceReadStatus::Error;
     long code=0;LONG_PTR a=0,b=0;while(p.events&&p.events->GetEvent(&code,&a,&b,0)==S_OK){if(code==EC_DEVICE_LOST||code==EC_ERRORABORT)log::warn("capture-reconnect",std::format("DirectShow event={} detail=0x{:X}",code,uint64_t(a)));p.events->FreeEventParams(code,a,b);if(code==EC_DEVICE_LOST||code==EC_ERRORABORT)return SourceReadStatus::Error;}
-    double time=0;uint32_t flags=0;uint64_t sequence=0;pipeline::Rational duration;AVFrame* delivered=nullptr;AVFrame* expiredHardware=nullptr;
+    double time=0;uint32_t flags=0;uint64_t sequence=0;pipeline::Rational duration;AVFrame* delivered=nullptr;AVFrame* expiredHardware=nullptr;bool feedDecode=false;
     {
         std::unique_lock lock(p.mutex);if(milliseconds)p.wake.wait_for(lock,std::chrono::milliseconds(milliseconds),[&]{return p.pending||p.callbackError;});
         if(p.callbackError)return SourceReadStatus::Error;
@@ -926,7 +955,11 @@ SourceReadStatus CaptureCardSource::readWithWait(pipeline::FramePacket& packet,c
             // is released after the lock is dropped.
             expiredHardware=p.hardwareRead;p.hardwareRead=p.pendingHardware;p.pendingHardware=nullptr;delivered=p.hardwareRead;
         }else{
-            std::swap(p.frame,p.pendingFrame);delivered=p.frame;
+            // The caller's ownership of the previous frame ends with this read,
+            // so it goes back into the decode pool and the worker continues.
+            if(p.frame)p.compressedFree.push_back(p.frame);
+            p.frame=p.pendingFrame;p.pendingFrame=nullptr;delivered=p.frame;
+            if(p.workerFrame==nullptr&&!p.compressedFree.empty()){p.workerFrame=p.compressedFree.back();p.compressedFree.pop_back();feedDecode=true;}
         }
         p.pending=false;time=p.pendingTime;p.readArrival=p.pendingArrival;
         duration=p.pendingDuration;
@@ -937,6 +970,7 @@ SourceReadStatus CaptureCardSource::readWithWait(pipeline::FramePacket& packet,c
         if(p.forceDiscontinuity){flags|=static_cast<uint32_t>(pipeline::FrameFlagBits::Discontinuity);p.forceDiscontinuity=false;}
         p.lastDrop=p.dropped;p.lastPts=time;++p.sequence;sequence=p.received;
     }
+    if(feedDecode)p.decodeWake.notify_one();
     if(expiredHardware)av_frame_free(&expiredHardware);
     if(delivered==nullptr)return SourceReadStatus::Error;
     auto colorInfo=p.info.color;
@@ -960,6 +994,8 @@ void CaptureCardSource::close()noexcept{
     p.events.Reset();p.control.Reset();p.grab.Reset();p.nullFilter.Reset();p.grabFilter.Reset();p.audioSink.Reset();p.audioFilter.Reset();p.config.Reset();p.device.Reset();p.builder.Reset();p.graph.Reset();p.referenceClock.Reset();p.audioSession.reset();p.audioPassthrough.reset();
     if(p.decodeThread.joinable()){{std::lock_guard lock(p.mutex);p.decodeStop=true;p.compressedQueue.clear();}p.decodeWake.notify_all();p.decodeThread.join();}
     if(p.workerFrame)av_frame_free(&p.workerFrame);
+    for(auto*& frame:p.compressedFree)if(frame)av_frame_free(&frame);
+    p.compressedFree.clear();
     av_frame_free(&p.frame);av_frame_free(&p.pendingFrame);
     if(p.pendingHardware)av_frame_free(&p.pendingHardware);if(p.hardwareRead)av_frame_free(&p.hardwareRead);
     p.compressedDecoder.close();
