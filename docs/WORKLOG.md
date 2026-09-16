@@ -20,6 +20,8 @@
 
 **未执行（如实记录）**：本机没有 RGB24 设备，"A 的 top-down 协商在问题卡上是否被接受"仍须受影响用户实机验证；若驱动拒绝协商，B 的开关可立即救场。未打包、未发布、未提交/推送。
 
+**补记（同日，存档后）**：另一个 Agent 在本分支追加了 `4efc0d5`（D3D12 解码 profile 探针，工具目标）与 `1028ddb`（解码/延迟方案文档），本修复提交为 `015f8a4`（tag `checkpoint/ps5-rgb24-fixes-20260916`）。重建后 EXE SHA256 变为 `19BC2C306EE7D73FF27B1CCB12D4EB70A9F8752114AA576694186E1ACFF1E6CB`：链接器未使用 /Brepro，PE 时间戳使逐次链接的哈希不同，源码未变；交付闸门在分支顶端复跑 PASS，42.39 秒，`logs/delivery/45aefe5dcbdc44f79ecba8167b83f1f0/result.json`。另：这两个修复已并入 main（提交 `87ad4cd`，tag `checkpoint/main-rgb24-orientation-20260916`）；PS5 回归本就不在 main，main 侧只同步了 `else` 大括号防呆。
+
 ## 2026-09-16 PS5 串流"无法打开视频"回归修复（音频入口插入语句改坏 else 绑定）
 
 用户反馈 1.2 能串流、1.3.1beta 测试包不行，面板提示"无法打开视频，请查看诊断"。
