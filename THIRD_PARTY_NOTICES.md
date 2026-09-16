@@ -153,18 +153,27 @@ before its dispatch), so that validation mode is skipped for the FSR SR
 configuration with an explicit log line. See
 [AMD FSR frame generation integration record](docs/FSR_FRAMEGEN_INTEGRATION_2026-09-16.md).
 
-## MFGAdaUnlock-RenoDx (research only, not integrated)
+## MFGAdaUnlock-RenoDx (RTX 40 series DLSS multi-frame unlock — ported)
 
 [ImDreamt/MFGAdaUnlock-RenoDx](https://github.com/ImDreamt/MFGAdaUnlock-RenoDx)
-(MIT) was cloned into the gitignored `third_party_local/community/` tree and
-read as the reference for unlocking DLSS multi-frame generation on RTX 40
-series. **No code from it is integrated, and Veyra does not load ReShade
-add-ons.** The mechanism analysis (two architecture compares against 0x1b0, the
-kernel PTX midpoint correction, fatbin truncation to force JIT, and the
-hardware flip-metering requirement) is summarised in
-[the 40-series research note](docs/WORKLOG.md). Any future port must be an
-independent in-memory implementation with module identity checks, pattern
-verification and rollback.
+(MIT) is the source of Veyra's RTX 40 series multi-frame unlock. Ported into
+`include/veyra/ngx/AdaMfgUnlock.h` / `src/ngx/AdaMfgUnlock.cpp` and adapted:
+
+- the two architecture compares (`0x1b0` → `0x190`), the kernel PTX midpoint
+  correction (inject the temporal parameter, replace the 104 compiled-in `0.5`
+  multiplies, truncate the fatbin so the driver JITs the corrected code) and the
+  `dlfg_kernel` descriptor redirect are the upstream technique;
+- Veyra adds hard architecture gating (never applied on Blackwell, so RTX 50
+  keeps its native path), audited build identity, structural verification of the
+  PTX before any write, read-back verification and full rollback when the
+  session ends;
+- the upstream Streamline-side hardware flip-metering workaround is **not
+  applicable**: Veyra calls NGX directly and does not load Streamline or any
+  ReShade/RenoDX add-on. That risk is documented as unverified for Ada.
+
+Evidence on this machine (RTX 5070, structure and patch mechanics only):
+`logs/fsr/dlssg-unlock-scan.log`, `logs/fsr/dlssg-unlock-applytest.log`.
+Ada behaviour still has to be verified on RTX 40 hardware.
 
 ## dav1d (1.3.0 AV1 playback)
 

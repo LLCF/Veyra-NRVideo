@@ -2343,6 +2343,35 @@ DLSSG 能力门控没有排除 FSR，导致 FSR 会话下任何就地设置变�
 
 ### 2026-09-16 FSR 超分接入产品（同一分支，未合并 main）
 
+### 2026-09-16 40 系 DLSS MFG 解锁（C-2）实现 + 本机结构/补丁机制验证
+
+移植 `ImDreamt/MFGAdaUnlock-RenoDx`（MIT，`third_party_local/community/`）到产品库
+`include/veyra/ngx/AdaMfgUnlock.h` + `src/ngx/AdaMfgUnlock.cpp`：两处 `0x1b0`(Blackwell) 架构比较
+改写为 `0x190`(Ada)、PTX 中点修正（注入 temporal 参数 + 104 处 `mul.ftz.f32 ...,0f3F000000`
+替换为 `%f136/%f134` + fatbin 截断为非压缩强制 JIT）、8 个 `dlfg_kernel` 描述符槽位重定向；
+全部只改进程内映射镜像，磁盘文件不动、不重签名；失败即回滚。
+
+本机 RTX 5070（Blackwell）只做**结构与补丁机制**验证，不做行为验证：
+
+- `veyra_dlssg_unlock_probe`（默认只读扫描）：本机 `runtime_local/nvidia/nvngx_dlssg.dll`
+  310.7.0.0 / SHA256 `135EAF07…E36F`，TimeDateStamp `0x69FB633C`、SizeOfImage `0x00745000` 与审计身份一致；
+  扫描得到 **gates=2、descriptors=8、ptx=99362、midpoints=104、joinLabelUnique=1**——与上游全部结构假设逐一吻合
+  （`logs/fsr/dlssg-unlock-scan.log`）。
+- `--apply-test`：应用后回读 gates=0、descriptors=0（槽位已指向重建 fatbin），随后
+  `release()` 回滚回 gates=2/descriptors=8/ptx=99362/midpoints=104，`applied=1 readBack=1 restored=1`
+  → 事务与回滚机制在真实运行库镜像上成立（`logs/fsr/dlssg-unlock-applytest.log`）。
+- 引擎接入：`EnhanceGraph::initNgxFeatures()` 在 DLSSG 能力查询前按
+  `AdaMfgUnlock::adapterIsAda(vendor, deviceId)`（0x10DE 且 deviceId 在 0x2680–0x28FF）决定是否解锁，
+  50 系直接不进入；`VEYRA_DISABLE_ADA_MFG_UNLOCK=1` 可关闭；`shutdown()` 里在 NGX core 释放后回滚。
+  解锁后运行时若仍只报 1 张生成帧，会明确告警"当前 DLSS-G 不是审计过的本地版本"。
+- **50 系不受影响实测**：`--fg-multiplier 6` 仍为 `multiFrameMax=5`、875 生成/177 真实、exit 0，
+  日志里**没有任何** `ada-mfg` 行（门控直接跳过）（`logs/fsr/blackwell-6x-after-ada-unlock.log`）。
+
+**未验证（必须 40 系实机）**：解锁后 3X/4X 是否真的生成并带真实运动；Ada 上 Blackwell 硬件
+flip metering 缺失是否导致画面冻结（上游在 Streamline 侧有软件回退，我们直接走 NGX，没有那一层）。
+测试命令：`veyra.exe --fg-multiplier 4 --smoke-seconds 15 <视频>`，期望日志出现
+`[ada-mfg] ... unlock applied=1 gates=2 descriptors=8 kernel=1` 与 `multiFrameMax=5`。
+
 先前的"只做可行性"结论已升级为**已接入并实测**：
 
 - 新增 `include/veyra/gfx/FsrSrBackend.h` + `src/gfx/FsrSrBackend.cpp`（FidelityFX 超分上下文 +

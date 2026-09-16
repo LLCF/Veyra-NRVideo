@@ -21,6 +21,7 @@
 #include "veyra/gfx/CommandSlotRing.h"
 #include "veyra/gfx/D3D12DeviceContext.h"
 #include "veyra/ngx/DlssFgBackend.h"
+#include "veyra/ngx/AdaMfgUnlock.h"
 #include "veyra/gfx/FsrSrBackend.h"
 #include "veyra/ngx/DlssNrParameters.h"
 #include "veyra/ngx/DlssNrRuntimeAdapter.h"
@@ -395,6 +396,46 @@ bool EnhanceGraph::fsrSrEnabled() const
     return fsrSrBackend_ != nullptr && fsrSrBackend_->created();
 }
 
+void EnhanceGraph::applyAdaMfgUnlock()
+{
+    const auto& adapter = context_.adapter();
+    // Hard architecture gate: 50 series keeps its native multi-frame path and is
+    // never patched, and no other architecture is in scope either.
+    if (!ngx::AdaMfgUnlock::adapterIsAda(adapter.vendorId, adapter.deviceId)) {
+        return;
+    }
+    wchar_t disabled[2]{};
+    if (GetEnvironmentVariableW(L"VEYRA_DISABLE_ADA_MFG_UNLOCK", disabled, 2) > 0) {
+        veyra::log::warn("ada-mfg", "multi-frame unlock disabled by VEYRA_DISABLE_ADA_MFG_UNLOCK");
+        return;
+    }
+    const auto modulePath = std::filesystem::path(desc_.runtimeAbsPath) / L"nvngx_dlssg.dll";
+    HMODULE module = GetModuleHandleW(L"nvngx_dlssg.dll");
+    if (module == nullptr) {
+        module = LoadLibraryExW(modulePath.c_str(), nullptr,
+                                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    }
+    if (module == nullptr) {
+        veyra::log::warn("ada-mfg", std::format("DLSS-G runtime could not be opened for the unlock (path={} win32={})",
+                                                modulePath.string(), GetLastError()));
+        return;
+    }
+    const auto scan = ngx::AdaMfgUnlock::scan(module);
+    if (!scan.moduleValid || scan.archGateSites < ngx::AdaMfgUnlock::kMinArchGateSites ||
+        scan.archGateSites > ngx::AdaMfgUnlock::kMaxArchGateSites || scan.descriptorSlots == 0 ||
+        scan.ptxBytes != ngx::AdaMfgUnlock::kExpectedPtxBytes ||
+        scan.midpointCount != ngx::AdaMfgUnlock::kExpectedMidpoints || !scan.joinLabelUnique) {
+        veyra::log::warn("ada-mfg", std::format("unlock refused: runtime build does not match the audited structure ({})",
+                                                scan.detail));
+        return;
+    }
+    const auto state = ngx::AdaMfgUnlock::apply(module, true);
+    veyra::log::info("ada-mfg", std::format("adapter deviceId=0x{:04X} unlock applied={} gates={} descriptors={} kernel={} ({})",
+                                            adapter.deviceId, state.applied ? 1 : 0, state.archGateSites,
+                                            state.descriptorSlots, state.kernelPatched ? 1 : 0,
+                                            std::string(state.detail.begin(), state.detail.end())));
+}
+
 bool EnhanceGraph::initFsrSr()
 {
     if (!fsrSrRequested()) return true;
@@ -475,6 +516,10 @@ bool EnhanceGraph::initNgxFeatures()
     fgMultiFrameMax_ = 0;
     if (fgEnabled_ && desc_.frameGenerationBackend==engine::FrameGenerationBackend::Dlss) {
     failedBackend_=engine::FailedBackend::Fg;
+    // RTX 40 series would report only 2X here; open the arch gate in the mapped
+    // DLSS-G runtime first so the capability query below sees multi-frame. On
+    // every other architecture this is a no-op.
+    applyAdaMfgUnlock();
     fgBackend_ = std::make_unique<ngx::DlssFgBackend>();
     ngx::DlssFgBackend::Capability fgCaps{};
     const bool fgAvailable = fgBackend_->queryCapability(*coreHost_, fgCaps, st);
@@ -486,6 +531,9 @@ bool EnhanceGraph::initNgxFeatures()
         // multiplier still teaches the caller what this GPU supports.
         fgCapsAvailable_ = fgCaps.available;
         fgMultiFrameMax_ = fgCaps.multiFrameCountMax;
+        if (ngx::AdaMfgUnlock::applied() && fgMultiFrameMax_ <= 1) {
+            veyra::log::warn("ada-mfg", std::format("unlock is installed but the runtime still reports maxGeneratedFrames={}; the active DLSS-G is not the audited local build", fgMultiFrameMax_));
+        }
         // Test-only capability override: lets the Ada (40-series) ceiling and the
         // capability-driven UI/recovery paths be exercised on a 50-series host
         // without touching the runtime. Never set by the product UI.
@@ -1572,6 +1620,9 @@ void EnhanceGraph::shutdown()
         nrAdapter_->unload();
     }
     if (coreHost_) coreHost_->shutdown();
+    // Restore the DLSS-G runtime image only after the NGX core released the
+    // feature (the unlock is process memory only; the file on disk is untouched).
+    ngx::AdaMfgUnlock::release();
 
     // Staged explicit release (scope-end destructors then have nothing left).
     decPass_ = ComputePass{};

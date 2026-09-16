@@ -113,6 +113,7 @@ add_library(veyra_ngx STATIC
   src/ngx/DlssSrBackend.cpp
   src/ngx/VideoSrBackend.cpp
   src/ngx/DlssFgBackend.cpp
+  src/ngx/AdaMfgUnlock.cpp
 )
   veyra_apply_warnings(veyra_ngx)
   target_compile_features(veyra_ngx PUBLIC cxx_std_20)
@@ -125,6 +126,14 @@ add_library(veyra_ngx STATIC
     "$<IF:$<CONFIG:Debug>,${VEYRA_DLSS_SDK_ROOT}/lib/Windows_x86_64/x64/nvsdk_ngx_s_dbg.lib,${VEYRA_DLSS_SDK_ROOT}/lib/Windows_x86_64/x64/nvsdk_ngx_s.lib>")
   target_compile_definitions(veyra_ngx PUBLIC
     VEYRA_EXPERIMENTAL_LOCAL_DLSSNR=1)
+
+  # Diagnostic: exercises the Ada multi-frame unlock against the local DLSS-G
+  # runtime image without involving NGX (works on any NVIDIA adapter).
+  add_executable(veyra_dlssg_unlock_probe tools/dlssg_unlock_probe/main.cpp)
+  target_compile_features(veyra_dlssg_unlock_probe PRIVATE cxx_std_20)
+  target_compile_options(veyra_dlssg_unlock_probe PRIVATE /utf-8 /WX-)
+  target_compile_definitions(veyra_dlssg_unlock_probe PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+  target_link_libraries(veyra_dlssg_unlock_probe PRIVATE veyra_ngx)
 endif()
 
 add_executable(veyra_runtime_probe

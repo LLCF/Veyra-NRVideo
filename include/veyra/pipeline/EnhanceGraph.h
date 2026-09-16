@@ -258,6 +258,9 @@ private:
     bool initNvof();
     bool initNgxFeatures();
     bool initFsrSr();
+    // RTX 40 series: opens the Blackwell-only multi-frame gate in the mapped
+    // DLSS-G runtime. Never touched on any other architecture.
+    void applyAdaMfgUnlock();
     bool createComputePasses();
 
     gfx::D3D12DeviceContext& context_;
