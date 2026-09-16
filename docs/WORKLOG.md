@@ -26,6 +26,7 @@
 - **本机证据（RTX 5070，结构 + 补丁机制，非 40 系行为）**：原版 `--apply-test` → `applied=1 readBack=1 restored=1`，gates=2 / mfgGate=1(1) / descriptors=8；篡改 fatbin 1 字节 → `kernel fix refused: source fatbin SHA-256 does not match` + 完整回滚，无崩溃，exit 1；篡改 gate pattern → 预检拒绝 exit 1。delivery 短测 PASS（`logs/delivery/d0a266a1e549402ca26c2c8ec8d27022/result.json`）。
 - **30 系**：复查后维持搁置。dashdogy v1.3.3 有 30 系实验路径，但 `BUILD.md` 原文写明依赖**不在源码树的 validated SM86 kernel cache**（"A source checkout alone cannot reproduce the DLL without them"）；`sdli1995` 无源码不可搬。决策文档与 notices 已更新。
 - **未验证**：40 系实机行为（6X 真实插帧质量、Ada 缺硬件 flip metering 的冻结风险）仍需用户实机验收；XeSS/FSR/杜比各项边界与上一段一致。
+- **测试包（本轮重打）**：`C:\veyra-test-packages\final-40x6x\Veyra-1.3.1beta-win64-portable.zip`，469,753,546 字节，SHA256 `B0581D3628F744805EBC4324509E32473B8EABECD147D64C96C6193F052B6848`；包内 `Veyra.exe` SHA256 `BBBF0C4E4AB8EC346928E8DD2CD6E073DD28085482AAEAD5E3B20ECBB7A80C68`（与构建树一致）、`runtime/experimental/nvngx_dlssg.dll` 仍为审计原版 `135EAF07…`（补丁只存在于进程内存，磁盘文件未改动）。包内 EXE `--smoke-seconds 5` 播放 4K30 GTAVI exit 0。旧包 `C:\veyra-test-packages\final\` 保留未动（被本包取代）。
 
 ## 2026-09-15 采集卡直播窗口标题修复（第三方工具“识别不到 Veyra”）
 
