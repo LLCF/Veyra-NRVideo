@@ -69,6 +69,18 @@
 - 证据：本机 30 秒 FSR 运行 `real=839/generated=838/presented=1677`、`presentSubmitFps=30.00`、`gpuFgBatchP95Ms=0.197`；delivery 短测 PASS `logs/delivery/442f41e29b684e7e87174bc075d4e282/result.json`。
 - **边界（如实）**：FgBatch 为**应用侧**计时（提供方内部的插值工作不经过我们的队列，无法打点）；用户机器上"SDK提交=0"的原始触发未能在本机复现（本机 r3 正常），累计对齐是针对该症状的根治性修法，需要用户在 r4 包上复测确认。
 
+### 2026-09-16 格式矩阵测试 + MKV 跳转排查（只测只查，未改产品代码）
+
+用户："各种视频格式的导入导出都测试一下确保没问题……有用户反馈 MKV 跳转要卡半分钟……这轮只做导入导出测试和问题排查，不要开始自顾自修复"。完整矩阵、命令与原始数据见 [格式矩阵与跳转排查](FORMAT_MATRIX_AND_SEEK_FINDINGS_2026-09-16.md)，素材在 `out/format-matrix/`（含驱动脚本 `run-seek.ps1`）。
+
+- **导入 20/20 通过**：MP4/MKV/MOV/AVI/WebM/TS/FLV × H.264/HEVC/HEVC10/VP9/AV1/MPEG-4/MPEG-2/ProRes，含 PCM、Opus、MP3、AAC 5.1、HDR PQ/HLG、内嵌字幕轨、多音轨、旋转元数据。仅 AVI 日志有一条解码告警但继续播放。
+- **导出 19/22 通过**：3 类被拒——① AVI（前几帧时间戳 0/50/66.7/83.3ms，非严格 CFR）；② 非标准恒定帧率（8.57fps：CFR 候选表只有 24/25/30/48/50/60/100/120 与 NTSC 档）；③ 真 VFR。另发现 PCM / MPEG 层 2 音频被原样复制进 MP4（第三方兼容性风险），而导出校验只验证视频帧。
+- **4K HEVC 播放失败（本轮最重发现，非回归）**：NVENC 产出的 4K HEVC（8/10bit、有无 B 帧）、以及**我们自己导出的 `export-4k-nr-vsr-fg.mp4`** 都在硬解时 `send_packet -22` → 回退软解 → `DXGI_ERROR_DEVICE_REMOVED (0x887A0005)` → 整场挂掉（0 帧）。系统 ffmpeg 走同一条 D3D12VA 路径**同样失败**（`hardware accelerator failed to decode picture`），软件解码正常；1440p/1080p HEVC 与 4K H.264 正常；**x265 生成的 4K HEVC 能硬解，NVENC 的不能**（同为 Main/L5.0）；旧包 `E:\App\Veyra-1.3.1beta-win64-portable` 同样失败 → 非本轮回归。需要其它机器复现确认驱动面/普遍面。
+- **MKV 跳转不是 MKV 的问题**：本机同一内容 A/B（1080p HEVC、2s GOP）MKV 17–62ms vs MP4 14–64ms；20s GOP 也只要 89–300ms；砍掉尾部索引 22–57ms；开 NR+SR 25–56ms。代码侧确认跳转后丢帧发生在进增强图**之前**（`EngineController` L803），不花 NR/SR/补帧时间。30 秒量级只可能来自：软解回退（软解 1080p60 HEVC 60–150fps × 长 GOP）、极长 GOP、慢存储、或 §3 的设备移除路径。定位只需用户两行日志：`[source-file] opened … hw=` 与 `[seek-latency] … firstPresentMs/decodedToTarget/drainAndDemuxMs`。
+- **其它实锤**：旋转元数据被忽略（竖拍视频横着放、导出也丢）；多音轨只用第一条（AAC 2ch 覆盖 AC3 5.1，无音轨选择 UI）。
+- **字幕现状**：只支持外挂 SRT（UTF-8/UTF-16LE，8MB/5万条上限）；同名 `.srt` 自动加载有，**时间轴对齐/延时调整没有**；MKV 内嵌 SRT/ASS 不读、无字幕轨选择，PGS/DVB 解码器未编入；无样式/双语；导出不烧录不封装；`subtitleAt()` 每帧线性扫描。建议功能清单（延时微调 → ASS/libass → 内嵌轨+轨选择 → 双语 → 自动匹配下载 → 音频指纹对齐 → 样式）见文档 §7。
+- **本轮未改任何产品代码**；未在其它显卡/驱动复现 4K HEVC；未取得反馈用户的 seek 日志。
+
 ### 2026-09-16 导出编码器多厂商化（AMD/Intel 可导出）+ 可调码率
 
 用户："能不能换编码？让全部都支持导出？还有加个可以调整码率的功能"。完整方案、证据与边界见 [导出编码器与码率](EXPORT_ENCODER_BITRATE_2026-09-16.md)。
