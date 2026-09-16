@@ -754,6 +754,17 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
     veyra_shader_parity_decode veyra_shader_scale_blit
     veyra_shader_nv12_upload veyra_shader_nvof_densify)
 
+  # Headless Remote Play probe: drives the product session stack with a saved
+  # profile so codec/bitrate variants can be compared without the GUI.
+  if(VEYRA_ENABLE_REMOTEPLAY)
+    add_executable(veyra_remoteplay_probe tools/remoteplay_probe/main.cpp)
+    target_compile_features(veyra_remoteplay_probe PRIVATE cxx_std_20)
+    target_compile_options(veyra_remoteplay_probe PRIVATE /WX-)
+    target_compile_definitions(veyra_remoteplay_probe PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_include_directories(veyra_remoteplay_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(veyra_remoteplay_probe PRIVATE veyra_sources veyra_gfx ${FFMPEG_LIBRARIES})
+  endif()
+
   # Phase 6 realtime engine probe: decode -> SR -> NR -> NVOF -> DLSSG -> present.
   if(VEYRA_ENABLE_EXPERIMENTAL_DLSSNR AND EXISTS "${VEYRA_NVOF_SDK_ROOT}/NvOFInterface/nvOpticalFlowCommon.h")
     add_executable(veyra_player_probe
