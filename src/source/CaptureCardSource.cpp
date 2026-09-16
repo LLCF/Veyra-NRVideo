@@ -7,9 +7,12 @@
 #include "veyra/Log.h"
 #include "veyra/sink/AudioFormat.h"
 #include "veyra/sink/BitstreamAudio.h"
+#include "veyra/sink/BitstreamAudioSink.h"
 #include <windows.h>
 #include <dshow.h>
 #include <dvdmedia.h>
+#include <ks.h>
+#include <ksmedia.h>
 #include <wrl/client.h>
 #include <algorithm>
 #include <array>
@@ -130,6 +133,9 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
     // the raw bursts are decoded here and the session is configured with the
     // decoded layout on the first frame (that is why its start is deferred).
     std::shared_ptr<sink::BitstreamDecoder> audioBitstream;
+    // Bitstream-first mode: the compressed stream is forwarded unmodified to a
+    // receiver over an exclusive WASAPI IEC 61937 carrier when one accepts it.
+    std::shared_ptr<sink::BitstreamAudioSink> audioPassthrough;
     bool audioSessionDeferred=false;
     std::wstring audioBitstreamKind;
     // 0 automatic, 1 PCM only, 2 bitstream preferred (see
@@ -437,6 +443,55 @@ if(audioTypes.empty()&&(!allowBitstream||bitstreamTypes.empty())){log::warn("cap
             auto* type=owned.get();
             const auto kind=sink::classifyBitstreamSubtype(type->subtype.Data1);
             const bool iec=sink::bitstreamIsIec61937(type->subtype.Data1);
+            // Bitstream-first mode with an IEC 61937 framed input: forward the
+            // compressed stream unchanged to a receiver that accepts the
+            // matching carrier (exclusive WASAPI). Only the receiver can
+            // decode Dolby Atmos / DTS:X object audio; the in-player decode
+            // below would reduce it to plain 5.1 PCM. Falls back silently when
+            // no endpoint advertises the format.
+            if(wantBitstreamFirst&&iec){
+                const GUID* carrier=nullptr;
+                switch(kind){
+                case sink::BitstreamKind::Ac3:carrier=&KSDATAFORMAT_SUBTYPE_IEC61937_DOLBY_DIGITAL;break;
+                case sink::BitstreamKind::Eac3:carrier=&KSDATAFORMAT_SUBTYPE_IEC61937_DOLBY_DIGITAL_PLUS;break;
+                case sink::BitstreamKind::TrueHd:carrier=&KSDATAFORMAT_SUBTYPE_IEC61937_DOLBY_MLP;break;
+                case sink::BitstreamKind::Dts:carrier=&KSDATAFORMAT_SUBTYPE_IEC61937_DTS;break;
+                // DTS-HD has no standard IEC 61937 subtype on Windows; it
+                // stays on the decode path.
+                default:break;
+                }
+                uint32_t rate=48000;
+                if(type->pbFormat!=nullptr&&type->cbFormat>=sizeof(WAVEFORMATEX)){
+                    const auto* wave=reinterpret_cast<const WAVEFORMATEX*>(type->pbFormat);
+                    if(wave->nSamplesPerSec==44100||wave->nSamplesPerSec==48000||wave->nSamplesPerSec==96000||wave->nSamplesPerSec==192000)rate=wave->nSamplesPerSec;
+                }
+                if(carrier!=nullptr){
+                    auto passthrough=std::make_shared<sink::BitstreamAudioSink>();
+                    if(passthrough->open(*carrier,rate)){
+                        ComPtr<IBaseFilter> candidate;ComPtr<IPin> terminal;
+                        auto sink=passthrough;
+                        hr=createNativeAudioSink(*type,[sink](IMediaSample* sample){
+                            BYTE* bytes=nullptr;
+                            if(FAILED(sample->GetPointer(&bytes)))return VFW_E_SAMPLE_TIME_NOT_SET;
+                            return sink->write(bytes,size_t(sample->GetActualDataLength()))?S_OK:E_FAIL;
+                        },candidate,terminal);
+                        if(SUCCEEDED(hr))hr=p.graph->AddFilter(candidate.Get(),L"Veyra audio bitstream passthrough");
+                        if(SUCCEEDED(hr))hr=p.graph->ConnectDirect(audioPin.Get(),terminal.Get(),type);
+                        if(SUCCEEDED(hr)){
+                            p.audioSink=candidate;p.audioPassthrough=passthrough;
+                            {const std::string name=sink::bitstreamKindName(kind);p.audioBitstreamKind.assign(name.begin(),name.end());}
+                            const auto& sinkState=passthrough->state();
+                            log::info("capture-audio-bitstream",std::string("passthrough to receiver kind=")+sink::bitstreamKindName(kind)+
+                                std::format(" rate={} endpoint=\"{}\" (no in-player decode)",rate,
+                                    std::string(sinkState.endpointName.begin(),sinkState.endpointName.end())));
+                            connectedAudio=true;
+                        }else if(candidate)p.graph->RemoveFilter(candidate.Get());
+                    }else{
+                        log::info("capture-audio-bitstream",std::string("receiver passthrough unavailable for ")+sink::bitstreamKindName(kind)+"; decoding to PCM");
+                    }
+                    if(connectedAudio)break;
+                }
+            }
             auto decoder=std::make_shared<sink::BitstreamDecoder>();
             if(!decoder->open(kind,iec)){
                 log::warn("capture-audio-bitstream",std::string("decoder unavailable for ")+sink::bitstreamKindName(kind)+": "+decoder->lastError());
@@ -586,7 +641,8 @@ void CaptureCardSource::close()noexcept{
     auto& p=*p_;if(p.control){const HRESULT hr=p.control->Stop();if(FAILED(hr))log::error("capture-close",std::format("Stop failed hr=0x{:08X}; releasing graph",uint32_t(hr)));}if(p.grab){const HRESULT hr=p.grab->SetCallback(nullptr,0);if(FAILED(hr))log::error("capture-close",std::format("detach callback hr=0x{:08X}",uint32_t(hr)));}
     if(p.wasapi)p.wasapi->stop();p.wasapi.reset();
     if(p.audioSession)p.audioSession->stop();p.audioError.clear();
-    p.events.Reset();p.control.Reset();p.grab.Reset();p.nullFilter.Reset();p.grabFilter.Reset();p.audioSink.Reset();p.audioFilter.Reset();p.config.Reset();p.device.Reset();p.builder.Reset();p.graph.Reset();p.referenceClock.Reset();p.audioSession.reset();
+    if(p.audioPassthrough)p.audioPassthrough->close();
+    p.events.Reset();p.control.Reset();p.grab.Reset();p.nullFilter.Reset();p.grabFilter.Reset();p.audioSink.Reset();p.audioFilter.Reset();p.config.Reset();p.device.Reset();p.builder.Reset();p.graph.Reset();p.referenceClock.Reset();p.audioSession.reset();p.audioPassthrough.reset();
     av_frame_free(&p.frame);av_frame_free(&p.pendingFrame);p.info={};
     p.sequence=p.received=p.dropped=p.lastDrop=0;p.pending=p.callbackError=p.configured=p.forceDiscontinuity=false;p.lastPts=p.readAgeMs=0;
 }

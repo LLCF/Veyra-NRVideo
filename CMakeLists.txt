@@ -153,6 +153,13 @@ add_executable(veyra_runtime_probe
   tools/runtime_probe/main.cpp
 )
 
+# Dolby/DTS endpoint passthrough capability probe (diagnostic, never shipped).
+add_executable(veyra_bitstream_probe tools/bitstream_audio_probe/main.cpp)
+target_compile_features(veyra_bitstream_probe PRIVATE cxx_std_20)
+target_compile_options(veyra_bitstream_probe PRIVATE /utf-8 /WX-)
+target_compile_definitions(veyra_bitstream_probe PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+target_link_libraries(veyra_bitstream_probe PRIVATE ole32)
+
 # Isolated descriptor/Present diagnosis probe (user directive 2026-09-04 s3).
 # No NGX/FFmpeg/NVOF/WASAPI. Uses PresentBlit shaders for cases F/G.
 add_executable(veyra_descriptor_present_probe
@@ -428,6 +435,7 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
     src/sink/CaptureAudioSession.cpp
     src/sink/CaptureAudioDsp.cpp
     src/sink/BitstreamAudio.cpp
+    src/sink/BitstreamAudioSink.cpp
     src/sink/ImageExportSink.cpp
     src/sink/NvencD3D12Encoder.cpp
   )

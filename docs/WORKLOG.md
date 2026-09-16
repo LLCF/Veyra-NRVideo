@@ -50,7 +50,15 @@
 - **FSR→XeSS 实机边界（结论）**：FidelityFX 代理占用窗口唯一的 flip-model swapchain 槽位；**完整销毁**（官方顺序＋排空＋释放最后 COM 引用，refcount 实测归 2→0）后窗口仍无法承载任何新 swapchain——XeSS 创建、native 创建、甚至 FFX 自己重建代理全部失败（逐一实测）。因此改为：保留代理、拒绝切换、回滚到健康的 FSR 会话（无崩溃，FSR 继续生成：477 帧）；恢复路径给 UI 提示"切到 XeSS 需要重启软件"。`xefgSwapChainD3D12InitFromSwapChain` 包装路径已实现，留作 FFX 行为变化后的入口。
 - 附带修复：`PresentSink` 重新初始化前 `swapChain_.Reset()`（`ComPtr::GetAddressOf` 直接写入会泄漏旧引用）；测试脚本 `scripts/acceptance/ui-fsr-xess-switch.py`（PASS）。
 - 证据：delivery `logs/delivery/899266286a2f46cda5480bae0a3721bb/result.json`。
-- **未完成（如实）**：杜比位流直通输出（独占 WASAPI＋IEC 61937＋端点能力探测）需要独立施工轮次；已完成的杜比相关项仍为 G-1 探测与 G-2 解码兜底。
+- **（后续已补：见下节 2026-09-16 杜比位流直通）**
+
+### 2026-09-16 杜比/DTS 位流直通输出（用户要求"杜比直通先做"）
+
+- **端点能力探测**（`tools/bitstream_audio_probe`，`veyra_bitstream_probe`）：枚举渲染端点，在独占模式下对 AC-3 / E-AC-3(DD+，Atmos 载体) / DTS / TrueHD 逐一 `IsFormatSupported`。**本机实测**：Realtek Digital Output（SPDIF）**AC-3 与 DTS 均为 exact 支持**；模拟输出、虚拟声卡、NVIDIA HDMI（S2700）全部 `0x88890008`（不支持的格式）。**E-AC-3/TrueHD 全端点不支持**——Windows 端点上 DD+/Atmos 直通声明面窄是平台现实，探测如实报告。
+- **`sink::BitstreamAudioSink`**（`include/veyra/sink/BitstreamAudioSink.h` / `src/sink/BitstreamAudioSink.cpp`）：独占 WASAPI（16-bit 立体声 IEC 61937 载波、500ms 缓冲），自动选择第一个精确接受目标载波的活跃端点（可传入首选端点），按字节流转发压缩数据（IEC 61937 自同步，无需重打包），帧对齐由内部尾缓冲保证。自主实现，无第三方代码。
+- **接线**（`CaptureCardSource`）：在"位流优先"模式（`captureAudio=2`）且输入为 IEC 61937 封装时，**先尝试直通**（按 kind 选择 AC-3/DD+/TrueHD/DTS 载波，采样率取媒体类型）；端点不支持或连接失败则**回退到现有的软件解码路径**（G-2），不改变自动/强制 PCM 模式的任何行为。直通会话不经过 `CaptureAudioSession`（位流无法调音量/无法软件同步，这是直通的固有语义）；视频调度不依赖该会话（`videoPresented` 双路径判空，安全）。
+- **验证**：`veyra_bitstream_probe 48000 --write-test` 在本机 SPDIF 上打开独占 AC-3 载波并写穿数据通路（`endpoint[1] wrote 245760 bytes through the exclusive carrier`）；delivery 短测 PASS `logs/delivery/e09ea0d7fdb34e38b238ee12dd255fc5/result.json`。UI 文案与帮助同步更新（"位流优先：优先直通给功放（无直通时解码为 PCM）"）。
+- **未验证（如实）**：本机采集卡不提供位流（G-1），**没有端到端的真实 Dolby 源验证**；需要持"支持位流输入的采集卡 + 支持解码的功放/回音壁"的用户按"位流优先"模式实测并回传 `capture-audio-bitstream` 日志（应出现 `passthrough to receiver kind=... endpoint="..."`）。E-AC-3/Atmos 直通依赖端点驱动声明，当前主流 Windows 端点普遍不支持。
 
 ## 2026-09-15 采集卡直播窗口标题修复（第三方工具“识别不到 Veyra”）
 
