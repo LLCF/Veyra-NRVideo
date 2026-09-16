@@ -118,6 +118,7 @@ add_library(veyra_ngx STATIC
   src/ngx/VideoSrBackend.cpp
   src/ngx/DlssFgBackend.cpp
   src/ngx/AdaMfgUnlock.cpp
+  src/ngx/AmpereMfgUnlock.cpp
 )
   veyra_apply_warnings(veyra_ngx)
   target_compile_features(veyra_ngx PUBLIC cxx_std_20)
@@ -138,6 +139,14 @@ add_library(veyra_ngx STATIC
   target_compile_options(veyra_dlssg_unlock_probe PRIVATE /utf-8 /WX-)
   target_compile_definitions(veyra_dlssg_unlock_probe PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
   target_link_libraries(veyra_dlssg_unlock_probe PRIVATE veyra_ngx)
+
+  # Diagnostic: exercises the RTX 30 (sm_86) Ampere unlock against the local
+  # DLSS-G runtime image without involving NGX (works on any NVIDIA adapter).
+  add_executable(veyra_dlssg_ampere_probe tools/dlssg_ampere_probe/main.cpp)
+  target_compile_features(veyra_dlssg_ampere_probe PRIVATE cxx_std_20)
+  target_compile_options(veyra_dlssg_ampere_probe PRIVATE /utf-8 /WX-)
+  target_compile_definitions(veyra_dlssg_ampere_probe PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+  target_link_libraries(veyra_dlssg_ampere_probe PRIVATE veyra_ngx)
 endif()
 
 add_executable(veyra_runtime_probe
