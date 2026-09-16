@@ -1,5 +1,57 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-17 RTX 30（Ampere）帧生成攻坚：架构闸门定位 + 伪装实现（默认关闭）
+
+目标（用户指令）：把 30 系弄到能用，同时不改变 40/50 系行为；产出给 30 系用户测试的包。
+存档点 `checkpoint/pre-ampere-fg-repair-20260917`。
+
+**侦察结论（全部由本机驱动/反汇编实测，非推测）**
+
+1. `nvngx_dlssg.dll` 310.7 的静态导入只有 VERSION/ADVAPI32/USER32/KERNEL32；它通过
+   `nvapi64.dll` 的 **`nvapi_QueryInterface(0xD8265D24)`** 取 `NvAPI_GPU_GetArchInfo`，
+   调用点在一个内部包装函数 **RVA 0x1670**，取到的指针缓存到全局 **RVA 0x7334B8**，
+   最终把架构写进 DLSSG 实例：`mov [rsi+368h],eax`（值来自 **RVA 0x20DCA** 的 7 字节读取
+   `mov eax,[rsp+294h]`）。架构常量与官方 nvapi.h 一致：GA100=0x170、AD100=0x190、GB200=0x1B0。
+2. **替换 0x7334B8 的缓存指针无效**：provider 在自身 DllMain 阶段就已解析并固化该指针
+   （实测 wrapper 调用次数 = 0，且缓存槽已是 populated）。
+3. **改写 0x20DCA 的读取为常量可以改变 provider 采纳的值**：把架构写死 0x170 时
+   `FG capability ... multiFrameMax` 从 **5 变成 1** —— 证明这条链路就是 FG 判定读架构的地方。
+   但写死常量不等于驱动的真实 id，第一个生成帧随即崩溃（Evaluate seh=0xC0000005）。
+4. 因此正确形态是"**读真实值、只改架构字段**"：已实现 **0x1670 处的 14 字节绝对跳转 hook +
+   24 字节跳板**（跳板执行真实逻辑并把 architecture 改成目标值，其余字段保持真实）。
+
+**实现与默认行为**
+
+- 新增 `include/veyra/ngx/NvapiArchSpoof.h`、`src/ngx/NvapiArchSpoof.cpp`；
+  `EnhanceGraph::prepareAmpereFgSpoof()` 在 **NGX core 初始化之前**运行（顺序错误是首个坑：
+  provider 初始化后再装就太晚）。
+- `AmpereMfgUnlock::apply(HMODULE, bool retargetArchGates)`：伪装生效时保留 provider 自带的
+  0x1b0 比较（让上报值匹配），伪装不可用时回退到旧的 arch-gate 重定向。
+- **伪装默认关闭**，仅当设置 `VEYRA_TEST_NVAPI_SPOOF_ARCH=<arch id>`（如 `0x1B0`）时启用。
+  原因：本机没有 30 系，无法证明它能产出稳定的补帧会话；不拿未验证的路径当默认行为。
+
+**本机验证（RTX 5070）**
+
+- 默认路径完全不受影响：`--fg` → `FG capability available=true multiFrameMax=5`、
+  381 真实帧 / 379 生成帧、Evaluate 无异常。
+- 伪装机制可用：设置 `VEYRA_TEST_FORCE_AMPERE_UNLOCK=1 VEYRA_TEST_NVAPI_SPOOF_ARCH=0x170`
+  时 provider 采纳 0x170（multiFrameMax=1），证明 hook 生效。
+- 修复测试 191/0、采集颜色 0 失败、便携包 smoke 全 PASS。
+
+**30 系用户测试指引（1.3.2beta4）**
+
+默认运行（不设环境变量）：保持与 1.3.2beta3 相同的行为（预期仍报 FG 不可用，但不会崩溃）。
+要试新路径：
+
+```powershell
+$env:VEYRA_TEST_NVAPI_SPOOF_ARCH='0x1B0'
+.\Veyra.exe <视频> --fg --smoke-seconds 15
+```
+
+期望日志：`[nvapi-spoof] provider GetArchInfo wrapper hooked ... will report 0x1B0`、
+`FG capability available=true multiFrameMax=5`、`generated=` 接近 5×；若出现 Evaluate
+`seh` 或补帧不出现，把日志发回即可继续迭代。
+
 ## 2026-09-17 3060 DLSS FG 深挖：patch 正确性实机级验证 + 上游方案拆解
 
 用户要求"修到可以用"，不是加错误报告。本轮把所有能确认的都钉死了：
