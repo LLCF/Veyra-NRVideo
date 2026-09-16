@@ -89,6 +89,19 @@ provider 只给 `multiFrameMax=1`，且第一个生成帧 Evaluate 报 `seh=0xC0
 | 30 系 6X（上述 + `--fg-multiplier 6`） | 360 真实 / **1600 生成**，exit 0 |
 | 30 系回退（`VEYRA_TEST_NVAPI_SPOOF_ARCH=0`） | 走旧重定向路径，376/374，exit 0 |
 | 30 系 + 0x190（Ada 上报） | `multiFrameMax=1` → Evaluate `seh=0xC0000005` → 进程挂住（**不推荐**） |
+| 30 系 + **实时采集**（`capture:0:0` YUY2 1080p60，跑 r2 包内 exe） | **602 真实 / 600 生成、0 丢帧**，exit 0 |
+
+**给 30 系测试者的一键自检**：`scripts/acceptance/ampere-fg-check.ps1`（已随仓库）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ampere-fg-check.ps1 `
+  -PackageDirectory "C:\...\Veyra-1.3.2beta4-win64-portable" `
+  -Source "capture:0:0:-1:0"            # 或某个视频文件路径
+```
+
+脚本跑 `--fg`、只扫描本次运行追加的日志字节，把 `adapter / ampere-mfg / nvapi-spoof /
+FG capability / Create DLSSG / Evaluate 故障 / smoke frames=generated=` 汇总成
+`logs/ampere-fg-check/report.json` 并给出 PASS/FAIL——测试者只要发回这个文件。
 
 ## 2026-09-17 3060 DLSS FG 深挖：patch 正确性实机级验证 + 上游方案拆解
 
