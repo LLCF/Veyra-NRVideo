@@ -1,11 +1,11 @@
-# 帧生成 / FSR / 杜比：隔离分支施工状态（2026-09-16 凌晨）
+# 帧生成 / FSR / 杜比：隔离分支施工状态（2026-09-16）
 
-给明早人工验收用。**全部工作只在隔离分支，未合并 main。**
+给人工验收/继续施工用。**全部工作只在隔离分支，未合并 main。**
 
 - 存档点（main）：`693db07`，tag `checkpoint/pre-framegen-fsr-dolby-2026-09-16`
 - 施工分支：`codex/framegen-fsr-dolby-20260916`
-- 分支提交：`35dd632`（DLSS 6X）→ `4124a9d`（XeSS MFG 解锁）→ `e68b79d`（杜比探测 + 40 系实验开关）→ `5b1f21a`/`cc5b0bb`（状态文档）→ `50e4c9c`（ThunkHook detour 基础设施，A-2 前置）→ `e7e558a`/`70be83b`（AMD FSR SDK 2.3.0 落地与构建路径勘察）→ `ef0fb50`（FSR 探针实测）
-- delivery 短测在该分支上共跑过三次：`89286afb…`（23/23，48.9 秒）、`c6b3294d…`（23/23）、`9951994f…`（23/23，44.2 秒），均在 `logs/delivery/` 下
+- 分支提交（关键节点）：`35dd632`（DLSS 6X）→ `4124a9d`（XeSS MFG）→ `ef0fb50`（FSR 探针）→ `27656a6`（FSR 帧生成接入）→ `950f46d`（FSR 超分）→ `9179449`/`aa168ab`（40 系解锁）→ `4154733`/`3dd5add`（30 系解锁）→ `ef016ba`（A-2 节奏 hook）→ `56bb0f6`/`275c3f2`（杜比解码/直通）→ `015f8a4`（PS5+RGB24 修复）→ `d5f7383`。完整列表见 `git log`。
+- delivery 短测：本分支多次 23/23 通过（早期 `89286afb…`/`c6b3294d…`/`9951994f…`，后续 id 见 `docs/WORKLOG.md`）；分支 tip 最近一次 `45aefe5dcbdc44f79ecba8167b83f1f0`，均在 `logs/delivery/` 下
 - 计划：`docs/FRAMEGEN_FSR_DOLBY_PLAN_2026-09-16.md`
 
 ## 一、已完成并实测（可直接验收）
@@ -111,28 +111,25 @@ $env:VEYRA_TEST_FG_FORCE_MULTIPLIER='1'
 | ring 快照函数 | RVA `0x224CF0`（经 `0x4DA0` 调用；调用点 `0x22023D..0x22024B`） |
 | 上游实现要点 | 需要重建 present 调用的参数（上游用 1500 字节 helper `0x3F570`）；全局时序变量需按上下文管理；hook 回调不得抛异常或做大分配/同步日志 |
 
-结论：基础设施已就绪，剩余工作是 hook 体本身（参数重建 + 逐帧节奏），属高风险改动，需要一轮可快速迭代的实机调试；在完成并验证前，4X 的生成帧间距仍标为"未验证"。
+结论（2026-09-16 晚更新）：hook 体已按上述坐标移植并实测（`ef016ba`），4X 同 burst 间距 mean 8.303ms、refused=0；结果见上文 §二 A-2 行与 `docs/WORKLOG.md`。
 
-## 三、明早验收清单（建议顺序）
+## 三、验收清单（建议顺序，2026-09-16 晚更新）
 
-0. `git log --oneline -12` 确认全部提交都在 `codex/framegen-fsr-dolby-20260916`，`main` 仍是 `693db07`、未推送、未发布。
-   最终构建 `cmd.exe /c out\build\veyra-build-x64-release.cmd` exit 0；最终
-   `veyra.exe` SHA256 `38ACCF32FB182D71AEBCB47A13F327ADFC25A8580703CCEA882B3B3CBAB904A9`；
-   delivery 短测 PASS（`logs/delivery/622908bcc14b47a381340e8662c5b0a2/result.json`）。
+0. `git log --oneline -12` 确认全部提交都在 `codex/framegen-fsr-dolby-20260916`；`main` 现在到 `87ad4cd`（只含 RGB24 移植），分支未推送、未发布。
+   构建 `cmd.exe /c out\build\veyra-build-x64-release.cmd` exit 0；分支 tip 的 delivery 短测 PASS（`logs/delivery/45aefe5dcbdc44f79ecba8167b83f1f0/result.json`）。
+   EXE 哈希会随 PE 时间戳漂移（无 `/Brepro`），不在此冻结；最终构建/门禁数字以 `docs/WORKLOG.md` 顶部条目为准。
    40 系解锁验收：在 40 系机器上跑 `veyra.exe --fg-multiplier 4 --smoke-seconds 15 <视频>`，
    期望 `[ada-mfg] ... unlock applied=1 gates=2 descriptors=8 kernel=1` 与 `multiFrameMax=5`；
-   杜比验收：在支持位流的采集卡上跑一次采集，期望 `capture-audio-bitstream passthrough selected kind=...`
-   与面板里"位流解码为 N 声道 (kind)"。
-   delivery 短测 PASS（`logs/delivery/7180a557fe934a27a225f6367a1b06e9/result.json`）；
-   `veyra_repair_contract_tests` 157 项 0 失败；`veyra_repair_preset_tests` 60 组迁移全通过。
+   杜比验收：在支持位流的采集卡上跑一次采集，期望 `capture-audio-bitstream` 行
+   （直通 `passthrough to receiver kind=...`，或解码回 PCM 并显示"位流解码为 N 声道"）。
 1. **AMD FSR 补帧**：`out\build\audio-continuity-repair-20260915\veyra.exe --fg-fsr --smoke-seconds 10 <视频>`，
    期望日志出现 `[fsr-fg] provider=3.1.6` 与 `using the retained AMD proxy swapchain`，结尾
    `generated ≈ frames`（2X）且 exit 0；顺手看设置里「补帧方式」是否出现 `AMD FSR 帧生成 · 2X`。
    最近一次实跑：284 真实 / 280 生成（`logs/fsr/smoke-fsr-final2.log`）。
 2. DLSS 6X：`out\build\audio-continuity-repair-20260915\veyra.exe --fg-multiplier 6 --smoke-seconds 10 loop\local\fixed_clips\test_av_1080p.mp4`，看日志 `maxMultiplier=6` 与 `generated ≈ 5×frames`；UI 里补帧下拉应出现 `6X · 五张中间帧`。
-3. XeSS 4X：`--fg-xess --fg-multiplier 4 --smoke-seconds 10 <视频>`，看 `unlock applied`、`framesPresented=4`、退出时 `rolled back 5/5`；**注意**：节奏 hook 未移植，观感是否均匀需要你人工判断。
-4. 40 系实验：把 EXE 复制到 4060 机器，按上面 §一.4 的命令跑，把日志发我。
-5. 杜比：用 `--smoke-seconds 10 <capture2:...>` 跑一次，确认 `capture-audio-bitstream` 行；若换到支持位流的设备，该行应列出 AC-3/DD+ 等类型。
+3. XeSS 4X：`--fg-xess --fg-multiplier 4 --smoke-seconds 10 <视频>`，看 `unlock applied`、`framesPresented=4`、`pacing installed`、退出时 `rolled back 5/5`；节奏 hook 已移植（`ef016ba`，§二）：4K/30fps 4X 实测同 burst 间距 mean 8.303ms、refused=0；观感是否均匀仍请人工判断。
+4. 40 系：用 `final-40x6x` 包的 EXE 在 4060 上直接跑 `--fg-multiplier 4`（或 6），确认 `[ada-mfg]` unlock 行与真实出帧；不再需要 `VEYRA_TEST_FG_FORCE_MULTIPLIER`。30 系用 `final-30x86` 系列包，看 `[ampere-mfg]` 行与真实出帧。
+5. 杜比：用 `--smoke-seconds 10 <capture2:...>` 跑一次，确认 `capture-audio-bitstream` 行；直通路径应出现 `passthrough to receiver kind=...`，回退路径应显示解码后的声道数。
 
 ## 四、边界声明
 
