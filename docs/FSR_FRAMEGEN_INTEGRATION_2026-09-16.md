@@ -1,6 +1,6 @@
 # AMD FSR 帧生成接入记录（隔离分支，2026-09-16）
 
-分支 `codex/framegen-fsr-dolby-20260916`。**未合并 main、未推送、未发布。** 施工依据
+分支 `codex/framegen-fsr-dolby-20260916`。**2026-09-16 已合并进 main（merge `24e7de7`）；未推送、未发布。** 施工依据
 `docs/FRAMEGEN_FSR_DOLBY_PLAN_2026-09-16.md`。
 
 ## 1. 结论（先说能做什么、不能做什么）

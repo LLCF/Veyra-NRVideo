@@ -1,7 +1,7 @@
 # 2026-09-16 导出编码器多厂商化 + 可调码率（隔离分支）
 
 用户指令："能不能换编码？让全部都支持导出？还有加个可以调整码率的功能"。
-分支 `codex/framegen-fsr-dolby-20260916`，未合并 main、未推送、未发布。
+分支 `codex/framegen-fsr-dolby-20260916`；2026-09-16 已随该分支合并进 main（merge `24e7de7`）；未推送、未发布。
 
 ## 1. 之前的现状（事实）
 
@@ -82,7 +82,7 @@ delivery 短测 PASS `logs/delivery/35f4f46808fb4236856701704e5a7f52/result.json
 - 软件编码（x264/x265）未接入：需要重建带编码器的 FFmpeg 或引入 openh264/x264 依赖，
   且 4K 软件编码速度不现实；当前策略是"任何现代显卡的驱动 MFT"。
 
-## 5. 测试包（未合并 main / 未推送 / 未发布）
+## 5. 测试包（已合并 main / 未推送 / 未发布）
 
 `C:\veyra-test-packages\final-encoders-r6\Veyra-1.3.1beta-win64-portable.zip`，
 469,804,907 字节，SHA256

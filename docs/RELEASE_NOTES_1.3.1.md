@@ -1,7 +1,7 @@
 # Veyra 1.3.1beta 测试包说明（隔离分支构建，未发布）
 
 **这是给用户实机测试用的 beta 包，不是正式发布。** 构建来源：分支
-`codex/framegen-fsr-dolby-20260916`（main 未合并、未推送、未创建 Release）。
+`codex/framegen-fsr-dolby-20260916`（2026-09-16 已合并进 main，merge `24e7de7`；未推送、未创建 Release）。
 
 ## 帧生成
 

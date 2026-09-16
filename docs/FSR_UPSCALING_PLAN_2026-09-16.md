@@ -1,6 +1,6 @@
 # AMD FSR 超分（F 工作流）：接入记录与实测结论（隔离分支）
 
-**已接入产品并实测。** 分支 `codex/framegen-fsr-dolby-20260916`，未合并 main、未推送、未发布。
+**已接入产品并实测。** 分支 `codex/framegen-fsr-dolby-20260916`；2026-09-16 已合并进 main（merge `24e7de7`）；未推送、未发布。
 
 状态一览：
 

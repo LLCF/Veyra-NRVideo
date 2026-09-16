@@ -1,6 +1,6 @@
 # 2026-09-16 导出失败两例修复 + XeSS/FSR 补帧导出（隔离分支）
 
-分支 `codex/framegen-fsr-dolby-20260916`，未合并 main、未推送、未发布。
+分支 `codex/framegen-fsr-dolby-20260916`；2026-09-16 已随该分支合并进 main（merge `24e7de7`）；未推送、未发布。
 用户指令原文："修，并且看看是不是用XeSS补帧没办法导出，也一起修了"。
 
 ## 1. 案例一：所有导出进程死在 NVENC 会话打开（用户 A）
@@ -122,7 +122,7 @@ GOP 截断）。`CfrTimeline` 的相位窗逐帧收紧，尾帧一格格子就�
 - **案例一现场复现**：本机驱动正常，无法复现陈旧 `nvEncodeAPI64.dll`，需要原用户复测。
 - **未测**：AMD 显卡上的 FSR 补帧导出（导出路径仍只支持 NVENC）；40/30 系实机导出。
 
-## 7. 测试包（未合并 main、未推送、未发布）
+## 7. 测试包（已合并 main、未推送、未发布）
 
 `C:\veyra-test-packages\final-exportfix-r5\Veyra-1.3.1beta-win64-portable.zip`，
 469,779,240 字节，SHA256

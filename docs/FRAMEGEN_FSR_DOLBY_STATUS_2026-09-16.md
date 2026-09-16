@@ -1,12 +1,13 @@
-# 帧生成 / FSR / 杜比：隔离分支施工状态（2026-09-16）
+# 帧生成 / FSR / 杜比：施工状态（2026-09-16）
 
-给人工验收/继续施工用。**全部工作只在隔离分支，未合并 main。**
+给人工验收/继续施工用。**已合并到 main（merge `24e7de7`）；未推送、未发布。**
 
 - 存档点（main）：`693db07`，tag `checkpoint/pre-framegen-fsr-dolby-2026-09-16`
 - 施工分支：`codex/framegen-fsr-dolby-20260916`
 - 分支提交（关键节点）：`35dd632`（DLSS 6X）→ `4124a9d`（XeSS MFG）→ `ef0fb50`（FSR 探针）→ `27656a6`（FSR 帧生成接入）→ `950f46d`（FSR 超分）→ `9179449`/`aa168ab`（40 系解锁）→ `4154733`/`3dd5add`（30 系解锁）→ `ef016ba`（A-2 节奏 hook）→ `56bb0f6`/`275c3f2`（杜比解码/直通）→ `015f8a4`（PS5+RGB24 修复）→ `d5f7383`。完整列表见 `git log`。
 - delivery 短测：本分支多次 23/23 通过（早期 `89286afb…`/`c6b3294d…`/`9951994f…`，后续 id 见 `docs/WORKLOG.md`）；分支 tip 最近一次 `45aefe5dcbdc44f79ecba8167b83f1f0`，均在 `logs/delivery/` 下
 - 计划：`docs/FRAMEGEN_FSR_DOLBY_PLAN_2026-09-16.md`
+- 合并存档：前 `checkpoint/pre-merge-framegen-20260916`（main `87ad4cd`）、分支 tip `checkpoint/framegen-fsr-dolby-branch-tip-20260916`（`ad7442d`）、后 `checkpoint/merged-framegen-20260916`
 
 ## 一、已完成并实测（可直接验收）
 
@@ -115,7 +116,7 @@ $env:VEYRA_TEST_FG_FORCE_MULTIPLIER='1'
 
 ## 三、验收清单（建议顺序，2026-09-16 晚更新）
 
-0. `git log --oneline -12` 确认全部提交都在 `codex/framegen-fsr-dolby-20260916`；`main` 现在到 `87ad4cd`（只含 RGB24 移植），分支未推送、未发布。
+0. `git log --oneline -12` 确认工作已合并在 `main`（merge `24e7de7`，含本分支全部提交）；未推送、未发布。
    构建 `cmd.exe /c out\build\veyra-build-x64-release.cmd` exit 0；分支 tip 的 delivery 短测 PASS（`logs/delivery/45aefe5dcbdc44f79ecba8167b83f1f0/result.json`）。
    EXE 哈希会随 PE 时间戳漂移（无 `/Brepro`），不在此冻结；最终构建/门禁数字以 `docs/WORKLOG.md` 顶部条目为准。
    40 系解锁验收：在 40 系机器上跑 `veyra.exe --fg-multiplier 4 --smoke-seconds 15 <视频>`，
@@ -133,6 +134,6 @@ $env:VEYRA_TEST_FG_FORCE_MULTIPLIER='1'
 
 ## 四、边界声明
 
-- 未合并 main；未推送远端；未发布。
+- 已合并 main（merge `24e7de7`，tag `checkpoint/merged-framegen-20260916`）；未推送远端；未发布。
 - 磁盘上的 `libxess_fg.dll` 未修改（哈希与审计值一致）；所有运行库修改仅在进程内存，退出即恢复。
 - 隔离分支上的 delivery 短测 23/23 通过，但**实卡 40 系、XeSS 节奏、FSR、杜比直通均未验证**，不作为已完成能力对外描述。
