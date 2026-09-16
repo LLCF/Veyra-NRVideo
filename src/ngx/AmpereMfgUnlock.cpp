@@ -774,7 +774,7 @@ bool AmpereMfgUnlock::adapterIsAmpere(uint32_t vendorId, uint32_t deviceId) {
     return deviceId >= 0x2200 && deviceId < 0x2680;
 }
 
-AmpereMfgUnlock::State AmpereMfgUnlock::apply(HMODULE module) {
+AmpereMfgUnlock::State AmpereMfgUnlock::apply(HMODULE module, bool retargetArchGates) {
     auto& g = global();
     std::lock_guard lock(g.mutex);
     State state{};
@@ -1022,18 +1022,24 @@ AmpereMfgUnlock::State AmpereMfgUnlock::apply(HMODULE module) {
         }
     };
 
-    // 1. architecture compares (0x1b0 -> 0x170)
-    patchArchGates(image.base, image.nt, g.archGateWrites);
-    if (g.archGateWrites.size() < kMinArchGateSites ||
-        g.archGateWrites.size() > kMaxArchGateSites) {
-        const size_t found = g.archGateWrites.size();
-        rollbackAll();
-        state.detail = std::format(L"arch-gate site count {} outside the audited range {}-{}",
-                                   found, kMinArchGateSites, kMaxArchGateSites);
-        g.state = state;
-        return state;
+    // 1. architecture compares (0x1b0 -> 0x170). Skipped when the caller makes
+    // the provider see Blackwell through the NVAPI spoof: then the provider's
+    // own compare must stay byte-identical so that the reported id matches it.
+    if (retargetArchGates) {
+        patchArchGates(image.base, image.nt, g.archGateWrites);
+        if (g.archGateWrites.size() < kMinArchGateSites ||
+            g.archGateWrites.size() > kMaxArchGateSites) {
+            const size_t found = g.archGateWrites.size();
+            rollbackAll();
+            state.detail = std::format(L"arch-gate site count {} outside the audited range {}-{}",
+                                       found, kMinArchGateSites, kMaxArchGateSites);
+            g.state = state;
+            return state;
+        }
+        state.archGateSites = g.archGateWrites.size();
+    } else {
+        log::info("ampere-mfg", "arch-gate retarget skipped: the provider is being told it runs on Blackwell");
     }
-    state.archGateSites = g.archGateWrites.size();
     state.archGatesPatched = true;
 
     // 2. registration slot pointers

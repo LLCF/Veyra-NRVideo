@@ -119,6 +119,7 @@ add_library(veyra_ngx STATIC
   src/ngx/DlssFgBackend.cpp
   src/ngx/AdaMfgUnlock.cpp
   src/ngx/AmpereMfgUnlock.cpp
+  src/ngx/NvapiArchSpoof.cpp
 )
   veyra_apply_warnings(veyra_ngx)
   target_compile_features(veyra_ngx PUBLIC cxx_std_20)

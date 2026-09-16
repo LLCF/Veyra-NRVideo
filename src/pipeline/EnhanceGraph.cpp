@@ -23,6 +23,7 @@
 #include "veyra/ngx/DlssFgBackend.h"
 #include "veyra/ngx/AdaMfgUnlock.h"
 #include "veyra/ngx/AmpereMfgUnlock.h"
+#include "veyra/ngx/NvapiArchSpoof.h"
 #include "veyra/gfx/FsrSrBackend.h"
 #include "veyra/ngx/DlssNrParameters.h"
 #include "veyra/ngx/DlssNrRuntimeAdapter.h"
@@ -480,6 +481,60 @@ void EnhanceGraph::applyAdaMfgUnlock()
                                             std::string(state.detail.begin(), state.detail.end())));
 }
 
+// Must run before the NGX core initializes the DLSS-G provider: the provider
+// resolves NvAPI_GPU_GetArchInfo once during its own initialization and caches
+// the resulting architecture decision, so installing the spoof afterwards has
+// no effect (measured 2026-09-17 on the local 5070: the cached entry was
+// already populated and the capability verdict stayed unchanged).
+void EnhanceGraph::prepareAmpereFgSpoof()
+{
+    if (!fgEnabled_ || desc_.frameGenerationBackend != engine::FrameGenerationBackend::Dlss) {
+        return;
+    }
+    wchar_t disabled[2]{};
+    if (GetEnvironmentVariableW(L"VEYRA_DISABLE_AMPERE_MFG_UNLOCK", disabled, 2) > 0) {
+        return;
+    }
+    const auto& adapter = context_.adapter();
+    wchar_t forced[2]{};
+    const bool forceOnAnyAdapter = GetEnvironmentVariableW(L"VEYRA_TEST_FORCE_AMPERE_UNLOCK", forced, 2) > 0;
+    if (!forceOnAnyAdapter && !ngx::AmpereMfgUnlock::adapterIsAmpere(adapter.vendorId, adapter.deviceId)) {
+        return;
+    }
+
+    const auto modulePath = std::filesystem::path(desc_.runtimeAbsPath) / L"nvngx_dlssg.dll";
+    HMODULE module = GetModuleHandleW(L"nvngx_dlssg.dll");
+    if (module == nullptr) {
+        module = LoadLibraryExW(modulePath.c_str(), nullptr,
+                                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    }
+    if (module == nullptr) {
+        veyra::log::warn("ampere-mfg", std::format("DLSS-G runtime could not be preloaded for the architecture spoof (path={} win32={})",
+                                                   modulePath.string(), GetLastError()));
+        return;
+    }
+    // Disabled by default: the hook is still under investigation (it changes the
+    // architecture the provider adopts but does not yet produce a stable
+    // frame-generation session on the test host). Set VEYRA_TEST_NVAPI_SPOOF_ARCH
+    // to a NV_GPU_ARCHITECTURE_ID (e.g. 0x1B0 for Blackwell) to try it.
+    uint32_t spoofArchitecture = 0;
+    {
+        wchar_t overrideText[16]{};
+        if (GetEnvironmentVariableW(L"VEYRA_TEST_NVAPI_SPOOF_ARCH", overrideText, 16) > 0) {
+            spoofArchitecture = static_cast<uint32_t>(std::wcstoul(overrideText, nullptr, 0));
+        }
+    }
+    if (spoofArchitecture == 0) {
+        return;
+    }
+    ampereSpoofed_ = ngx::NvapiArchSpoof::install(module, spoofArchitecture);
+    if (!ampereSpoofed_) {
+        const auto state = ngx::NvapiArchSpoof::snapshot();
+        veyra::log::warn("ampere-mfg", std::format("NVAPI architecture spoof unavailable ({}); the arch-gate retarget will be used instead",
+                                                   std::string(state.detail.begin(), state.detail.end())));
+    }
+}
+
 void EnhanceGraph::applyAmpereMfgUnlock()
 {
     const auto& adapter = context_.adapter();
@@ -525,9 +580,16 @@ void EnhanceGraph::applyAmpereMfgUnlock()
                                                    scan.detail));
         return;
     }
-    const auto state = ngx::AmpereMfgUnlock::apply(module);
-    veyra::log::info("ampere-mfg", std::format("adapter deviceId=0x{:04X} unlock applied={} runs={} slots={} fatbins={} lea={} gates={} ({})",
-                                               adapter.deviceId, state.applied ? 1 : 0, state.slotRuns,
+    // The spoof was installed before the provider was initialized (see
+    // prepareAmpereFgSpoof). When it is active the provider's own 0x1b0 compare
+    // must stay byte-identical so the reported architecture matches it; only
+    // the kernel rewrite runs here. Without the spoof the old retarget is kept.
+    const auto spoofState = ngx::NvapiArchSpoof::snapshot();
+    const bool spoofed = ampereSpoofed_ && spoofState.installed;
+    const auto state = ngx::AmpereMfgUnlock::apply(module, !spoofed);
+    veyra::log::info("ampere-mfg", std::format("adapter deviceId=0x{:04X} unlock applied={} spoofed={} reportedArch=0x{:X} runs={} slots={} fatbins={} lea={} gates={} ({})",
+                                               adapter.deviceId, state.applied ? 1 : 0,
+                                               spoofed ? 1 : 0, spoofState.reportedArchitecture, state.slotRuns,
                                                state.slotPointers,
                                                state.programFatbins + state.networkFatbins + state.auxFatbins,
                                                state.leaSites, state.archGateSites,
@@ -602,6 +664,10 @@ bool EnhanceGraph::initNgxFeatures()
         veyra::log::error("graph", "ngx-local.json missing");
         return false;
     }
+
+    // RTX 30 needs the NVAPI architecture spoof in place before the provider is
+    // initialized below. No-op on Ada/Blackwell and when FG is off.
+    prepareAmpereFgSpoof();
 
     coreHost_ = std::make_unique<ngx::NgxCoreHost>();
     Status st = Status::Ok;
@@ -1746,6 +1812,7 @@ void EnhanceGraph::shutdown()
     // feature (the unlock is process memory only; the file on disk is untouched).
     ngx::AdaMfgUnlock::release();
     ngx::AmpereMfgUnlock::release();
+    ngx::NvapiArchSpoof::release();
 
     // Staged explicit release (scope-end destructors then have nothing left).
     decPass_ = ComputePass{};

@@ -265,6 +265,10 @@ private:
     // DLSS-G runtime. Never touched on any other architecture.
     void applyAdaMfgUnlock();
     void applyAmpereMfgUnlock();
+    // RTX 30 only: must run before the NGX core initializes the provider, which
+    // resolves NvAPI_GPU_GetArchInfo once and caches the architecture decision.
+    void prepareAmpereFgSpoof();
+    bool ampereSpoofed_ = false;
     bool createComputePasses();
 
     gfx::D3D12DeviceContext& context_;
