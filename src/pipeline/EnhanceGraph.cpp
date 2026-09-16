@@ -438,7 +438,11 @@ void EnhanceGraph::applyAdaMfgUnlock()
     const auto& adapter = context_.adapter();
     // Hard architecture gate: 50 series keeps its native multi-frame path and is
     // never patched, and no other architecture is in scope either.
-    if (!ngx::AdaMfgUnlock::adapterIsAda(adapter.vendorId, adapter.deviceId)) {
+    // VEYRA_TEST_FORCE_ADA_UNLOCK runs the same patch on a non-Ada host so the
+    // edit itself can be checked without 40-series hardware; never a product path.
+    wchar_t forced[2]{};
+    const bool forceOnAnyAdapter=GetEnvironmentVariableW(L"VEYRA_TEST_FORCE_ADA_UNLOCK",forced,2)>0;
+    if (!forceOnAnyAdapter&&!ngx::AdaMfgUnlock::adapterIsAda(adapter.vendorId, adapter.deviceId)) {
         return;
     }
     wchar_t disabled[2]{};
