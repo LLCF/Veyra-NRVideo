@@ -954,12 +954,17 @@ SourceReadStatus CaptureCardSource::readWithWait(pipeline::FramePacket& packet,c
             // buffer; the read slot owns the cloned frame and the previous one
             // is released after the lock is dropped.
             expiredHardware=p.hardwareRead;p.hardwareRead=p.pendingHardware;p.pendingHardware=nullptr;delivered=p.hardwareRead;
-        }else{
+        }else if(p.compressedPath){
             // The caller's ownership of the previous frame ends with this read,
             // so it goes back into the decode pool and the worker continues.
             if(p.frame)p.compressedFree.push_back(p.frame);
             p.frame=p.pendingFrame;p.pendingFrame=nullptr;delivered=p.frame;
             if(p.workerFrame==nullptr&&!p.compressedFree.empty()){p.workerFrame=p.compressedFree.back();p.compressedFree.pop_back();feedDecode=true;}
+        }else{
+            // Native path keeps the original mailbox rotation: the frame the
+            // caller releases becomes the next ingest target, and pendingFrame
+            // must never be null here (SampleCB rejects that as an error).
+            std::swap(p.frame,p.pendingFrame);delivered=p.frame;
         }
         p.pending=false;time=p.pendingTime;p.readArrival=p.pendingArrival;
         duration=p.pendingDuration;
