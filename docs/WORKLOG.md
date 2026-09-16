@@ -1,5 +1,21 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-16 MPEG/压缩链路阶段 1+2+解码 worker（MJPEG 设备直连自解码，2 分钟真机复测）
+
+用户要求：先跑基线并记录 → 建 Git 存档 → 一次性实施 MPEG 链路修复 → 同协议复测对比。基线与存档见下方条目（`checkpoint/pre-mpeg-chain-20260916`）。
+
+提交：`2a4f44f`（压缩 sink 基础设施 + codec 识别）、`f0636f9`（MJPEG 直连 + 自解码 + 回退）、本提交（解码 worker）。
+
+- 架构：MJPEG 格式不再走 `RenderStream`（系统 MJPEG 解码器 → 颜色转换 → RGB32 兼容路径），改为 `ConnectDirect(设备 pin → NativeCaptureSink 压缩模式)`；payload 由 FFmpeg `AV_CODEC_ID_MJPEG` 自解，swscale 转 full-range NV12 进图。连接失败/解码失败自动回退旧 RGB32 路径（已实测回退路径可用、不断流）。
+- 第一次直连被驱动拒绝（`0x8004022A VFW_E_TYPE_NOT_ACCEPTED`）的原因：`NativeSink` 在压缩模式下仍按像素布局校验 `QueryAccept/ReceiveConnection`；改为 `sameCompressed()` 只比媒体类型后直连成功（1080p/4K 均 `hr=0`）。
+- 回调线程只做压缩 payload 拷贝（1080p MJPEG 单帧约数百 KB，对比旧路径回调内 RGB32 拷贝 8.3MB/33MB），有界队列上限 3、满则丢旧；独立 `decodeThread` 解码 → full-range NV12 → 信箱换帧，latest-frame mailbox 语义不变。`close()` 先停图再 join worker 再释放帧。
+- 2 分钟真机（本机 ¥30 UVC 卡，无增强，`--no-nr --no-sr --no-fg`）：
+  - MJPEG 1080p60：**7175 帧、0 丢帧**、`decoded≥6600 errors=0 queueDrops=0`；图侧 processCpuP95 **1.987 → 0.364 ms**。
+  - MJPEG 4K18：**2150 帧、0 丢帧**、`decoded≥1800 errors=0 queueDrops=0`；图侧 processCpuP95 **6.218 → 0.882 ms**。
+- **指标口径警告（不得当收益宣传）**：旧路径的系统解码发生在回调之前，`callback→Present` / `readAgeMs` 两个窗口都不含解码；新路径这两个窗口从压缩样本到达回调开始、**包含解码本身**。因此新数字（P95 7.910 / 22.334 ms、readAgeMs ≈5–7 / ≈19 ms）与基线（P95 3.909 / 10.496 ms、readAgeMs 0.5–1.5 / ~2.9 ms）**不是同一测量口径，不能直接比较大小**。可作为对比的客观项：0 丢帧、0 解码错误、主机 CPU 下降；真正端到端（HDMI→显示器光子延迟）本机未测，需相机法或用户实机。
+- processCpu 下降的归因候选：上传字节数 RGB32 8.3MB → NV12 3.1MB（4K 33MB → 12.4MB）、少了系统颜色转换层；未做单因子归因实验，如实记录。
+- 颜色正确性（旧 RGB32 vs 新 NV12 逐像素 ≤2 code）与 H.264/HEVC/AV1 的 D3D12VA 后端尚未做，列入下一阶段；本条目只声称 MJPEG 链路稳定（0 丢帧/0 解码错误）与主机 CPU 下降。
+
 ## 2026-09-16 MPEG/压缩链路开工前基线（2 分钟真机，走 RGB32 兼容链路）
 
 用户要求：先跑基线并记录 → 建 Git 存档 → 一次性实施 MPEG 链路修复 → 同协议复测对比。

@@ -22,6 +22,8 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 #include <algorithm>
+#include <deque>
+#include <thread>
 #include <array>
 #include <cstdint>
 #include <mutex>
@@ -159,6 +161,13 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
     bool compressedPath=false;CaptureCodec codec=CaptureCodec::None;
     AVCodecContext* decoder=nullptr;SwsContext* sws=nullptr;AVFrame* decoded=nullptr;
     uint64_t compressedDecoded=0,compressedErrors=0;
+    // Decode worker: keeps the DirectShow callback cheap (payload copy only)
+    // and lets the decode overlap with graph work. The worker owns workerFrame
+    // and swaps it into the mailbox once a frame is ready.
+    struct CompressedSample{std::vector<uint8_t> payload;double time=0;Clock::time_point arrival;REFERENCE_TIME start=0,end=0;bool completeTime=false,bad=false;};
+    std::deque<CompressedSample> compressedQueue;size_t compressedQueueLimit=3;
+    std::thread decodeThread;std::condition_variable decodeWake;bool decodeStop=false;
+    AVFrame* workerFrame=nullptr;uint64_t compressedDropped=0;double lastCallbackTime=0;
     // Manual capture flip; read by the DirectShow callback thread.
     std::atomic<bool> verticalFlip{false};
     std::unique_ptr<WasapiAudioInput> wasapi;
@@ -167,37 +176,51 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
     SourceInfo info;CaptureMediaLayout layout;Clock::time_point lastFrame;
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id,void** pp)override{if(!pp)return E_POINTER;*pp=nullptr;if(id==IID_IUnknown||id==__uuidof(ISampleGrabberCB)){*pp=static_cast<ISampleGrabberCB*>(this);AddRef();return S_OK;}return E_NOINTERFACE;}
     ULONG STDMETHODCALLTYPE AddRef()override{return ++refs;}ULONG STDMETHODCALLTYPE Release()override{return --refs;}
-    // Decode one MJPEG payload into the NV12 mailbox frame. Called with the
-    // source mutex held from the DirectShow callback thread.
-    bool decodeCompressed(const uint8_t* data,size_t bytes){
-        AVPacket* packet=av_packet_alloc();if(!packet)return false;
-        if(av_new_packet(packet,int(bytes))<0){av_packet_free(&packet);return false;}
-        std::memcpy(packet->data,data,bytes);
-        const int send=avcodec_send_packet(decoder,packet);av_packet_free(&packet);
-        if(send<0){++compressedErrors;return false;}
-        const int recv=avcodec_receive_frame(decoder,decoded);
-        if(recv<0){++compressedErrors;return false;}
-        // MJPEG decodes to the deprecated full-range YUVJ formats; map them to
-        // the standard formats and pin the range explicitly instead of letting
-        // swscale guess (and spam a deprecation warning every frame).
-        AVPixelFormat srcFormat=AVPixelFormat(decoded->format);
-        if(srcFormat==AV_PIX_FMT_YUVJ422P)srcFormat=AV_PIX_FMT_YUV422P;
-        else if(srcFormat==AV_PIX_FMT_YUVJ420P)srcFormat=AV_PIX_FMT_YUV420P;
-        else if(srcFormat==AV_PIX_FMT_YUVJ444P)srcFormat=AV_PIX_FMT_YUV444P;
-        sws=sws_getCachedContext(sws,decoded->width,decoded->height,srcFormat,
-            int(layout.width),int(layout.height),AV_PIX_FMT_NV12,SWS_BILINEAR,nullptr,nullptr,nullptr);
-        if(!sws){av_frame_unref(decoded);++compressedErrors;return false;}
-        // Keep full-range NV12 so the declared color contract (range=Full) is
-        // truthful for the graph's YUV ingress.
-        const int* coefficients=sws_getCoefficients(decoded->colorspace==AVCOL_SPC_BT709?SWS_CS_ITU709:SWS_CS_ITU601);
-        sws_setColorspaceDetails(sws,coefficients,1,coefficients,1,0,1<<16,1<<16);
-        uint8_t* dst[4]={pendingFrame->data[0],pendingFrame->data[1],nullptr,nullptr};
-        const int dstStride[4]={pendingFrame->linesize[0],pendingFrame->linesize[1],0,0};
-        sws_scale(sws,decoded->data,decoded->linesize,0,decoded->height,dst,dstStride);
-        av_frame_unref(decoded);
-        ++compressedDecoded;
-        if((compressedDecoded%600)==0)log::info("capture-decode",std::format("decoded={} errors={} (direct callback decode)",compressedDecoded,compressedErrors));
-        return true;
+    // Decode worker loop: pop a compressed payload, decode it into the worker
+    // frame (no source lock held), then swap it into the mailbox.
+    void decodeLoop(){
+        for(;;){
+            CompressedSample sample;
+            {
+                std::unique_lock lock(mutex);
+                decodeWake.wait(lock,[&]{return decodeStop||!compressedQueue.empty();});
+                if(decodeStop&&compressedQueue.empty())return;
+                sample=std::move(compressedQueue.front());compressedQueue.pop_front();
+            }
+            AVPacket* packet=av_packet_alloc();if(!packet){++compressedErrors;continue;}
+            if(av_new_packet(packet,int(sample.payload.size()))<0){av_packet_free(&packet);++compressedErrors;continue;}
+            std::memcpy(packet->data,sample.payload.data(),sample.payload.size());
+            const int send=avcodec_send_packet(decoder,packet);av_packet_free(&packet);
+            if(send<0){++compressedErrors;continue;}
+            if(avcodec_receive_frame(decoder,decoded)<0){++compressedErrors;continue;}
+            // MJPEG decodes to the deprecated full-range YUVJ formats; map them
+            // to standard formats and pin the range explicitly instead of
+            // letting swscale guess (and spam a warning every frame).
+            AVPixelFormat srcFormat=AVPixelFormat(decoded->format);
+            if(srcFormat==AV_PIX_FMT_YUVJ422P)srcFormat=AV_PIX_FMT_YUV422P;
+            else if(srcFormat==AV_PIX_FMT_YUVJ420P)srcFormat=AV_PIX_FMT_YUV420P;
+            else if(srcFormat==AV_PIX_FMT_YUVJ444P)srcFormat=AV_PIX_FMT_YUV444P;
+            sws=sws_getCachedContext(sws,decoded->width,decoded->height,srcFormat,
+                int(layout.width),int(layout.height),AV_PIX_FMT_NV12,SWS_BILINEAR,nullptr,nullptr,nullptr);
+            if(!sws){av_frame_unref(decoded);++compressedErrors;continue;}
+            const int* coefficients=sws_getCoefficients(decoded->colorspace==AVCOL_SPC_BT709?SWS_CS_ITU709:SWS_CS_ITU601);
+            sws_setColorspaceDetails(sws,coefficients,1,coefficients,1,0,1<<16,1<<16);
+            uint8_t* dst[4]={workerFrame->data[0],workerFrame->data[1],nullptr,nullptr};
+            const int dstStride[4]={workerFrame->linesize[0],workerFrame->linesize[1],0,0};
+            sws_scale(sws,decoded->data,decoded->linesize,0,decoded->height,dst,dstStride);
+            av_frame_unref(decoded);
+            ++compressedDecoded;
+            {
+                std::lock_guard lock(mutex);
+                if(pending)++dropped;              // mailbox semantics: newest wins
+                std::swap(pendingFrame,workerFrame);
+                pending=true;pendingTime=sample.time;pendingArrival=sample.arrival;
+                pendingDuration=captureDuration(sample.start,sample.end,sample.completeTime,nominalDuration100ns);
+                pendingDiscontinuity=sample.bad;
+                if((compressedDecoded%600)==0)log::info("capture-decode",std::format("decoded={} errors={} queueDrops={} (decode worker)",compressedDecoded,compressedErrors,compressedDropped));
+            }
+            wake.notify_one();
+        }
     }
     HRESULT STDMETHODCALLTYPE SampleCB(double time,IMediaSample* sample)override{
         const auto arrival=Clock::now();BYTE* data=nullptr;
@@ -205,6 +228,7 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
         const bool sampleTime=sample&&sample->GetTime(&sampleStart,&sampleEnd)==S_OK;
         const bool valid=sample&&std::isfinite(time)&&SUCCEEDED(sample->GetPointer(&data))&&data&&
             (compressedPath?sample->GetActualDataLength()>0:sample->GetActualDataLength()>=LONG(layout.sampleBytes));
+        bool enqueued=false;
         {
             std::lock_guard lock(mutex);
             if(!valid||!pendingFrame){callbackError=true;}
@@ -213,19 +237,32 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
                 // under this lock, so the frame consumed by the GPU is untouched.
                 // Compressed MJPEG payloads are decoded into the same NV12
                 // mailbox frame instead of being expanded by the system graph.
-                const bool copied=compressedPath?decodeCompressed(data,size_t(sample->GetActualDataLength())):copyCaptureSample(layout,data,size_t(sample->GetActualDataLength()),*pendingFrame,verticalFlip.load());
-                if(!copied){callbackError=true;wake.notify_one();return S_OK;}
-                if(pending)++dropped;
-                // Inspect consecutive callbacks, not consecutive mailbox reads.
-                // Preserve a driver/clock break when its sample is overwritten.
-                pendingDiscontinuity=captureDiscontinuity(pending,pendingDiscontinuity,
-                    sample->IsDiscontinuity()==S_OK,received>0,pendingTime,time,info.averageFps);
-                pending=true;pendingTime=time;pendingArrival=arrival;
-                pendingDuration=captureDuration(sampleStart,sampleEnd,sampleTime,nominalDuration100ns);
+                if(compressedPath){
+                    // MPEG chain: the callback only copies the compressed
+                    // payload; the decode worker produces the NV12 frame.
+                    const auto* payload=reinterpret_cast<const uint8_t*>(data);
+                    const size_t bytes=size_t(sample->GetActualDataLength());
+                    if(compressedQueue.size()>=compressedQueueLimit){compressedQueue.pop_front();++compressedDropped;++dropped;}
+                    CompressedSample entry;entry.payload.assign(payload,payload+bytes);
+                    entry.time=time;entry.arrival=arrival;entry.start=sampleStart;entry.end=sampleEnd;entry.completeTime=sampleTime;
+                    entry.bad=captureDiscontinuity(!compressedQueue.empty()||pending,pendingDiscontinuity,sample->IsDiscontinuity()==S_OK,received>0,lastCallbackTime,time,info.averageFps);
+                    pendingDiscontinuity=entry.bad;lastCallbackTime=time;
+                    compressedQueue.push_back(std::move(entry));enqueued=true;
+                }else{
+                    if(!copyCaptureSample(layout,data,size_t(sample->GetActualDataLength()),*pendingFrame,verticalFlip.load())){callbackError=true;wake.notify_one();return S_OK;}
+                    if(pending)++dropped;
+                    // Inspect consecutive callbacks, not consecutive mailbox reads.
+                    // Preserve a driver/clock break when its sample is overwritten.
+                    pendingDiscontinuity=captureDiscontinuity(pending,pendingDiscontinuity,
+                        sample->IsDiscontinuity()==S_OK,received>0,pendingTime,time,info.averageFps);
+                    pending=true;pendingTime=time;pendingArrival=arrival;
+                    pendingDuration=captureDuration(sampleStart,sampleEnd,sampleTime,nominalDuration100ns);
+                }
                 if(!received)firstArrival=arrival;
                 ++received;latestArrival=arrival;
             }
         }
+        if(enqueued)decodeWake.notify_one();
         wake.notify_one();return S_OK;
     }
     HRESULT STDMETHODCALLTYPE BufferCB(double,BYTE*,long)override{return E_NOTIMPL;}
@@ -484,6 +521,13 @@ bool CaptureCardSource::configure(const SourceOpenDesc& desc){close();p_->lastAu
         *f=av_frame_alloc();if(!*f)return false;
         (*f)->format=p.layout.format;(*f)->width=p.info.width;(*f)->height=p.info.height;
         if(av_frame_get_buffer(*f,32)<0)return false;
+    }
+    if(compressedPath){
+        p.workerFrame=av_frame_alloc();if(!p.workerFrame)return false;
+        p.workerFrame->format=AV_PIX_FMT_NV12;p.workerFrame->width=int(p.layout.width);p.workerFrame->height=int(p.layout.height);
+        if(av_frame_get_buffer(p.workerFrame,32)<0)return false;
+        p.decodeStop=false;p.decodeThread=std::thread([&p]{p.decodeLoop();});
+        log::info("capture-decode",std::format("decode worker started queue={} (single decode thread; the parallel pool is a later refinement)",p.compressedQueueLimit));
     }
     p.configured=true;
     reconnectDesc_=desc;reconnectInfo_=p.info;reconnectFormat_.clear();
@@ -808,6 +852,8 @@ void CaptureCardSource::close()noexcept{
     if(p.audioSession)p.audioSession->stop();p.audioError.clear();
     if(p.audioPassthrough)p.audioPassthrough->close();
     p.events.Reset();p.control.Reset();p.grab.Reset();p.nullFilter.Reset();p.grabFilter.Reset();p.audioSink.Reset();p.audioFilter.Reset();p.config.Reset();p.device.Reset();p.builder.Reset();p.graph.Reset();p.referenceClock.Reset();p.audioSession.reset();p.audioPassthrough.reset();
+    if(p.decodeThread.joinable()){{std::lock_guard lock(p.mutex);p.decodeStop=true;p.compressedQueue.clear();}p.decodeWake.notify_all();p.decodeThread.join();}
+    if(p.workerFrame)av_frame_free(&p.workerFrame);
     av_frame_free(&p.frame);av_frame_free(&p.pendingFrame);
     if(p.decoded)av_frame_free(&p.decoded);if(p.decoder)avcodec_free_context(&p.decoder);if(p.sws)sws_freeContext(p.sws);
     p.sws=nullptr;p.compressedPath=false;p.codec=CaptureCodec::None;p.compressedDecoded=p.compressedErrors=0;
