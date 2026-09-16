@@ -3,7 +3,7 @@
 #include "veyra/source/MediaFileSource.h"
 #include "veyra/pipeline/EnhanceGraph.h"
 #include "veyra/pipeline/ResolutionPlan.h"
-#include "veyra/sink/NvencD3D12Encoder.h"
+#include "veyra/sink/VideoEncoder.h"
 #include "veyra/gfx/D3D12DeviceContext.h"
 #include "veyra/gfx/CommandSlotRing.h"
 #include "veyra/RuntimePaths.h"
@@ -38,10 +38,12 @@ bool exportVideo(const std::wstring& input,const std::wstring& output,PlayerOpti
         veyra::log::warn("export",std::format("present-sink frame generation cannot feed the encoder requested={} multiplier={}; substituting the in-graph DLSS path",frameGenerationBackendName(requested),options.fgMultiplier));
         options.settings.frameGenerationBackend=FrameGenerationBackend::Dlss;
     }
-    gfx::D3D12DeviceContext ctx;gfx::CommandSlotRing ring;source::MediaFileSource source;pipeline::EnhanceGraph graph(ctx,ring);sink::NvencD3D12Encoder enc;
+    gfx::D3D12DeviceContext ctx;gfx::CommandSlotRing ring;source::MediaFileSource source;pipeline::EnhanceGraph graph(ctx,ring);
+    std::unique_ptr<sink::VideoEncoder> encoder;
     AVFormatContext *mux=nullptr,*audioInput=nullptr;AVStream* videoStream=nullptr;AVStream* audioStream=nullptr;AVPacket* audioPacket=av_packet_alloc();
     int audioIndex=-1;bool audioPending=false,audioEof=false,ok=false,headerWritten=false;int64_t written=0;double audioEndSeconds=0,videoOriginSeconds=0;
     uint64_t tailSnapped=0;
+    std::wstring encoderName;
     std::wstring failureReason;
     auto failAv=[&](const wchar_t* stage,int code){
         char error[AV_ERROR_MAX_STRING_SIZE]{};av_strerror(code,error,sizeof(error));
@@ -55,11 +57,12 @@ bool exportVideo(const std::wstring& input,const std::wstring& output,PlayerOpti
     try { do {
         Status st=Status::Ok;gfx::DeviceContextDesc dd;dd.commandSlotCount=6;
         if(!ctx.initialize(dd,st)||!ring.initialize(ctx.device(),ctx.directQueue(),ctx.fence(),ctx.fenceEvent(),6,st))break;
-        if(!ctx.adapter().isNvidia){
-            progress(0,L"当前视频导出使用 NVIDIA NVENC；尚未实现 AMD AMF 或 Intel 编码后端");
-            veyra::log::warn("export","export rejected: selected adapter has no NVIDIA NVENC; AMD AMF and Intel encoder backends are not implemented");
-            break;
-        }
+        // Export runs on every adapter now: NVIDIA uses NVENC (D3D12,
+        // zero-copy) and everything else uses the driver's Media Foundation
+        // hardware encoder. Features that need NGX/NVOF stay NVIDIA-only and
+        // are gated below instead of failing the job.
+        const bool nvidiaAdapter=ctx.adapter().isNvidia;
+        if(!nvidiaAdapter)veyra::log::info("export",std::format("adapter={} vendor={}; DLSS NR/SR/FG and NVOF are unavailable, encoder falls back to the system Media Foundation hardware MFT",utf8(ctx.adapter().description),ctx.adapter().vendorIdHex));
         source::SourceOpenDesc od;od.path=input;od.preferHardwareDecode=false;if(!source.open(od)){failureReason=source.errorMessage();break;}
         auto info=source.info();if(!pipeline::Extent{info.width,info.height}.valid()){progress(0,L"输入尺寸超出GPU单纹理能力");break;}
         // Bounded metadata scan; decoded pixels are not retained. Rewind the
@@ -81,7 +84,16 @@ bool exportVideo(const std::wstring& input,const std::wstring& output,PlayerOpti
         pipeline::EnhanceGraphDesc gd;gd.hdrInput=gd.hdrOutput=info.color.isHdrPath();hdrExport=gd.hdrOutput;
         gd.captureBitDepth=info.color.pixelFormat==pipeline::SourcePixelFormat::P010?10:info.color.pixelFormat==pipeline::SourcePixelFormat::P016?16:8;
         if(gd.hdrOutput&&!hevc){failureReason=L"HDR视频请使用HEVC Main10导出（选择HEVC）";break;}
-        gd.sourceWidth=info.width;gd.sourceHeight=info.height;gd.workWidth=resolution.base.width;gd.workHeight=resolution.base.height;gd.nrWidth=resolution.nr.width;gd.nrHeight=resolution.nr.height;gd.flowWidth=resolution.flow.width;gd.flowHeight=resolution.flow.height;gd.enableSr=resolution.srApplied;gd.videoSrQuality=options.settings.videoSrQuality;gd.enableNr=options.nr;gd.nrRuntime=options.settings.nrRuntime;gd.enableFg=options.fg;gd.fgMultiplier=options.fgMultiplier;gd.frameGenerationBackend=options.settings.frameGenerationBackend;gd.enableNvofStandalone=options.nr;gd.model=options.settings.model;gd.residual=options.settings.residual;gd.protection=options.settings.protection;gd.settingsRevision=options.settings.revision;gd.flowQuality=options.settings.flow;gd.opticalFlowBackend=options.settings.opticalFlowBackend;gd.amdFlowHalfResolution=options.settings.amdFlowHalfResolution;gd.contentRate=options.settings.content;gd.runtimeAbsPath=runtime::localRuntimeDirectory().wstring();
+        // Adapter gate mirrors the preview rules (EngineController): DLSS NR,
+        // DLSS SR and the NVOF guidance need an NVIDIA device; AMD FSR
+        // upscaling is the only vendor-neutral video SR we ship. Requesting an
+        // unavailable feature must degrade the export, never fail it.
+        const bool nvidiaFeatures=nvidiaAdapter;
+        const bool srAvailable=resolution.srApplied&&(nvidiaFeatures||options.settings.videoSrQuality==kVideoSrFsr);
+        if(options.nr&&!nvidiaFeatures)fgNote+=fgNote.empty()?L"当前显卡不能使用 DLSS NR，本次导出自动关闭 NR":L"；当前显卡不能使用 DLSS NR，本次导出自动关闭 NR";
+        if(options.sr&&!srAvailable)fgNote+=fgNote.empty()?L"当前显卡不能使用所选超分，本次导出关闭超分":L"；当前显卡不能使用所选超分，本次导出关闭超分";
+        if(!nvidiaFeatures&&srAvailable)fgNote+=fgNote.empty()?L"本次导出使用 AMD FSR 超分":L"；本次导出使用 AMD FSR 超分";
+        gd.sourceWidth=info.width;gd.sourceHeight=info.height;gd.workWidth=resolution.base.width;gd.workHeight=resolution.base.height;gd.nrWidth=resolution.nr.width;gd.nrHeight=resolution.nr.height;gd.flowWidth=resolution.flow.width;gd.flowHeight=resolution.flow.height;gd.enableSr=srAvailable;gd.videoSrQuality=options.settings.videoSrQuality;gd.enableNr=options.nr&&nvidiaFeatures;gd.nrRuntime=options.settings.nrRuntime;gd.enableFg=options.fg&&nvidiaFeatures;gd.fgMultiplier=options.fgMultiplier;gd.frameGenerationBackend=options.settings.frameGenerationBackend;gd.enableNvofStandalone=options.nr&&nvidiaFeatures;gd.model=options.settings.model;gd.residual=options.settings.residual;gd.protection=options.settings.protection;gd.settingsRevision=options.settings.revision;gd.flowQuality=options.settings.flow;gd.opticalFlowBackend=options.settings.opticalFlowBackend;gd.amdFlowHalfResolution=options.settings.amdFlowHalfResolution;gd.contentRate=options.settings.content;gd.runtimeAbsPath=runtime::localRuntimeDirectory().wstring();
         // One attempt per frame-generation request. A rejected multiplier is a
         // capability statement, not an infrastructure failure: retry at 2X (the
         // floor every DLSS-G capable GPU honours) and only then fall back to a
@@ -93,6 +105,7 @@ bool exportVideo(const std::wstring& input,const std::wstring& output,PlayerOpti
             fgFailure=graph.failedBackend()==FailedBackend::Fg;
             graph.shutdown();
         };
+        if(options.fg&&!nvidiaFeatures){options.fg=false;options.fgMultiplier=1;}
         if(options.fg){
             startGraph(true,options.fgMultiplier);
             if(!graphReady&&fgFailure&&options.fgMultiplier>2){
@@ -141,9 +154,19 @@ bool exportVideo(const std::wstring& input,const std::wstring& output,PlayerOpti
             AVPacket* pkt=av_packet_alloc();if(!pkt)return false;if(av_new_packet(pkt,int(size))<0){av_packet_free(&pkt);return false;}memcpy(pkt->data,bytes,size);pkt->stream_index=videoStream->index;pkt->pts=pkt->dts=pts;pkt->duration=1;if(key)pkt->flags|=AV_PKT_FLAG_KEY;
             av_packet_rescale_ts(pkt,{rate.den,rate.num},videoStream->time_base);const int rc=av_interleaved_write_frame(mux,pkt);av_packet_free(&pkt);if(rc<0)return failAv(L"写入视频帧",rc);++written;audioEndSeconds=(pts+1)*double(rate.den)/rate.num;return writeAudioUntil(audioEndSeconds);};
         // Must drain before rate/writeAudioUntil/writer leave scope, including cancel/error.
-        struct EncoderCloser {sink::NvencD3D12Encoder& encoder;~EncoderCloser(){encoder.close();}} closer{enc};
-        if(!enc.open(ctx,ring,graph,hevc,rate.num,rate.den,writer))break;
-        auto headers=enc.headers();cp->extradata=static_cast<uint8_t*>(av_mallocz(headers.size()+AV_INPUT_BUFFER_PADDING_SIZE));if(!cp->extradata)break;memcpy(cp->extradata,headers.data(),headers.size());cp->extradata_size=int(headers.size());
+        struct EncoderCloser {sink::VideoEncoder* encoder;~EncoderCloser(){if(encoder)encoder->close();}} closer{encoder.get()};
+        sink::EncoderConfig encoderConfig;encoderConfig.hevc=hevc;encoderConfig.fpsNum=unsigned(rate.num);encoderConfig.fpsDen=unsigned(rate.den);encoderConfig.bitrateMbps=options.settings.exportBitrateMbps;
+        std::wstring encoderDetail;
+        encoder=sink::openVideoEncoder(ctx,ring,graph,encoderConfig,writer,encoderDetail);
+        if(!encoder){
+            progress(0,encoderDetail.empty()?L"没有可用的视频编码器":encoderDetail);
+            if(failureReason.empty())failureReason=encoderDetail.empty()?L"没有可用的视频编码器":encoderDetail;
+            veyra::log::error("export","no usable video encoder for this adapter/codec");
+            break;
+        }
+        encoderName=encoder->describe();
+        veyra::log::info("export",std::format("encoder={} codec={} bitrateMbps={} rate={}/{}",std::string(sink::encoderBackendName(encoder->backend())),hevc?"HEVC":"H264",encoderConfig.bitrateMbps,rate.num,rate.den));
+        auto headers=encoder->headers();cp->extradata=static_cast<uint8_t*>(av_mallocz(headers.size()+AV_INPUT_BUFFER_PADDING_SIZE));if(!cp->extradata)break;memcpy(cp->extradata,headers.data(),headers.size());cp->extradata_size=int(headers.size());
         int muxResult=avio_open(&mux->pb,utf8(partial).c_str(),AVIO_FLAG_WRITE);
         if(muxResult<0){failAv(L"创建输出文件",muxResult);break;}
         muxResult=avformat_write_header(mux,nullptr);
@@ -181,30 +204,30 @@ bool exportVideo(const std::wstring& input,const std::wstring& output,PlayerOpti
                 for(uint32_t j=1;j<options.fgMultiplier;++j){
                     pipeline::BatchFrame* item=nullptr;
                     for(uint32_t k=0;k<out.batch.count;++k)if(out.batch.frames[k].subframe==j&&out.batch.frames[k].validity==pipeline::GenerationValidity::Valid)item=&out.batch.frames[k];
-                    if(item){if(!enc.encode(item->lease->slot,true,outputIndex++)){error=true;break;}item->lease->consumerFence=ring.lastSignaledValue();++generatedCount;}
-                    else {if(!lastReal||!enc.encode(lastReal->slot,false,outputIndex++)){error=true;break;}lastReal->consumerFence=ring.lastSignaledValue();++holdCount;}
+                    if(item){if(!encoder->encode(item->lease->slot,true,outputIndex++)){error=true;break;}item->lease->consumerFence=ring.lastSignaledValue();++generatedCount;}
+                    else {if(!lastReal||!encoder->encode(lastReal->slot,false,outputIndex++)){error=true;break;}lastReal->consumerFence=ring.lastSignaledValue();++holdCount;}
                 }
             }
             if(error)break;
             auto& real=out.batch.frames[out.batch.count-1];
-            if(!enc.encode(real.lease->slot,false,outputIndex++)){error=true;break;}
+            if(!encoder->encode(real.lease->slot,false,outputIndex++)){error=true;break;}
             real.lease->consumerFence=ring.lastSignaledValue();lastReal=real.lease;
-            ++sourceCount;if(counts)counts({sourceCount,generatedCount,holdCount,uint64_t(written)});progress(info.duration.toDouble()>0?std::clamp((packet.pts.toDouble()-videoOriginSeconds)/info.duration.toDouble(),0.0,.99):0,std::format(L"正在导出：{}张源帧 / {}张编码帧（D3D12 NVENC）",sourceCount,outputIndex));
+            ++sourceCount;if(counts)counts({sourceCount,generatedCount,holdCount,uint64_t(written)});progress(info.duration.toDouble()>0?std::clamp((packet.pts.toDouble()-videoOriginSeconds)/info.duration.toDouble(),0.0,.99):0,std::format(L"正在导出：{}张源帧 / {}张编码帧（{}）",sourceCount,outputIndex,encoderName));
             if(maxFrames&&sourceCount>=maxFrames)break;
         }
         if(error||cancel)break;
-        if(options.fg&&lastReal)for(uint32_t j=1;j<options.fgMultiplier;++j){if(!enc.encode(lastReal->slot,false,outputIndex++)){error=true;break;}++holdCount;}
+        if(options.fg&&lastReal)for(uint32_t j=1;j<options.fgMultiplier;++j){if(!encoder->encode(lastReal->slot,false,outputIndex++)){error=true;break;}++holdCount;}
         if(error)break;
-        veyra::log::info("export-counts",std::format("source={} generated={} hold={} output={} multiplier={} tailSnapped={} backend={} note={} (CFR holds are not DLSSG)",sourceCount,generatedCount,holdCount,outputIndex,options.fg?options.fgMultiplier:1,tailSnapped,frameGenerationBackendName(options.settings.frameGenerationBackend),utf8(fgNote)));
+        veyra::log::info("export-counts",std::format("source={} generated={} hold={} output={} multiplier={} tailSnapped={} backend={} encoder={} bitrateMbps={} note={} (CFR holds are not DLSSG)",sourceCount,generatedCount,holdCount,outputIndex,options.fg?options.fgMultiplier:1,tailSnapped,frameGenerationBackendName(options.settings.frameGenerationBackend),std::string(sink::encoderBackendName(encoder->backend())),options.settings.exportBitrateMbps,utf8(fgNote)));
         progress(.99,L"正在收尾：等待编码器输出剩余帧");
-        if(!enc.finish()){if(failureReason.empty())failureReason=L"编码器收尾失败，请查看NVENC诊断";break;}
+        if(!encoder->finish()){if(failureReason.empty())failureReason=L"编码器收尾失败，请查看编码器诊断";break;}
         if(!writeAudioUntil(audioEndSeconds))break;
         progress(.995,L"正在收尾：写入MP4索引");
         muxResult=av_write_trailer(mux);
         if(muxResult<0){failAv(L"写入MP4索引",muxResult);break;}
         ok=written>0;if(counts)counts({sourceCount,generatedCount,holdCount,uint64_t(written)});
     }while(false); }catch(const std::exception& e){veyra::log::error("export",std::format("exception: {}",e.what()));failureReason=L"导出异常，请查看诊断";ok=false;}
-    enc.close();if(mux){if(mux->pb){const int rc=avio_closep(&mux->pb);if(rc<0){failAv(L"刷新并关闭输出文件",rc);ok=false;}}avformat_free_context(mux);}if(audioInput)avformat_close_input(&audioInput);av_packet_free(&audioPacket);
+    encoder.reset();if(mux){if(mux->pb){const int rc=avio_closep(&mux->pb);if(rc<0){failAv(L"刷新并关闭输出文件",rc);ok=false;}}avformat_free_context(mux);}if(audioInput)avformat_close_input(&audioInput);av_packet_free(&audioPacket);
     ring.drainQueue();graph.shutdown();source.close();ring.shutdown();ctx.shutdown();
     if(ok){
         progress(.999,L"正在封装和验证输出");
@@ -243,8 +266,8 @@ bool exportVideo(const std::wstring& input,const std::wstring& output,PlayerOpti
         }
     }
     if(ok){
-        std::wstring done=L"视频导出完成，逐帧完整性验证通过";
-        if(tailSnapped>0)done=std::format(L"视频导出完成，逐帧完整性验证通过（尾部 {} 帧时间戳已按恒定帧率对齐）",tailSnapped);
+        std::wstring done=encoderName.empty()?L"视频导出完成，逐帧完整性验证通过":std::format(L"视频导出完成（{}），逐帧完整性验证通过",encoderName);
+        if(tailSnapped>0)done+=std::format(L"（尾部 {} 帧时间戳已按恒定帧率对齐）",tailSnapped);
         progress(1,fgNote.empty()?done:fgNote+L"；"+done);
     }
     else {

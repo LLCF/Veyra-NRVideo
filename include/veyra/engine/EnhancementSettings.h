@@ -16,6 +16,12 @@ constexpr bool presentSinkFrameGeneration(FrameGenerationBackend backend) {
 // exposes 2/3/4/6 and MFG buyers pick from those; 1 = generation off.
 inline constexpr uint32_t kFgMultiplierChoices[]={1,2,3,4,6};
 inline constexpr size_t kFgMultiplierChoiceCount=sizeof(kFgMultiplierChoices)/sizeof(kFgMultiplierChoices[0]);
+// Export bitrate presets in Mbps; index 0 keeps the encoder's constant-quality
+// default. Labels are the UI strings for the same order.
+inline constexpr uint32_t kExportBitrateChoices[]={0,6,10,16,24,40,60,100,150,200};
+inline constexpr size_t kExportBitrateChoiceCount=sizeof(kExportBitrateChoices)/sizeof(kExportBitrateChoices[0]);
+inline constexpr const wchar_t* kExportBitrateLabels[]={L"自动 · 恒定质量",L"6 Mbps",L"10 Mbps",L"16 Mbps",L"24 Mbps",L"40 Mbps",L"60 Mbps",L"100 Mbps",L"150 Mbps",L"200 Mbps"};
+inline size_t exportBitrateIndex(uint32_t mbps){for(size_t i=0;i<kExportBitrateChoiceCount;++i)if(kExportBitrateChoices[i]==mbps)return i;return 0;}
 // videoSrQuality values: 0 = DLSS SR, 1..4 = RTX video SR quality steps,
 // 5 = AMD FSR upscaling (vendor neutral; verified on an NVIDIA adapter).
 inline constexpr uint32_t kVideoSrFsr=5;
@@ -105,6 +111,10 @@ struct EnhancementSettings {
     uint32_t videoSrQuality=0; // 0 DLSS SR; 1–4 RTX Video SR
     uint32_t multiplier=1;
     FrameGenerationBackend frameGenerationBackend=FrameGenerationBackend::Dlss;
+    // Export target bitrate in Mbps; 0 keeps the encoder's constant-quality
+    // default (NVENC CONSTQP / MFT quality mode). Only the export job consumes
+    // it: preview never re-encodes.
+    uint32_t exportBitrateMbps=0;
     pipeline::NrSizePolicy nrPolicy=pipeline::NrSizePolicy::Realtime;
     FlowQuality flow=FlowQuality::Balanced;
     OpticalFlowBackend opticalFlowBackend=OpticalFlowBackend::Nvidia;
@@ -118,6 +128,9 @@ struct EnhancementSettings {
         video.revision=other.revision;
         video.audioSync=other.audioSync;
         video.audioOffsetMs=other.audioOffsetMs;
+        // Export-only fields: changing the bitrate must never invalidate the
+        // running preview graph (the controller would otherwise rebuild it).
+        video.exportBitrateMbps=other.exportBitrateMbps;
         return video==other;
     }
     void rejectVideoRequest(const EnhancementSettings& attempted,const EnhancementSettings& previous) {
@@ -151,6 +164,9 @@ struct EnhancementSettings {
         if(!pipeline::validSrTarget(srTarget))return "invalid SR target";
         if(opticalFlowBackend!=OpticalFlowBackend::Nvidia&&opticalFlowBackend!=OpticalFlowBackend::AmdFidelityFx&&opticalFlowBackend!=OpticalFlowBackend::GpuDis)return "invalid optical flow backend";
         if(multiplier<1||multiplier>6)return "unsupported multiplier";
+        // 0 = auto quality; explicit values are capped at 300 Mbps so a typo
+        // cannot ask a driver for a nonsense rate.
+        if(exportBitrateMbps>300)return "export bitrate out of range";
         if(!pipeline::validNrSizePolicy(nrPolicy))return "invalid NR size policy";
         if(flow<FlowQuality::Performance||flow>FlowQuality::Quality||content<ContentRate::Transport||content>ContentRate::Capture60To30)return "invalid flow/content mode";
         return {};

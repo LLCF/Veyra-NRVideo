@@ -438,6 +438,8 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
     src/sink/BitstreamAudioSink.cpp
     src/sink/ImageExportSink.cpp
     src/sink/NvencD3D12Encoder.cpp
+    src/sink/MfVideoEncoder.cpp
+    src/sink/VideoEncoderFactory.cpp
   )
   veyra_apply_warnings(veyra_sinks)
   target_compile_options(veyra_sinks PRIVATE /WX-)
@@ -449,7 +451,7 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
   target_include_directories(veyra_sinks PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party_local/nvidia/nv-codec-headers/include")
   target_compile_definitions(veyra_sinks PRIVATE VEYRA_SHADER_DIR="${CMAKE_BINARY_DIR}/shaders")
   add_dependencies(veyra_sinks veyra_shader_rgb_nv12)
-target_link_libraries(veyra_sinks PUBLIC veyra_base veyra_gfx ole32 windowscodecs mmdevapi avrt)
+  target_link_libraries(veyra_sinks PUBLIC veyra_base veyra_gfx ole32 windowscodecs mmdevapi avrt mfplat mfuuid mf)
   target_link_libraries(veyra_sinks PRIVATE ${FFMPEG_LIBRARIES})
   if(FFMPEG_INCLUDE_DIRS)
     target_include_directories(veyra_sinks PRIVATE ${FFMPEG_INCLUDE_DIRS})

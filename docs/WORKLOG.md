@@ -69,6 +69,18 @@
 - 证据：本机 30 秒 FSR 运行 `real=839/generated=838/presented=1677`、`presentSubmitFps=30.00`、`gpuFgBatchP95Ms=0.197`；delivery 短测 PASS `logs/delivery/442f41e29b684e7e87174bc075d4e282/result.json`。
 - **边界（如实）**：FgBatch 为**应用侧**计时（提供方内部的插值工作不经过我们的队列，无法打点）；用户机器上"SDK提交=0"的原始触发未能在本机复现（本机 r3 正常），累计对齐是针对该症状的根治性修法，需要用户在 r4 包上复测确认。
 
+### 2026-09-16 导出编码器多厂商化（AMD/Intel 可导出）+ 可调码率
+
+用户："能不能换编码？让全部都支持导出？还有加个可以调整码率的功能"。完整方案、证据与边界见 [导出编码器与码率](EXPORT_ENCODER_BITRATE_2026-09-16.md)。
+
+- **现状确认**：导出此前硬性要求 NVENC，非 N 卡直接拒绝（AMD/Intel 用户导不出任何文件）；我们的 FFmpeg 是只解不编的定制构建（无 x264/amf/qsv/mf 编码器），所以"用 FFmpeg 的编码器"要重建 FFmpeg。
+- **实现**：新增 `VideoEncoder` 抽象与工厂（`include/veyra/sink/VideoEncoder.h`、`src/sink/VideoEncoderFactory.cpp`）：NVIDIA 走 NVENC（零拷贝不变），其余显卡走 Media Foundation 硬件 MFT；NVENC 被拒时自动回落 MF。`src/sink/MfVideoEncoder.cpp` 移植 FFmpeg `mfenc.c`（LGPL-2.1+，已记入 `THIRD_PARTY_NOTICES.md`）的 MFT 枚举/异步解锁/类型协商/ICodecAPI/事件循环/收尾流程，输入为 Veyra D3D12 图渲染的 NV12 经 readback 打包。
+- **两个真问题（本轮实测抓出）**：① 本机同时枚举到 `AMDh264Encoder` 与 `NVIDIA H.264 Encoder MFT`，取第一个会在无 A 卡时 `MF_E_HW_MFT_FAILED_START_STREAMING (0xC00D6D76)` → 改为按显卡厂商优选 + 逐候选完整协商；② 硬件 MFT 自己分配输出样本（替换 `out.pSample`），错误地取自己的空指针导致 300 帧全被丢弃、导出"成功"却 0 帧 → 已修，现 `drained submitted=300 written=300`。
+- **码率**：`EnhancementSettings.exportBitrateMbps`（0=恒定质量档，上限 300；不参与 `sameVideoConfiguration`，改码率不重建预览管线）；NVENC VBR(平均=峰值, VBV 半秒)、MF PeakConstrainedVBR；预设格式 v14→v15（行尾追加，解析顺序须与写出顺序一致——本轮踩过一次并修复）；UI 导出页新增"导出码率"下拉（自动/6/10/16/24/40/60/100/150/200 Mbps）；CLI `--bitrate-mbps`。
+- **非 N 卡特性门控**：导出的 NR/DLSS-SR/NVOF/DLSS-FG 仅 NVIDIA，AMD FSR 超分保留；请求不可用功能时降级并写明，不再整任务失败。
+- **实测（RTX 5070）**：NVENC 6/40 Mbps → 实际 6.11/32.8；强制 MF 10/30 Mbps → 10.16/26.1，300 帧逐帧验证通过；`VEYRA_TEST_NVENC_FIRST_OPEN_FAILS=2`（模拟用户那种 NVENC 被拒）→ 自动 MF，exit 0；MF + XeSS→DLSS 2X 补帧 → 600 帧验证通过；HDR 走 MF → 明确拒绝且不留 partial，HDR 走 NVENC 正常（无回归）。修复合同 169 项 0 失败、预设往返 PASS、delivery 短测 PASS `logs/delivery/35f4f46808fb4236856701704e5a7f52/result.json`。
+- **未做/边界**：MF 只支持 8bit（HDR 仍需 NVENC）；MF 输入经 CPU readback（4K 有开销，后续可做 D3D12 共享纹理 + D3D11 互操作）；**AMD/Intel 实卡未验证**（本机只有 N 卡，走同一 API 但需实机复测）；AMF/QSV 原生后端与软件 x264/x265 未接入。
+
 ### 2026-09-16 导出失败两例修复 + XeSS/FSR 补帧导出（用户："修，并且看看是不是用XeSS补帧没办法导出，也一起修了"）
 
 两位粉丝群用户的导出失败日志逐条定位到根因，并按"必须能出文件"的目标修掉；完整复现素材、命令与证据见 [导出修复与补帧导出](EXPORT_REPAIR_AND_FG_EXPORT_2026-09-16.md)。

@@ -42,7 +42,7 @@ bool legacyBackends(const std::filesystem::path& path) {
    if(version>=7&&(value.audioSync!=AudioSyncMode::Manual||value.audioOffsetMs!=137))return false;
    if(!store.put(L"legacy",value,true))return false;
    std::ifstream file(path);std::string magic;int savedVersion=0;file>>magic>>savedVersion;
-   if(magic!="VEYRA_PRESETS"||savedVersion!=14)return false;
+   if(magic!="VEYRA_PRESETS"||savedVersion!=15)return false;
    PresetStore reloaded(path);
    if(!reloaded.load()||reloaded.defaultSettings()!=value)return false;
   }else{
@@ -92,6 +92,11 @@ ok=ok&&a.put(L"test",s)&&a.setDefault(0)&&!a.put(L"test",s);PresetStore b(p);ok=
  auto fsrSr=s;fsrSr.videoSrQuality=veyra::engine::kVideoSrFsr;ok=ok&&b.put(L"FSR SR",fsrSr);
  PresetStore fsrSrReload(p);ok=ok&&fsrSrReload.load()&&fsrSrReload.entries().back().settings.videoSrQuality==veyra::engine::kVideoSrFsr&&b.erase(1);
  auto badSr=s;badSr.videoSrQuality=veyra::engine::kVideoSrFsr+1;ok=ok&&!b.put(L"invalid video SR",badSr);
+ // Export bitrate round-trips through the preset format (v15) and stays inside
+ // the range the encoders accept.
+ auto bitrate=s;bitrate.exportBitrateMbps=60;ok=ok&&b.put(L"bitrate 60",bitrate);
+ PresetStore bitrateReload(p);ok=ok&&bitrateReload.load()&&bitrateReload.entries().back().settings.exportBitrateMbps==60&&b.erase(1);
+ auto badBitrate=s;badBitrate.exportBitrateMbps=301;ok=ok&&!b.put(L"invalid bitrate",badBitrate);
  auto invalid=s;invalid.model.tone=9;ok=ok&&!b.put(L"bad",invalid)&&b.entries().size()==1&&b.erase(0)&&b.entries().empty();
  auto badRegion=s;badRegion.protection.regions[0].left=2;ok=ok&&!b.put(L"invalid region",badRegion);
  // Capture audio ingress: the manual Dolby/DTS selector round-trips and an

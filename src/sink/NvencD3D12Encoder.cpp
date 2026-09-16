@@ -12,8 +12,9 @@ using namespace veyra::pipeline;
 struct NvencD3D12Encoder::Impl {
     HMODULE dll=nullptr;void* encoder=nullptr;NV_ENCODE_API_FUNCTION_LIST api{};
     gfx::D3D12DeviceContext* ctx=nullptr;gfx::CommandSlotRing* ring=nullptr;EnhanceGraph* graph=nullptr;
-    bool hdr=false;NV_ENC_BUFFER_FORMAT inputFormat=NV_ENC_BUFFER_FORMAT_NV12;
+    bool hdr=false;bool hevc=false;NV_ENC_BUFFER_FORMAT inputFormat=NV_ENC_BUFFER_FORMAT_NV12;
     unsigned w=0,h=0;uint64_t submitted=0,completed=0;
+    uint32_t bitrateMbps=0;
     ComPtr<ID3D12Fence> fence;HANDLE event=nullptr;
     ComputePass convert;StateTracker states;ComPtr<ID3D12Resource> y,uv;
     PacketWriter writer;std::vector<uint8_t> sequence;
@@ -33,8 +34,13 @@ struct NvencD3D12Encoder::Impl {
 NvencD3D12Encoder::NvencD3D12Encoder():p_(std::make_unique<Impl>()){}
 NvencD3D12Encoder::~NvencD3D12Encoder(){close();}
 std::vector<uint8_t> NvencD3D12Encoder::headers()const{return p_->sequence;}
-bool NvencD3D12Encoder::open(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& ring,EnhanceGraph& graph,bool hevc,unsigned fpsNum,unsigned fpsDen,PacketWriter writer){
+std::wstring NvencD3D12Encoder::describe()const{
+    return p_->hevc?L"NVIDIA NVENC HEVC (D3D12)":L"NVIDIA NVENC H.264 (D3D12)";
+}
+bool NvencD3D12Encoder::open(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& ring,EnhanceGraph& graph,const EncoderConfig& config,PacketWriter writer){
+    const bool hevc=config.hevc;const unsigned fpsNum=config.fpsNum,fpsDen=config.fpsDen;
     auto& p=*p_;p.ctx=&ctx;p.ring=&ring;p.graph=&graph;p.w=graph.workWidth();p.h=graph.workHeight();p.writer=std::move(writer);
+    p.hevc=hevc;p.bitrateMbps=config.bitrateMbps;
     wchar_t dir[MAX_PATH]{};GetSystemDirectoryW(dir,MAX_PATH);const auto dllPath=std::wstring(dir)+L"\\nvEncodeAPI64.dll";
     p.dll=LoadLibraryExW(dllPath.c_str(),nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);if(!p.dll)return false;
     using Create=NVENCSTATUS(NVENCAPI*)(NV_ENCODE_API_FUNCTION_LIST*);auto create=reinterpret_cast<Create>(GetProcAddress(p.dll,"NvEncodeAPICreateInstance"));
@@ -48,13 +54,22 @@ bool NvencD3D12Encoder::open(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
     // downwards before giving up.
     // Test-only: pretend the compiled declaration was refused, so the fallback
     // ladder below still gets exercised on a healthy driver. Never set by the UI.
-    const bool forcedMiss=GetEnvironmentVariableW(L"VEYRA_TEST_NVENC_FIRST_OPEN_FAILS",nullptr,0)>0;
+    // 1 = skip the first open only (exercises the ladder), 2 = refuse every
+    // attempt (exercises the export's Media Foundation fallback). Test-only.
+    wchar_t forcedText[8]{};GetEnvironmentVariableW(L"VEYRA_TEST_NVENC_FIRST_OPEN_FAILS",forcedText,8);
+    const int forcedMode=_wtoi(forcedText);
+    const bool forcedMiss=forcedMode>0;
+    const bool forcedMissAll=forcedMode>=2;
     if(forcedMiss)veyra::log::warn("nvenc","test-only: skipping the first OpenD3D12Session so the apiVersion ladder runs");
     if(forcedMiss||!p.check(p.api.nvEncOpenEncodeSessionEx(&open,&p.encoder),"OpenD3D12Session")) {
         const uint32_t fallbackVersions[]={NVENCAPI_MAJOR_VERSION,13u,12u,11u};
         bool opened=false;uint32_t accepted=0;
         for(const uint32_t major:fallbackVersions){
             if(!forcedMiss&&major==NVENCAPI_MAJOR_VERSION)continue; // already refused above
+            if(forcedMissAll){
+                log::info("nvenc",std::format("test-only: refusing apiVersion={}.0 as well",major));
+                continue;
+            }
             open.apiVersion=major;
             const auto result=p.api.nvEncOpenEncodeSessionEx(&open,&p.encoder);
             log::info("nvenc",std::format("OpenD3D12Session retry apiVersion={}.0 status={}",major,unsigned(result)));
@@ -78,8 +93,24 @@ bool NvencD3D12Encoder::open(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
     if(p.hdr){int supported=0;caps.capsToQuery=NV_ENC_CAPS_SUPPORT_10BIT_ENCODE;if(!p.check(p.api.nvEncGetEncodeCaps(p.encoder,codec,&caps,&supported),"10bit support")||!supported)return false;}
     NV_ENC_PRESET_CONFIG preset{};preset.version=NV_ENC_PRESET_CONFIG_VER;preset.presetCfg.version=NV_ENC_CONFIG_VER;
     if(!p.check(p.api.nvEncGetEncodePresetConfigEx(p.encoder,codec,NV_ENC_PRESET_P4_GUID,NV_ENC_TUNING_INFO_LOW_LATENCY,&preset),"GetPreset"))return false;
-    preset.presetCfg.frameIntervalP=1;preset.presetCfg.gopLength=120;preset.presetCfg.rcParams.rateControlMode=NV_ENC_PARAMS_RC_CONSTQP;
-    preset.presetCfg.rcParams.constQP={20,22,22};preset.presetCfg.rcParams.enableLookahead=0;
+    preset.presetCfg.frameIntervalP=1;preset.presetCfg.gopLength=120;preset.presetCfg.rcParams.enableLookahead=0;
+    if(p.bitrateMbps>0){
+        // Explicit user bitrate: VBR with the target as both average and peak,
+        // which is what "编码码率" means to users (the VBV cap keeps peaks
+        // bounded so the average is actually met).
+        const uint32_t bitsPerSecond=p.bitrateMbps*1000000u;
+        preset.presetCfg.rcParams.rateControlMode=NV_ENC_PARAMS_RC_VBR;
+        preset.presetCfg.rcParams.averageBitRate=bitsPerSecond;
+        preset.presetCfg.rcParams.maxBitRate=bitsPerSecond;
+        // Half-second VBV: long enough for VBR to actually spend the requested
+        // budget on complex scenes, short enough that the peak stays bounded.
+        preset.presetCfg.rcParams.vbvBufferSize=bitsPerSecond/2;
+        preset.presetCfg.rcParams.vbvInitialDelay=preset.presetCfg.rcParams.vbvBufferSize;
+        veyra::log::info("nvenc",std::format("rate control VBR target={}Mbps bufferBits={}",p.bitrateMbps,preset.presetCfg.rcParams.vbvBufferSize));
+    }else{
+        preset.presetCfg.rcParams.rateControlMode=NV_ENC_PARAMS_RC_CONSTQP;
+        preset.presetCfg.rcParams.constQP={20,22,22};
+    }
     if(p.hdr){
         preset.presetCfg.profileGUID=NV_ENC_HEVC_PROFILE_MAIN10_GUID;
         auto& config=preset.presetCfg.encodeCodecConfig.hevcConfig;
