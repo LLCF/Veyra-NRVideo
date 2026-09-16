@@ -1,5 +1,17 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-16 MPEG/压缩链路开工前基线（2 分钟真机，走 RGB32 兼容链路）
+
+用户要求：先跑基线并记录 → 建 Git 存档 → 一次性实施 MPEG 链路修复 → 同协议复测对比。
+
+- 命令（本机 ¥30 UVC 卡，无增强，各 120 秒，日志确认 `explicit RGB32 compatibility path subtype=0x47504A4D`）：
+  `veyra.exe "capture:0:24:-1:0" --smoke-seconds 120 --no-nr --no-sr --no-fg`（MJPEG 1080p60）
+  `veyra.exe "capture:0:46:-1:0" --smoke-seconds 120 --no-nr --no-sr --no-fg`（MJPEG 4K18）
+- 基线：**MJPEG 1080p60：7163 帧、0 丢帧、callback→Present P95 3.909 ms、processCpu 1.987 ms、callbackFps 60.01、readAgeMs 0.5–1.5 ms**；
+  **MJPEG 4K18：2147 帧、0 丢帧、P95 10.496 ms、processCpu 6.218 ms、callbackFps 18.00、readAgeMs ~2.9 ms**。
+- 存档 tag：`checkpoint/pre-mpeg-chain-20260916`（本提交）。
+- 目标（方案 §5）：1080p60 MJPEG P95 ≤3.5 ms、4K18 每帧 CPU ≤3 ms，且颜色与旧路径对比 ≤2 code、任一级失败自动回退不断流。
+
 ## 2026-09-16 原生链路修复报告：N1/N3/N4 交付 + 2 分钟真机复测（N2 已回退）
 
 按用户要求回退 N2 后，对 N1/N3/N4 做了 1080p60 与 4K18 各 2 分钟真机复测（同机同卡，无增强）：
