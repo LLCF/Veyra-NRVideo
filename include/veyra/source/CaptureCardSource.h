@@ -42,6 +42,9 @@ public:
     // Owner-thread recovery of DirectShow audio pins; same video filter retained.
     void recoverAudio(float gain,unsigned syncMode,int offsetMs);
     bool setAudioGain(float); // call on the graph owner thread; never system volume
+    // 0 automatic, 1 PCM only, 2 bitstream preferred. Takes effect on the next
+    // connect/reconnect because the audio media type is negotiated there.
+    void setAudioIngress(unsigned mode);
     // Manual ingest flip for devices whose declared DIB orientation does not
     // match the samples (RGB24 upside-down reports). Applies to the next
     // sample; works for RGB and YUV without touching the device.

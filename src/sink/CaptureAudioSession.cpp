@@ -379,6 +379,10 @@ struct CaptureAudioSession::Impl : AudioPcmSource {
 };
 CaptureAudioSession::CaptureAudioSession():p_(std::make_unique<Impl>()){}
 CaptureAudioSession::~CaptureAudioSession(){stop();}
+void CaptureAudioSession::setInputBitstream(std::wstring kind){
+    std::lock_guard lock(p_->mutex);
+    p_->state.inputBitstream=std::move(kind);
+}
 bool CaptureAudioSession::configure(const WavePcmFormat& parsed){
     if(p_->thread.joinable()||!parsed.layout.valid()||!parsed.validBits)return false;
     p_->format=parsed.wave;p_->layout=parsed.layout;p_->validBits=parsed.validBits;p_->floating=parsed.floating;

@@ -2,14 +2,17 @@ param(
   [Parameter(Mandatory = $true)][string]$Root,
   [Parameter(Mandatory = $true)][ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version,
   [Parameter(Mandatory = $true)][string]$OutputDirectory,
-  [string]$BuildDirectory
+  [string]$BuildDirectory,
+  # Suffix used only for the staging/archive name (e.g. "beta" -> Veyra-1.3.1beta-win64-portable).
+  # The numeric $Version still names the docs and must match the EXE's numeric parts.
+  [string]$Label = ''
 )
 $ErrorActionPreference = 'Stop'
 $resolvedRoot = (Resolve-Path -LiteralPath $Root).Path
 $resolvedOutput = [IO.Path]::GetFullPath($OutputDirectory)
 $bin = Join-Path $resolvedRoot 'out/build/x64-release'
 if ($BuildDirectory) { $bin = (Resolve-Path -LiteralPath $BuildDirectory).Path }
-$stage = Join-Path $resolvedOutput "Veyra-$Version-win64-portable"
+$stage = Join-Path $resolvedOutput "Veyra-$Version$Label-win64-portable"
 $archive = "$stage.zip"
 # Preserve existing candidates and their verification evidence.
 if ((Test-Path -LiteralPath $stage) -or (Test-Path -LiteralPath $archive)) { throw 'Output exists; choose a new staging directory.' }
@@ -31,7 +34,9 @@ if ([version]$Version -ge [version]'0.0.5') {
   if ($cache -notmatch 'VEYRA_ENABLE_REMOTEPLAY:BOOL=ON') { throw '0.0.5 package requires the real PS5 backend enabled' }
 }
 $appVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $bin 'veyra.exe'))
-if ($appVersion.ProductVersion -ne $Version) { throw "EXE version $($appVersion.ProductVersion) does not match $Version" }
+# The display string may carry a label ("1.3.1beta"); the numeric parts still have
+# to match the version the package is built as.
+if (-not $appVersion.ProductVersion.StartsWith($Version)) { throw "EXE version $($appVersion.ProductVersion) does not match $Version" }
 # Publisher audit only. The application permits users to replace these DLLs.
 $runtimeFiles = @(
   @{ Name='nvngx_dlss.dll'; Folder='runtime/experimental'; Source='runtime_local/nvidia/nvngx_dlss.dll'; Hash='BE6E434A94CA32499515EB62CA0E6C274526055D568D0426E4C652DCDFB6EE6E'; Category='official-dlss-sdk-310.7.0-rel'; Experimental=$false },
@@ -42,6 +47,15 @@ $runtimeFiles = @(
   @{ Name='libxell.dll'; Folder='runtime_local/intel/experimental'; Source='runtime_local/intel/experimental/libxell.dll'; Hash='D2030DCD694FDA8F2EC7E044B13E6DB8F0B56D4BA9113A5EFAD334E3F3DED8C7'; Category='official-intel-xess-sdk-3.0.2'; Experimental=$true },
   @{ Name='libxess_fg.dll'; Folder='runtime_local/intel/experimental'; Source='runtime_local/intel/experimental/libxess_fg.dll'; Hash='EC5E0C65E075570C6EDE72618BB666D0BE0C2E10B2EA9762C0FE8CB8E375AB27'; Category='official-intel-xess-sdk-3.0.2'; Experimental=$true }
 )
+if ([version]$Version -ge [version]'1.3.1') {
+  # AMD FidelityFX SDK 2.3.0 runtime (MIT licensed, AMD-signed). Needed for the
+  # FSR frame-generation and FSR upscaling paths; loaded from runtime_local/amd/fidelityfx.
+  $runtimeFiles += @(
+    @{ Name='amd_fidelityfx_loader_dx12.dll'; Folder='runtime_local/amd/fidelityfx'; Source='runtime_local/amd/fidelityfx/amd_fidelityfx_loader_dx12.dll'; Hash='E2D85AA05A9BD9ED8B38935FDF5199372CCA6F74C12015143BB6F945EE1608AA'; Category='official-amd-fidelityfx-sdk-2.3.0-loader'; Experimental=$true },
+    @{ Name='amd_fidelityfx_framegeneration_dx12.dll'; Folder='runtime_local/amd/fidelityfx'; Source='runtime_local/amd/fidelityfx/amd_fidelityfx_framegeneration_dx12.dll'; Hash='02297BEEDD285E822D3A64F314CF00FAF378DCEC0EDC47FF0C4DD71B3A8C2F18'; Category='official-amd-fidelityfx-sdk-2.3.0-framegeneration'; Experimental=$true },
+    @{ Name='amd_fidelityfx_upscaler_dx12.dll'; Folder='runtime_local/amd/fidelityfx'; Source='runtime_local/amd/fidelityfx/amd_fidelityfx_upscaler_dx12.dll'; Hash='D0DCCCC74A43C44BA435B7A369B456E0970D8A4464E4BD683119B374F2C9FB46'; Category='official-amd-fidelityfx-sdk-2.3.0-upscaler'; Experimental=$true }
+  )
+}
 if ([version]$Version -ge [version]'1.1.1') {
   $runtimeFiles += @{ Name='nvngx_dlssnr.dll'; Folder='runtime/experimental/nr-ampere'; Source='runtime_local/nvidia/nr-ampere/nvngx_dlssnr.dll'; Hash='DCC0DC2414AEDEC4A8E084647070383BE068554042587180C20C784D4772D36F'; Signature='HashMismatch'; Size=165840496; Version='310.8.0.0'; Category='user-provided-NeuralScreen-1.8.2-modified-RTX30-experimental-runtime'; Experimental=$true }
 }
@@ -118,11 +132,25 @@ Copy-Payload (Join-Path $resolvedRoot 'assets/icons/lucide/LICENSE') 'licenses/L
 Copy-Payload (Join-Path $resolvedRoot 'third_party_local/nvidia/DLSS_repo/LICENSE.txt') 'licenses/NVIDIA_RTX_SDK_LICENSE.txt'
 Copy-Payload (Join-Path $resolvedRoot 'third_party_local/nvidia/RTX_Video_SDK_1.1.0/NVIDIA_RTX_Video_SDK_License.pdf') 'licenses/NVIDIA_RTX_VIDEO_SDK_LICENSE.pdf'
 Copy-Payload (Join-Path $resolvedRoot 'third_party_local/nvidia/Optical_Flow_SDK_5.0.7/LicenseAgreement.pdf') 'licenses/NVIDIA_OPTICAL_FLOW_SDK_LICENSE.pdf'
+if ([version]$Version -ge [version]'1.3.1') {
+  # MIT licence of the FidelityFX SDK that ships the AMD runtime above.
+  $amdLicense = Join-Path $resolvedRoot 'third_party_local/amd/FidelityFX-SDK-2.3.0/docs/license.md'
+  if (-not (Test-Path -LiteralPath $amdLicense -PathType Leaf)) {
+    $amdLicense = Join-Path $resolvedRoot 'third_party_local/amd/FidelityFX-SDK-2.3.0/Kits/FidelityFX/docs/license.md'
+  }
+  if (Test-Path -LiteralPath $amdLicense -PathType Leaf) {
+    Copy-Payload $amdLicense 'licenses/AMD-FIDELITYFX-LICENSE.txt'
+  } else {
+    throw 'AMD FidelityFX licence text not found in the vendored SDK'
+  }
+}
 Copy-Payload (Join-Path $resolvedRoot 'third_party_local/intel/xess-3.0.2/LICENSE.txt') 'licenses/INTEL_XESS_LICENSE.txt'
 Copy-Payload (Join-Path $resolvedRoot 'third_party_local/intel/xess-3.0.2/third-party-programs.txt') 'licenses/INTEL_THIRD_PARTY_PROGRAMS.txt'
 Copy-Payload (Join-Path $resolvedRoot 'third_party_local/amd/FidelityFX-SDK/LICENSE.txt') 'licenses/AMD_FIDELITYFX_LICENSE.txt'
 foreach ($item in $runtimeFiles) { Copy-Payload (Join-Path $resolvedRoot $item.Source) "$($item.Folder)/$($item.Name)" }
-foreach ($folder in @('runtime/experimental','runtime_local/intel/experimental')) {
+$manifestFolders = @('runtime/experimental','runtime_local/intel/experimental')
+if ([version]$Version -ge [version]'1.3.1') { $manifestFolders += 'runtime_local/amd/fidelityfx' }
+foreach ($folder in $manifestFolders) {
   $relative = "$folder/release-runtime-manifest.json"
   [ordered]@{schema=1;package="Veyra $Version";mode='user-authorized-runtime-pack';enforcedAtRuntime=$false;warning='Community experimental integration; not vendor certification or endorsement.';files=@($records | Where-Object {$_.path.StartsWith("$folder/")})} | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $stage $relative) -Encoding UTF8
   $allowed.Add($relative)

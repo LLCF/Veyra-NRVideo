@@ -5,6 +5,9 @@ enum class Mode { Daily, Professional };
 struct UiSessionState {
     Mode mode=Mode::Daily;
     bool enhanced=false,subtitles=true,diagnostics=false,drawer=false;
+    // Subtitle look & language switches (persisted with the other UI prefs).
+    bool subtitleOutline=true,subtitleBackground=false,subtitleSecondLanguage=false;
+    int subtitleMargin=0,subtitleFont=0;
     int inspector=0,preferredComparison=0;
     engine::EnhancementSettings configured;
     // An explicit user toggle creates a settings transaction. Mode changes do

@@ -24,7 +24,7 @@ inline LRESULT CALLBACK proc(HWND h,UINT message,WPARAM wp,LPARAM lp){
         paintDashboard(h,paint.dc,width,height,s,state->history,state->advanced);
         if(!state->advanced)return 0;
         const bool playing=s.running&&!s.image&&s.transport==engine::TransportState::Playing;
-        const bool xess=s.applied.frameGenerationBackend==engine::FrameGenerationBackend::XeSS&&s.applied.multiplier>1;
+        const bool xess=s.applied.multiplier>1&&engine::presentSinkFrameGeneration(s.applied.frameGenerationBackend);
         auto write=[&](const std::wstring& value,int x,int y,int w,int ht,int size,COLORREF color){chromeText(paint.dc,h,value,x,y,w,ht,size,color);};
         auto ms=[](std::optional<double> v){return v?std::format(L"{:.1f} ms",*v):std::wstring(L"未测");};
         auto timing=[&](const diagnostics::TimingAggregate& a){return playing&&a.mean&&a.p95?(state->advanced?std::format(L"{:.1f} / {:.1f}",*a.mean,*a.p95):ms(a.mean)):std::wstring(L"未测");};
@@ -37,7 +37,7 @@ inline LRESULT CALLBACK proc(HWND h,UINT message,WPARAM wp,LPARAM lp){
         rows.emplace_back(L"测量范围",L"非屏幕实测 · 非增强处理耗时");
         rows.emplace_back(L"增强处理 · 平均 / P95",timing(f.enhancementProcessing));
         rows.emplace_back(L"处理统计口径",L"同帧光流+NR+SR+残差+FG区间去重");
-        rows.emplace_back(L"处理范围",xess?L"不含XeSS内部FG":L"不含输入颜色、输出、声音和呈现等待");
+        rows.emplace_back(L"处理范围",xess?L"不含显示补帧(XeSS/AMD FSR)":L"不含输入颜色、输出、声音和呈现等待");
         rows.emplace_back(L"平均范围",L"总计按源帧；单项按执行次数");
         rows.emplace_back(L"光流范围",L"含光流GPU依赖等待");
         rows.emplace_back(xess?L"SDK提交（非屏幕实测）":L"显示提交（非屏幕实测）",fps(xess?f.xessSdkSubmitFps:f.presentSubmitFps));
@@ -67,7 +67,9 @@ inline LRESULT CALLBACK proc(HWND h,UINT message,WPARAM wp,LPARAM lp){
         const diagnostics::GpuStage stages[]={diagnostics::GpuStage::Color,diagnostics::GpuStage::Sr,diagnostics::GpuStage::Flow,diagnostics::GpuStage::Nr,diagnostics::GpuStage::Residual,diagnostics::GpuStage::FgBatch,diagnostics::GpuStage::Blit};
         const wchar_t* names[]={L"② 输入颜色",L"③ 超分 SR",L"④ 光流队列区间",L"⑤ NR 增强",L"⑥ 残差合成",L"⑦ 补帧 FG",L"⑧ 输出合成"};
         for(size_t i=0;i<std::size(stages);++i){const auto& sample=s.metrics.gpu[size_t(stages[i])];
-            const auto value=xess&&stages[i]==diagnostics::GpuStage::FgBatch?L"SDK内部不可测":sample.state==diagnostics::SampleState::NotExecuted?L"未执行":timing(f.gpuTiming[size_t(stages[i])]);
+            // Present-sink FG (XeSS/FSR) is timed application-side; only fall
+            // back to the placeholder while no sample has been collected.
+            const auto value=(xess&&stages[i]==diagnostics::GpuStage::FgBatch&&!f.gpuTiming[size_t(stages[i])].mean)?L"SDK内部不可测":sample.state==diagnostics::SampleState::NotExecuted?L"未执行":timing(f.gpuTiming[size_t(stages[i])]);
             rows.emplace_back(names[i],value);
         }
         rows.emplace_back(L"⑨ 等待显示时间",timing(f.cpuTiming[size_t(diagnostics::CpuStage::DeadlineWait)]));
@@ -83,7 +85,7 @@ inline LRESULT CALLBACK proc(HWND h,UINT message,WPARAM wp,LPARAM lp){
             rows.emplace_back(L"实际解码方式",!r.decodeConfirmed?L"等待首帧":r.hardwareDecode?L"D3D12VA 硬解":r.decodeFallback?L"软件解码 · 硬解已回退":L"CPU 软件解码");
             rows.emplace_back(L"接收 / 解码",std::format(L"{:.1f} / {:.1f} fps",r.receivedFps,r.decodedFps));
             rows.emplace_back(L"增强完成",fps(f.sourceCompletedFps));
-            rows.emplace_back(L"原帧 / 生成帧呈现",xess?L"XeSS SDK 内部合计":std::format(L"{:.1f} / {:.1f} fps",f.realPresentFps,f.generatedPresentFps));
+        rows.emplace_back(L"原帧 / 生成帧呈现",xess?L"显示补帧 SDK 内部合计":std::format(L"{:.1f} / {:.1f} fps",f.realPresentFps,f.generatedPresentFps));
             rows.emplace_back(L"视频有效码率",std::format(L"{:.2f} Mbps",r.videoMbps));
             rows.emplace_back(L"接收后等待解码",ms(r.ingressWaitMeanMs));
             rows.emplace_back(L"距上次视频接收",age(r.lastVideo100ns));
@@ -123,7 +125,9 @@ inline LRESULT CALLBACK proc(HWND h,UINT message,WPARAM wp,LPARAM lp){
             const wchar_t* resetNames[]={L"排空",L"销毁资源",L"创建资源",L"首帧预热提交",L"首帧完成观测"};
             for(size_t i=0;i<r.stageMs.size();++i)rows.emplace_back(resetNames[i],ms(r.stageMs[i]));
         }
-        rows.emplace_back(L"补帧方式",s.applied.multiplier<=1?L"关闭":std::format(L"{} {}X",xess?L"XeSS":L"DLSS",s.applied.multiplier));
+        const wchar_t* fgName=s.applied.frameGenerationBackend==engine::FrameGenerationBackend::XeSS?L"XeSS"
+            :s.applied.frameGenerationBackend==engine::FrameGenerationBackend::Fsr?L"AMD FSR":L"DLSS";
+        rows.emplace_back(L"补帧方式",s.applied.multiplier<=1?L"关闭":std::format(L"{} {}X",fgName,s.applied.multiplier));
         rows.emplace_back(L"NR内部尺寸",s.applied.nr?std::format(L"{} x {}",s.metrics.resolution.nr.width,s.metrics.resolution.nr.height):L"关闭");
         rows.emplace_back(L"NR运行版本",s.nrActive?(s.applied.nrRuntime==engine::NrRuntime::Ampere?L"RTX 30兼容 · 实验":s.applied.nrRuntime==engine::NrRuntime::Community?L"社区兼容 · 实验":L"NVIDIA原版"):L"未运行");
         rows.emplace_back(L"显示模式",s.running?(s.applied.captureCompatible?L"直播兼容 · 实验":L"标准显示"):L"未运行");
@@ -135,7 +139,7 @@ inline LRESULT CALLBACK proc(HWND h,UINT message,WPARAM wp,LPARAM lp){
         }
         if(!s.capture&&s.audioAvailable)rows.emplace_back(L"声音领先 · 软件估算",std::format(L"{:.1f} ms",s.lateMs));
         if(s.capture&&s.audioAvailable){
-            rows.emplace_back(L"音频格式",std::format(L"{} Hz · {} bit / {} valid{}",s.captureAudio.inputSampleRate,s.captureAudio.inputContainerBits,s.captureAudio.inputValidBits,s.captureAudio.inputFloating?L" · Float":L""));
+            rows.emplace_back(L"音频格式",std::format(L"{} Hz · {} bit / {} valid{}{}",s.captureAudio.inputSampleRate,s.captureAudio.inputContainerBits,s.captureAudio.inputValidBits,s.captureAudio.inputFloating?L" · Float":L"",s.captureAudio.inputBitstream.empty()?L"":std::format(L" · 位流解码为 {} 声道 ({})",s.captureAudio.inputChannels,s.captureAudio.inputBitstream)));
             rows.emplace_back(s.captureAudio.syncClockFallback?L"估算偏差 · 本机时钟":L"音画偏差 · 声音领先",ms(s.captureAudio.skewMs));
             rows.emplace_back(L"声音补偿",std::format(L"{:.1f} ms{}",s.captureAudio.compensationMs,s.captureAudio.limited?L" · 已达边界":L""));
             if(s.captureAudio.syncClockFallback)rows.emplace_back(L"同步状态",L"时间戳异常回退 · 本机延迟估算");

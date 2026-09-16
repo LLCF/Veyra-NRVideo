@@ -21,6 +21,9 @@
 #include "veyra/gfx/CommandSlotRing.h"
 #include "veyra/gfx/D3D12DeviceContext.h"
 #include "veyra/ngx/DlssFgBackend.h"
+#include "veyra/ngx/AdaMfgUnlock.h"
+#include "veyra/ngx/AmpereMfgUnlock.h"
+#include "veyra/gfx/FsrSrBackend.h"
 #include "veyra/ngx/DlssNrParameters.h"
 #include "veyra/ngx/DlssNrRuntimeAdapter.h"
 #include "veyra/ngx/DlssSrBackend.h"
@@ -74,7 +77,7 @@ bool EnhanceGraph::initialize(const EnhanceGraphDesc& desc)
         veyra::log::info("graph","diagnostic SR motion override active; no product entry point enables this");
     }
     desc_ = desc;tracker_={};prevValid_=false;fgHistorySkipped_=false;cadence_.reset();scene_.reset();previousLuma_.clear();
-    if(desc.videoSrQuality>4)return false;
+    if(desc.videoSrQuality>engine::kVideoSrFsr){veyra::log::error("graph",std::format("invalid video SR quality value={}",desc.videoSrQuality));return false;}
     srcW_ = desc.sourceWidth;
     srcH_ = desc.sourceHeight;
     workW_ = desc.workWidth;
@@ -94,7 +97,8 @@ bool EnhanceGraph::initialize(const EnhanceGraphDesc& desc)
     if(desc.hdrOutput&&!desc.hdrInput){veyra::log::error("hdr","HDR output requires an explicit HDR input contract");return false;}
     srEnabled_ = desc.enableSr && (srcW_ != workW_ || srcH_ != workH_);
     nrEnabled_ = desc.enableNr && !desc.noFeatures && !desc.noNgx;
-    fgEnabled_ = desc.enableFg && !desc.noNgx && !desc.stillImage && desc.frameGenerationBackend!=engine::FrameGenerationBackend::XeSS;
+    fgEnabled_ = desc.enableFg && !desc.noNgx && !desc.stillImage && desc.frameGenerationBackend!=engine::FrameGenerationBackend::XeSS
+        && desc.frameGenerationBackend!=engine::FrameGenerationBackend::Fsr;
     nvofStandalone_ = desc.enableNvofStandalone && !desc.noFeatures;
     if(desc.opticalFlowBackend==engine::OpticalFlowBackend::AmdFidelityFx&&desc.amdFlowHalfResolution){nvofW_=std::max(1u,nvofW_/2);nvofH_=std::max(1u,nvofH_/2);}
     uint64_t budget=0,usage=0;
@@ -117,6 +121,7 @@ bool EnhanceGraph::initialize(const EnhanceGraphDesc& desc)
     if (!createResources()) return false;
     if (!initZeroAndDepthTextures()) return false;
     if (!initNvof()) { failedBackend_=engine::FailedBackend::OpticalFlow; return false; }
+    if (!initFsrSr()) return false;
     if(nrEnabled_&&GetEnvironmentVariableW(L"VEYRA_TEST_NR_INIT_FAILURE",nullptr,0)){
         failedBackend_=engine::FailedBackend::Nr;
         veyra::log::error("backend-recovery-test","test-only NR initialization rejection before SDK call; not a hardware failure");return false;
@@ -139,7 +144,7 @@ bool EnhanceGraph::createResources()
     if(!fgDisableInit_)return false;
     void* initial=nullptr;if(FAILED(fgDisableInit_->Map(0,nullptr,&initial)))return false;
     *static_cast<uint32_t*>(initial)=1;fgDisableInit_->Unmap(0,nullptr);
-    for(unsigned i=0;i<6;++i){
+    for(unsigned i=0;i<kGeneratedPoolSlots;++i){
         D3D12_RESOURCE_DESC bd{};bd.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;bd.Width=4;bd.Height=1;bd.DepthOrArraySize=1;bd.MipLevels=1;bd.SampleDesc.Count=1;bd.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;bd.Flags=D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
         D3D12_HEAP_PROPERTIES hp{};hp.Type=D3D12_HEAP_TYPE_DEFAULT;
         HRESULT hr=context_.device()->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&bd,D3D12_RESOURCE_STATE_COMMON,nullptr,IID_PPV_ARGS(&fgDisable_[i]));
@@ -173,7 +178,18 @@ bool EnhanceGraph::createResources()
         }
     }
     srcRgba_ = makeTexture(context_.device(), srcW_, srcH_, DXGI_FORMAT_R16G16B16A16_FLOAT, true);
-    if(srEnabled_&&desc_.videoSrQuality){videoSrInput_=makeTexture(context_.device(),srcW_,srcH_,DXGI_FORMAT_R8G8B8A8_UNORM,true);videoSrOutput_=makeTexture(context_.device(),workW_,workH_,DXGI_FORMAT_R8G8B8A8_UNORM,true);if(!videoSrInput_||!videoSrOutput_)return false;}
+    if(srEnabled_&&desc_.videoSrQuality&&desc_.videoSrQuality!=engine::kVideoSrFsr){videoSrInput_=makeTexture(context_.device(),srcW_,srcH_,DXGI_FORMAT_R8G8B8A8_UNORM,true);videoSrOutput_=makeTexture(context_.device(),workW_,workH_,DXGI_FORMAT_R8G8B8A8_UNORM,true);if(!videoSrInput_||!videoSrOutput_)return false;}
+    // FSR upscaling needs a render-extent depth; Veyra has no source-resolution
+    // depth source, so this is the same explicit constant far depth the
+    // frame-generation path uses. It limits disocclusion quality and must not
+    // be described as engine-native depth.
+    if(srEnabled_&&desc_.videoSrQuality==engine::kVideoSrFsr){
+        fsrSrDepth_=makeTexture(context_.device(),srcW_,srcH_,DXGI_FORMAT_R32_FLOAT,false);
+        if(!fsrSrDepth_)return false;
+        fsrSrDepthPitch_=size_t(srcW_)*sizeof(float);
+        upFsrSrDepth_=makeUploadBuffer(context_.device(),fsrSrDepthPitch_*srcH_);
+        if(!upFsrSrDepth_)return false;
+    }
     const bool directBase=!srEnabled_&&srcW_==workW_&&srcH_==workH_;
     workRgba_=directBase?srcRgba_:makeTexture(context_.device(),workW_,workH_,DXGI_FORMAT_R16G16B16A16_FLOAT,true);
     for(unsigned i=0;i<2;++i){sourceReferences_[i]=makeTexture(context_.device(),srcW_,srcH_,DXGI_FORMAT_R16G16B16A16_FLOAT,false);baseReferences_[i]=directBase?sourceReferences_[i]:makeTexture(context_.device(),workW_,workH_,DXGI_FORMAT_R16G16B16A16_FLOAT,false);if(!sourceReferences_[i]||!baseReferences_[i])return false;}
@@ -181,7 +197,7 @@ bool EnhanceGraph::createResources()
     residualRgba_=makeTexture(context_.device(),desc_.nrBeforeSr?srcW_:workW_,desc_.nrBeforeSr?srcH_:workH_,DXGI_FORMAT_R16G16B16A16_FLOAT,true);
     nrFlow_=makeTexture(context_.device(),nrW_,nrH_,DXGI_FORMAT_R16G16_FLOAT,true);
     baseFlow_=makeTexture(context_.device(),workW_,workH_,DXGI_FORMAT_R16G16_FLOAT,true);
-    if(xessEnabled())for(auto& motion:presentMotion_){motion=makeTexture(context_.device(),workW_,workH_,DXGI_FORMAT_R16G16_FLOAT,false);if(!motion)return false;}
+    if(presentSinkFg())for(auto& motion:presentMotion_){motion=makeTexture(context_.device(),workW_,workH_,DXGI_FORMAT_R16G16_FLOAT,false);if(!motion)return false;}
     if(!nrInput_||!residualRgba_||!nrFlow_||!baseFlow_)return false;
     proxyTex_ = makeTexture(context_.device(), nrW_, nrH_, DXGI_FORMAT_R8G8B8A8_UNORM, true);
     neuralTex_ = makeTexture(context_.device(), nrW_, nrH_, DXGI_FORMAT_R8G8B8A8_UNORM, true);
@@ -234,9 +250,11 @@ bool EnhanceGraph::initZeroAndDepthTextures()
 {
     // Depth constants uploaded once (copies are safe before views exist).
     uint8_t* d = nullptr; uint8_t* zd = nullptr; uint8_t* zm = nullptr;
+    uint8_t* fd = nullptr;
     upDepth_->Map(0, nullptr, reinterpret_cast<void**>(&d));
     upZeroDepth_->Map(0, nullptr, reinterpret_cast<void**>(&zd));
     upZeroMotion_->Map(0, nullptr, reinterpret_cast<void**>(&zm));
+    if(upFsrSrDepth_!=nullptr)upFsrSrDepth_->Map(0,nullptr,reinterpret_cast<void**>(&fd));
     for (uint32_t y = 0; y < workH_; ++y) {
         float* dRow = reinterpret_cast<float*>(d + y * dPitch_);
         float* zdRow = reinterpret_cast<float*>(zd + y * dPitch_);
@@ -250,6 +268,13 @@ bool EnhanceGraph::initZeroAndDepthTextures()
     upDepth_->Unmap(0, nullptr);
     upZeroDepth_->Unmap(0, nullptr);
     upZeroMotion_->Unmap(0, nullptr);
+    if(upFsrSrDepth_!=nullptr){
+        for(uint32_t y=0;y<srcH_;++y){
+            float* row=reinterpret_cast<float*>(fd+size_t(y)*fsrSrDepthPitch_);
+            for(uint32_t x=0;x<srcW_;++x)row[x]=0.9f;
+        }
+        upFsrSrDepth_->Unmap(0,nullptr);
+    }
 
     Status st = Status::Ok;
     ID3D12GraphicsCommandList* list = ring_.acquire(0, st);
@@ -282,6 +307,28 @@ bool EnhanceGraph::initZeroAndDepthTextures()
     uploadTex(depthTex_.Get(), upDepth_, DXGI_FORMAT_R32_FLOAT);
     uploadTex(nrZeroDepth_.Get(), upZeroDepth_, DXGI_FORMAT_R32_FLOAT);
     uploadTex(nrZeroMotion_.Get(), upZeroMotion_, DXGI_FORMAT_R16G16_FLOAT);
+    if(fsrSrDepth_!=nullptr&&upFsrSrDepth_!=nullptr){
+        D3D12_RESOURCE_BARRIER b{};
+        b.Transition.pResource=fsrSrDepth_.Get();
+        b.Transition.StateBefore=D3D12_RESOURCE_STATE_COMMON;
+        b.Transition.StateAfter=D3D12_RESOURCE_STATE_COPY_DEST;
+        b.Transition.Subresource=D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1,&b);
+        D3D12_TEXTURE_COPY_LOCATION dst{},src{};
+        dst.pResource=fsrSrDepth_.Get();
+        dst.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        src.pResource=upFsrSrDepth_.Get();
+        src.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint.Footprint.Format=DXGI_FORMAT_R32_FLOAT;
+        src.PlacedFootprint.Footprint.Width=srcW_;
+        src.PlacedFootprint.Footprint.Height=srcH_;
+        src.PlacedFootprint.Footprint.Depth=1;
+        src.PlacedFootprint.Footprint.RowPitch=static_cast<UINT>(fsrSrDepthPitch_);
+        list->CopyTextureRegion(&dst,0,0,0,&src,nullptr);
+        b.Transition.StateBefore=D3D12_RESOURCE_STATE_COPY_DEST;
+        b.Transition.StateAfter=D3D12_RESOURCE_STATE_COMMON;
+        list->ResourceBarrier(1,&b);
+    }
     list->Close();
     ID3D12CommandList* lists[] = { list };
     context_.directQueue()->ExecuteCommandLists(1, lists);
@@ -300,7 +347,7 @@ bool EnhanceGraph::initZeroAndDepthTextures()
 bool EnhanceGraph::initNvof()
 {
     if(desc_.stillImage){mvecSource_="single-image (no temporal motion)";return true;}
-    if (desc_.noFeatures || !(nvofStandalone_ || xessEnabled() || (fgEnabled_&&desc_.frameGenerationBackend==engine::FrameGenerationBackend::Dlss) || (srEnabled_&&!desc_.videoSrQuality))) {
+    if (desc_.noFeatures || !(nvofStandalone_ || presentSinkFg() || (fgEnabled_&&desc_.frameGenerationBackend==engine::FrameGenerationBackend::Dlss) || (srEnabled_&&(desc_.videoSrQuality==0||desc_.videoSrQuality==engine::kVideoSrFsr)))) {
         veyra::log::info("graph", "VEYRA_NO_FEATURES: NVOF session skipped");
         return true;
     }
@@ -345,11 +392,148 @@ bool EnhanceGraph::initNvof()
     return true;
 }
 
+bool EnhanceGraph::fsrSrEnabled() const
+{
+    return fsrSrBackend_ != nullptr && fsrSrBackend_->created();
+}
+
+void EnhanceGraph::applyAdaMfgUnlock()
+{
+    const auto& adapter = context_.adapter();
+    // Hard architecture gate: 50 series keeps its native multi-frame path and is
+    // never patched, and no other architecture is in scope either.
+    if (!ngx::AdaMfgUnlock::adapterIsAda(adapter.vendorId, adapter.deviceId)) {
+        return;
+    }
+    wchar_t disabled[2]{};
+    if (GetEnvironmentVariableW(L"VEYRA_DISABLE_ADA_MFG_UNLOCK", disabled, 2) > 0) {
+        veyra::log::warn("ada-mfg", "multi-frame unlock disabled by VEYRA_DISABLE_ADA_MFG_UNLOCK");
+        return;
+    }
+    const auto modulePath = std::filesystem::path(desc_.runtimeAbsPath) / L"nvngx_dlssg.dll";
+    HMODULE module = GetModuleHandleW(L"nvngx_dlssg.dll");
+    if (module == nullptr) {
+        module = LoadLibraryExW(modulePath.c_str(), nullptr,
+                                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    }
+    if (module == nullptr) {
+        veyra::log::warn("ada-mfg", std::format("DLSS-G runtime could not be opened for the unlock (path={} win32={})",
+                                                modulePath.string(), GetLastError()));
+        return;
+    }
+    const auto scan = ngx::AdaMfgUnlock::scan(module);
+    if (!scan.moduleValid || scan.archGateSites < ngx::AdaMfgUnlock::kMinArchGateSites ||
+        scan.archGateSites > ngx::AdaMfgUnlock::kMaxArchGateSites ||
+        scan.mfgGateSites != ngx::AdaMfgUnlock::kExpectedMfgGateSites || !scan.mfgGateValid ||
+        scan.descriptorSlots == 0 ||
+        scan.ptxBytes != ngx::AdaMfgUnlock::kExpectedPtxBytes ||
+        scan.midpointCount != ngx::AdaMfgUnlock::kExpectedMidpoints || !scan.joinLabelUnique) {
+        veyra::log::warn("ada-mfg", std::format("unlock refused: runtime build does not match the audited structure ({})",
+                                                scan.detail));
+        return;
+    }
+    const auto state = ngx::AdaMfgUnlock::apply(module, true);
+    veyra::log::info("ada-mfg", std::format("adapter deviceId=0x{:04X} unlock applied={} gates={} mfgGate={} descriptors={} kernel={} ({})",
+                                            adapter.deviceId, state.applied ? 1 : 0, state.archGateSites,
+                                            state.mfgGatePatched ? 1 : 0, state.descriptorSlots,
+                                            state.kernelPatched ? 1 : 0,
+                                            std::string(state.detail.begin(), state.detail.end())));
+}
+
+void EnhanceGraph::applyAmpereMfgUnlock()
+{
+    const auto& adapter = context_.adapter();
+    // Hard architecture gate: only RTX 30 (Ampere GA10x) takes this path. Ada
+    // keeps its own unlock and Blackwell keeps its native multi-frame path.
+    if (!ngx::AmpereMfgUnlock::adapterIsAmpere(adapter.vendorId, adapter.deviceId)) {
+        return;
+    }
+    wchar_t disabled[2]{};
+    if (GetEnvironmentVariableW(L"VEYRA_DISABLE_AMPERE_MFG_UNLOCK", disabled, 2) > 0) {
+        veyra::log::warn("ampere-mfg", "RTX 30 sm_86 unlock disabled by VEYRA_DISABLE_AMPERE_MFG_UNLOCK");
+        return;
+    }
+    const auto modulePath = std::filesystem::path(desc_.runtimeAbsPath) / L"nvngx_dlssg.dll";
+    HMODULE module = GetModuleHandleW(L"nvngx_dlssg.dll");
+    if (module == nullptr) {
+        module = LoadLibraryExW(modulePath.c_str(), nullptr,
+                                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    }
+    if (module == nullptr) {
+        veyra::log::warn("ampere-mfg", std::format("DLSS-G runtime could not be opened for the RTX 30 unlock (path={} win32={})",
+                                                   modulePath.string(), GetLastError()));
+        return;
+    }
+    const auto scan = ngx::AmpereMfgUnlock::scan(module);
+    if (!scan.moduleValid || !scan.identityMatched ||
+        scan.slotRuns != ngx::AmpereMfgUnlock::kExpectedSlotRuns ||
+        scan.slotPointers != ngx::AmpereMfgUnlock::kExpectedSlotRuns *
+                                 ngx::AmpereMfgUnlock::kExpectedSlotsPerRun ||
+        scan.programFatbins != ngx::AmpereMfgUnlock::kExpectedProgramFatbins ||
+        scan.networkFatbins != ngx::AmpereMfgUnlock::kExpectedRdataNetworkFatbins ||
+        scan.auxFatbins != ngx::AmpereMfgUnlock::kExpectedAuxFatbins ||
+        scan.leaSites != ngx::AmpereMfgUnlock::kExpectedLeaSites ||
+        scan.archGateSites < ngx::AmpereMfgUnlock::kMinArchGateSites ||
+        scan.archGateSites > ngx::AmpereMfgUnlock::kMaxArchGateSites ||
+        !scan.temporalSlotUnique) {
+        veyra::log::warn("ampere-mfg", std::format("unlock refused: runtime build does not match the audited structure ({})",
+                                                   scan.detail));
+        return;
+    }
+    const auto state = ngx::AmpereMfgUnlock::apply(module);
+    veyra::log::info("ampere-mfg", std::format("adapter deviceId=0x{:04X} unlock applied={} runs={} slots={} fatbins={} lea={} gates={} ({})",
+                                               adapter.deviceId, state.applied ? 1 : 0, state.slotRuns,
+                                               state.slotPointers,
+                                               state.programFatbins + state.networkFatbins + state.auxFatbins,
+                                               state.leaSites, state.archGateSites,
+                                               std::string(state.detail.begin(), state.detail.end())));
+}
+
+bool EnhanceGraph::initFsrSr()
+{
+    if (!fsrSrRequested()) return true;
+    if (desc_.noFeatures) {
+        veyra::log::warn("fsr-sr", "feature-disabled configuration: AMD FSR upscaling skipped");
+        return true;
+    }
+    if (desc_.hdrOutput) {
+        // The working color here is linear FP16 with Veyra's own HDR contract;
+        // feeding that to the FSR HDR path without a verified transfer contract
+        // would be a guess. Refuse the stage instead of shipping a wrong image.
+        veyra::log::warn("fsr-sr", "HDR output is not supported by the AMD FSR upscaling stage yet; continuing without it");
+        return true;
+    }
+    failedBackend_=engine::FailedBackend::Sr;
+    fsrSrBackend_=std::make_unique<gfx::FsrSrBackend>();
+    if(!fsrSrBackend_->initialize(context_.device(),srcW_,srcH_,workW_,workH_,false)){
+        fsrSrBackend_.reset();
+        // The engine checks fsrSrRequested() && !fsrSrEnabled() after the graph
+        // is created and disables the stage with a user-visible warning, so a
+        // missing local runtime never blocks basic playback.
+        veyra::log::error("fsr-sr", "AMD FSR upscaling unavailable; the engine will disable the stage");
+        failedBackend_=engine::FailedBackend::None;
+        return true;
+    }
+    failedBackend_=engine::FailedBackend::None;
+    veyra::log::info("fsr-sr", std::format("selected render={}x{} output={}x{} provider={}",srcW_,srcH_,workW_,workH_,
+                                           fsrSrBackend_->providerVersion()));
+    return true;
+}
+
 bool EnhanceGraph::initNgxFeatures()
 {
     failedBackend_=engine::FailedBackend::NgxCore;
     if (desc_.noNgx || desc_.noFeatures || (!nrEnabled_&&!srEnabled_&&!fgEnabled_)) {
         veyra::log::info("graph", "NGX core/features skipped by disabled-feature configuration");
+        return true;
+    }
+    // FSR upscaling is a FidelityFX effect: a session whose only feature is
+    // FSR SR must not require (or fail on) the NGX core.
+    const bool needNgxCore = nrEnabled_ || fgEnabled_ ||
+        (srEnabled_ && desc_.videoSrQuality!=engine::kVideoSrFsr);
+    if (!needNgxCore) {
+        veyra::log::info("graph", "NGX core skipped: AMD FSR upscaling is the only enabled stage");
+        failedBackend_=engine::FailedBackend::None;
         return true;
     }
     // Read the local NGX identity (same loader contract as the probes).
@@ -385,18 +569,67 @@ bool EnhanceGraph::initNgxFeatures()
     fgMultiFrameMax_ = 0;
     if (fgEnabled_ && desc_.frameGenerationBackend==engine::FrameGenerationBackend::Dlss) {
     failedBackend_=engine::FailedBackend::Fg;
+    // RTX 40 series would report only 2X here; open the arch gate in the mapped
+    // DLSS-G runtime first so the capability query below sees multi-frame. On
+    // every other architecture this is a no-op.
+    applyAdaMfgUnlock();
+    // RTX 30 has no sm_86 program in the provider at all; the Ampere unlock
+    // rebuilds every fatbin and re-targets the arch gates before the query.
+    applyAmpereMfgUnlock();
     fgBackend_ = std::make_unique<ngx::DlssFgBackend>();
     ngx::DlssFgBackend::Capability fgCaps{};
     const bool fgAvailable = fgBackend_->queryCapability(*coreHost_, fgCaps, st);
     if (!fgAvailable) {
-        veyra::log::error("graph", "FG unavailable; fail closed");
-        return false;
+        if (ngx::AmpereMfgUnlock::applied()) {
+            // The provider's own report stays Ada/Blackwell-gated; the audited
+            // sm_86 unlock replaced every program and the audited build's
+            // compiled ceiling is five generated frames. Only a completely
+            // absent report is overridden; an explicit smaller value is kept.
+            if (fgCaps.multiFrameCountMax == 0) {
+                fgCaps.multiFrameCountMax = 5;
+            }
+            fgCaps.available = true;
+            veyra::log::warn("ampere-mfg", std::format(
+                "runtime reported FG unavailable; continuing on the audited sm_86 unlock (multiFrameMax={})",
+                fgCaps.multiFrameCountMax));
+        } else {
+            veyra::log::error("graph", "FG unavailable; fail closed");
+            return false;
+        }
     }
-    if(desc_.enableFg&&(desc_.fgMultiplier<2||desc_.fgMultiplier>4||fgCaps.multiFrameCountMax<desc_.fgMultiplier-1)){veyra::log::error("graph","requested MFG multiplier unsupported");return false;}
-    fgCapsAvailable_ = fgCaps.available;
-    fgMultiFrameMax_ = fgCaps.multiFrameCountMax;
-    veyra::log::info("graph", std::format("FG capability available={} multiFrameMax={}",
-        fgCaps.available, fgCaps.multiFrameCountMax));
+        // Publish the capability before validating the request so a rejected
+        // multiplier still teaches the caller what this GPU supports.
+        fgCapsAvailable_ = fgCaps.available;
+        fgMultiFrameMax_ = fgCaps.multiFrameCountMax;
+        if (ngx::AdaMfgUnlock::applied() && fgMultiFrameMax_ <= 1) {
+            veyra::log::warn("ada-mfg", std::format("unlock is installed but the runtime still reports maxGeneratedFrames={}; the active DLSS-G is not the audited local build", fgMultiFrameMax_));
+        }
+        // Test-only capability override: lets the Ada (40-series) ceiling and the
+        // capability-driven UI/recovery paths be exercised on a 50-series host
+        // without touching the runtime. Never set by the product UI.
+        {
+            wchar_t overrideText[16]{};
+            if(GetEnvironmentVariableW(L"VEYRA_TEST_FG_MULTIFRAME_MAX",overrideText,16)>0){
+                const int forced=_wtoi(overrideText);
+                if(forced>=0&&forced<=5){
+                    fgMultiFrameMax_=forced;fgCaps.multiFrameCountMax=uint32_t(forced);
+                    veyra::log::warn("capability",std::format("test-only FG MultiFrameCountMax override={}",forced));
+                }
+            }
+        }
+        veyra::log::info("graph", std::format("FG capability available={} multiFrameMax={}",
+            fgCaps.available, fgCaps.multiFrameCountMax));
+        // Test-only research path for the Ada (40-series) MFG unlock: with
+        // VEYRA_TEST_FG_FORCE_MULTIPLIER=1 the reported capability no longer
+        // rejects the request, so a 40-series host can show whether the runtime
+        // generates real frames (or repeats/black) when the gate is bypassed at
+        // the caller. Never reachable from the product UI.
+        const bool forceAboveCapability=GetEnvironmentVariableW(L"VEYRA_TEST_FG_FORCE_MULTIPLIER",nullptr,0)>0;
+        const bool aboveCapability=desc_.enableFg&&fgCaps.multiFrameCountMax<desc_.fgMultiplier-1;
+        if(aboveCapability&&forceAboveCapability){
+            veyra::log::warn("capability",std::format("test-only FG multiplier forced above capability request={} maxGeneratedFrames={}",desc_.fgMultiplier,fgCaps.multiFrameCountMax));
+        }
+        if(desc_.enableFg&&(desc_.fgMultiplier<2||desc_.fgMultiplier>6||(aboveCapability&&!forceAboveCapability))){veyra::log::error("graph",std::format("requested MFG multiplier unsupported request={} maxGeneratedFrames={}",desc_.fgMultiplier,fgCaps.multiFrameCountMax));return false;}
     }
 
     if(nrEnabled_){
@@ -449,7 +682,7 @@ bool EnhanceGraph::initNgxFeatures()
         if(!ring_.submitAndSignal(0)||!ring_.waitIdle())return false;
     }
 
-    if (srEnabled_ && !desc_.noFeatures) {
+    if (srEnabled_ && !desc_.noFeatures && desc_.videoSrQuality!=engine::kVideoSrFsr) {
         ngx::DlssSrBackend::CreateDesc sd{};
         sd.inputWidth = srcW_; sd.inputHeight = srcH_;
         sd.outputWidth = workW_; sd.outputHeight = workH_;
@@ -741,7 +974,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
     if(!realLeases_[parity].expired()||!generatedLeases_[parity].expired()){
         veyra::log::error("frame-pool",std::format("slot={} still leased; refusing overwrite, batch={}",parity,realFrameIndex_+1));return false;
     }
-    for(unsigned i=parity;i<6;i+=2)if(!generatedLeases_[i].expired()){veyra::log::error("frame-pool","generated subframe still leased; refusing overwrite");return false;}
+    for(unsigned i=parity;i<kGeneratedPoolSlots;i+=2)if(!generatedLeases_[i].expired()){veyra::log::error("frame-pool","generated subframe still leased; refusing overwrite");return false;}
     if (graphOff) {
         prevPtsMs_ = ptsMs;
         prevValid_ = true;
@@ -944,7 +1177,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
 
     // Guidance from original source-space color before SR/NR. Queue waits are GPU-side.
     bool haveFlow = false;
-    const bool runMotion = nvofStandalone_ || xessEnabled() || fgEnabled_ || (srEnabled_ && !desc_.videoSrQuality);
+    const bool runMotion = nvofStandalone_ || presentSinkFg() || fgEnabled_ || (srEnabled_ && (desc_.videoSrQuality==0||desc_.videoSrQuality==engine::kVideoSrFsr));
     if (runMotion && (gpuDis_ || amdOf_ || (nvof_ && nvof_->initialized()))) {
         const float dims[8] = {uintBits(nvofW_),uintBits(nvofH_),uintBits(nvofW_),uintBits(nvofH_),0,0,0,0};
         if (prevValid_) {
@@ -1032,7 +1265,26 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
     out.batch.a100ns=static_cast<int64_t>(std::llround(prevPtsMs_*10000));
     out.batch.b100ns=static_cast<int64_t>(std::llround(ptsMs*10000));gpuTimer_.identity(out.batch.identity);
     auto runSr=[&]()->bool{
-    if(srEnabled_&&videoSrBackend_){
+    if(srEnabled_&&fsrSrEnabled()&&haveFlow){
+        // AMD FSR upscaling: FidelityFX effect, render-extent color + guidance
+        // motion (previous = current + motion, same convention as the frame
+        // generator) straight into the working texture. A frame without valid
+        // motion falls through to the plain blit below instead of guessing.
+        gpuTimer_.mark(list,GpuStage::Sr);
+        const double deltaMs = (prevPtsMs_>=0.0&&ptsMs>prevPtsMs_)?(ptsMs-prevPtsMs_):16.6;
+        tracker_.transition(list,srcRgba_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        tracker_.transition(list,flowTex_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        tracker_.transition(list,fsrSrDepth_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        tracker_.transition(list,workRgba_.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if(!fsrSrBackend_->evaluate(list,srcRgba_.Get(),flowTex_.Get(),fsrSrDepth_.Get(),workRgba_.Get(),
+                                    srcW_,srcH_,workW_,workH_,reset,float(deltaMs))){
+            failedBackend_=engine::FailedBackend::Sr;
+            return false;
+        }
+        ++metrics_.srEvaluateCount;gpuTimer_.mark(list,GpuStage::Sr,true);
+        tracker_.uavBarrier(list,workRgba_.Get());
+        tracker_.transition(list,workRgba_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    } else if(srEnabled_&&videoSrBackend_){
         gpuTimer_.mark(list,GpuStage::Sr);
         tracker_.transition(list,videoSrInput_.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         const float enc[8]={uintBits(srcW_),uintBits(srcH_),uintBits(srcW_),uintBits(srcH_),desc_.hdrOutput?3.0f:1.0f,0,0,0};
@@ -1205,7 +1457,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
         tracker_.transition(list, videoFrame_[parity].Get(), D3D12_RESOURCE_STATE_COMMON);
 
     }
-    if(xessEnabled()){
+    if(presentSinkFg()){
         auto* input=haveFlow?baseFlow_.Get():nrZeroMotion_.Get();
         tracker_.transition(list,input,D3D12_RESOURCE_STATE_COPY_SOURCE);
         tracker_.transition(list,presentMotion_[parity].Get(),D3D12_RESOURCE_STATE_COPY_DEST);
@@ -1335,10 +1587,10 @@ bool EnhanceGraph::applySettings(const engine::EnhancementSettings& s){
     // DLSS allocates multiplier-specific feature/output resources.
     // XeSS has a fixed 2X proxy swapchain contract. Settings callers must
     // rebuild instead of accepting a change that cannot take effect in place.
-    if(s.nrRuntime!=desc_.nrRuntime||std::max(2u,s.multiplier)!=desc_.fgMultiplier||s.frameGenerationBackend!=desc_.frameGenerationBackend||s.videoSrQuality!=desc_.videoSrQuality||!s.validate().empty()||(s.multiplier>1&&s.frameGenerationBackend!=engine::FrameGenerationBackend::XeSS&&(!fgCapsAvailable_||s.multiplier-1>uint32_t(fgMultiFrameMax_))))return false;
+    if(s.nrRuntime!=desc_.nrRuntime||std::max(2u,s.multiplier)!=desc_.fgMultiplier||s.frameGenerationBackend!=desc_.frameGenerationBackend||s.videoSrQuality!=desc_.videoSrQuality||!s.validate().empty()||(s.multiplier>1&&!engine::presentSinkFrameGeneration(s.frameGenerationBackend)&&(!fgCapsAvailable_||s.multiplier-1>uint32_t(fgMultiFrameMax_))))return false;
     desc_.contentRate=s.content;desc_.model=s.model;desc_.residual=s.residual;desc_.protection=s.protection;desc_.settingsRevision=s.revision;
     desc_.fgMultiplier=std::max(2u,s.multiplier);desc_.enableNvofStandalone=s.nr&&!desc_.stillImage;nvofStandalone_=desc_.enableNvofStandalone;
-    setNrEnabled(s.nr);setFgEnabled(s.multiplier>1&&s.frameGenerationBackend!=engine::FrameGenerationBackend::XeSS);
+    setNrEnabled(s.nr);setFgEnabled(s.multiplier>1&&!engine::presentSinkFrameGeneration(s.frameGenerationBackend));
     veyra::log::info("settings",std::format("requested revision={} intensity={} tone={} structure={} skin={} style={} autoMask={} UI={} residual={}/{}/{}/{}/{} multiplier={}",s.revision,s.model.intensity,s.model.tone,s.model.structure,s.model.skin,s.model.style,s.model.autoMask,s.model.uiCorrection,s.residual.total,s.residual.darken,s.residual.brighten,s.residual.color,s.residual.luminance,s.multiplier));
     return true;
 }
@@ -1381,7 +1633,7 @@ ID3D12Resource* EnhanceGraph::videoFrameResource(uint32_t slot) const
 
 ID3D12Resource* EnhanceGraph::generatedFrameResource(uint32_t slot) const
 {
-    return slot < 6 ? genFrame_[slot].Get() : nullptr;
+    return slot < kGeneratedPoolSlots ? genFrame_[slot].Get() : nullptr;
 }
 
 // ---------------------------------------------------------------------------
@@ -1405,6 +1657,9 @@ void EnhanceGraph::shutdown()
     gpuDis_.reset();
     amdOf_.reset();
     for(auto& motion:presentMotion_)motion.Reset();
+    if(fsrSrBackend_){fsrSrBackend_->release();fsrSrBackend_.reset();}
+    fsrSrDepth_.Reset();
+    upFsrSrDepth_.Reset();
     if (fgBackend_) fgBackend_->release();
     if(videoSrBackend_){videoSrBackend_->release();videoSrBackend_.reset();}
     if (srBackend_) srBackend_->release();
@@ -1435,6 +1690,10 @@ void EnhanceGraph::shutdown()
         nrAdapter_->unload();
     }
     if (coreHost_) coreHost_->shutdown();
+    // Restore the DLSS-G runtime image only after the NGX core released the
+    // feature (the unlock is process memory only; the file on disk is untouched).
+    ngx::AdaMfgUnlock::release();
+    ngx::AmpereMfgUnlock::release();
 
     // Staged explicit release (scope-end destructors then have nothing left).
     decPass_ = ComputePass{};
@@ -1442,7 +1701,7 @@ void EnhanceGraph::shutdown()
     for(unsigned i=0;i<2;++i){if(upRgb_[i]&&mappedRgb_[i])upRgb_[i]->Unmap(0,nullptr);mappedRgb_[i]=nullptr;upRgb_[i].Reset();}
     downsamplePass_={};residualPass_={};flowAdaptPass_={};
     nrInput_.Reset();residualRgba_.Reset();nrFlow_.Reset();baseFlow_.Reset();
-    for(unsigned i=0;i<6;++i){fgDisable_[i].Reset();fgDisableReadback_[i].Reset();generatedLeases_[i].reset();genFrame_[i].Reset();}for(auto& lease:realLeases_)lease.reset();fgDisableInit_.Reset();
+    for(unsigned i=0;i<kGeneratedPoolSlots;++i){fgDisable_[i].Reset();fgDisableReadback_[i].Reset();generatedLeases_[i].reset();genFrame_[i].Reset();}for(auto& lease:realLeases_)lease.reset();fgDisableInit_.Reset();
     encPass_ = ComputePass{};
     blitPass_ = ComputePass{};hdrVideoSrPass_={};
     yuvPass_ = ComputePass{};

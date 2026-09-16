@@ -18,6 +18,20 @@ public:
     }
     double fps() const { return double(num_) / den_; }
     double expected(uint64_t index) const { return origin_ + double(index) * den_ / num_; }
+    // Tail-only recovery for containers whose last frame(s) sit off the common
+    // quantizer phase: encoders round the final timestamp, and a truncated last
+    // GOP loses one grid slot. Both used to abort a multi-hour export at the
+    // very end. The encoder writes output frames on the grid from the frame
+    // index, so a snapped tail can only change the last frame's display
+    // duration; it cannot desync audio or shift any earlier frame.
+    // `estimatedFrames` (container duration x rate) confines the exception to
+    // the real tail, so a mid-stream gap can never take this path.
+    bool tailAccepts(uint64_t index, double pts, uint64_t estimatedFrames) const {
+        if(!valid() || !std::isfinite(pts)) return false;
+        if(estimatedFrames == 0 || index + 3 < estimatedFrames) return false;
+        const double interval = double(den_) / num_;
+        return std::abs(pts - expected(index)) <= 1.5 * interval + quantum_;
+    }
     bool accepts(uint64_t index, double pts) {
         if(!valid() || !std::isfinite(pts) || (havePrevious_ && pts<=previous_))return false;
         const double error=pts-expected(index);

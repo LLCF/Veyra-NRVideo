@@ -100,6 +100,7 @@ bool fillAdapterInfo(const DXGI_ADAPTER_DESC1& desc, AdapterInfo& info)
         static_cast<uint64_t>(desc.AdapterLuid.LowPart));
     info.dedicatedVideoMemoryBytes = desc.DedicatedVideoMemory;
     info.isNvidia = desc.VendorId == 0x10DE;
+    info.deviceId = desc.DeviceId;
     info.isSoftware = (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
     info.driverVersion = info.isNvidia?queryNvidiaDriverVersion():std::wstring{};
     info.driverVersionSource = info.driverVersion.empty() ? L"unavailable" : L"registry";

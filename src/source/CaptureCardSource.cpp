@@ -6,9 +6,13 @@
 #include "veyra/pipeline/ColorMetadata.h"
 #include "veyra/Log.h"
 #include "veyra/sink/AudioFormat.h"
+#include "veyra/sink/BitstreamAudio.h"
+#include "veyra/sink/BitstreamAudioSink.h"
 #include <windows.h>
 #include <dshow.h>
 #include <dvdmedia.h>
+#include <ks.h>
+#include <ksmedia.h>
 #include <wrl/client.h>
 #include <algorithm>
 #include <array>
@@ -123,10 +127,22 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
     Clock::time_point pendingArrival{},readArrival{},firstArrival{},latestArrival{};
     ComPtr<IGraphBuilder> graph;ComPtr<ICaptureGraphBuilder2> builder;ComPtr<IBaseFilter> device,grabFilter,nullFilter,audioFilter;ComPtr<IAMStreamConfig> config;ComPtr<ISampleGrabber> grab;ComPtr<IMediaControl> control;ComPtr<IMediaEvent> events;
     float lastAudioGain=-1;bool audioGainSupported=false;
-    // Manual capture flip; read by the DirectShow callback thread.
-    std::atomic<bool> verticalFlip{false};
     ComPtr<IBaseFilter> audioSink;ComPtr<IReferenceClock> referenceClock;
     std::unique_ptr<sink::CaptureAudioSession> audioSession;
+    // Dolby/DTS passthrough: when the device offers only compressed media types
+    // the raw bursts are decoded here and the session is configured with the
+    // decoded layout on the first frame (that is why its start is deferred).
+    std::shared_ptr<sink::BitstreamDecoder> audioBitstream;
+    // Bitstream-first mode: the compressed stream is forwarded unmodified to a
+    // receiver over an exclusive WASAPI IEC 61937 carrier when one accepts it.
+    std::shared_ptr<sink::BitstreamAudioSink> audioPassthrough;
+    bool audioSessionDeferred=false;
+    std::wstring audioBitstreamKind;
+    // 0 automatic, 1 PCM only, 2 bitstream preferred (see
+    // engine::CaptureAudioIngress). Read when the audio graph is built.
+    unsigned audioIngressMode=0;
+    // Manual capture flip; read by the DirectShow callback thread.
+    std::atomic<bool> verticalFlip{false};
     std::unique_ptr<WasapiAudioInput> wasapi;
     std::wstring audioError;
     AudioInputRecovery audioRecovery;
@@ -209,6 +225,19 @@ std::vector<CaptureFormat> enumerateFormats(IAMStreamConfig* config){
 std::vector<CaptureFormat> CaptureCardSource::formats(unsigned device){ComPtr<IGraphBuilder> g;ComPtr<ICaptureGraphBuilder2>b;ComPtr<IBaseFilter>f;ComPtr<IAMStreamConfig>c;if(!configuration(device,g,b,f,c))return {};return enumerateFormats(c.Get());}
 std::vector<CaptureFormat> CaptureCardSource::formatsByPath(std::wstring_view devicePath){ComPtr<IGraphBuilder> g;ComPtr<ICaptureGraphBuilder2>b;ComPtr<IBaseFilter>f;ComPtr<IAMStreamConfig>c;if(!configuration(devicePath,g,b,f,c))return {};return enumerateFormats(c.Get());}
 const SourceInfo& CaptureCardSource::info()const{return p_->info;}
+void CaptureCardSource::setAudioIngress(unsigned mode){
+    auto& p=*p_;
+    const unsigned clamped=mode>2?0:mode;
+    if(p.audioIngressMode==clamped)return;
+    p.audioIngressMode=clamped;
+    log::info("capture-audio-ingress",std::format("mode={} ({}) takes effect on the next connect",clamped,
+        clamped==1?"PCM only":clamped==2?"bitstream preferred":"automatic"));
+}
+void CaptureCardSource::setVerticalFlip(bool enabled){
+    auto& p=*p_;
+    if(p.verticalFlip.exchange(enabled)==enabled)return;
+    log::info("capture-flip",std::format("manual vertical flip={} (applies to the next sample; ingest only)",enabled?1:0));
+}
 bool CaptureCardSource::setAudioGain(float gain){
     if(p_->wasapi){p_->wasapi->setGain(gain);return p_->wasapi->snapshot().available;}
     auto& p=*p_;if(p.audioSession){p.audioSession->setGain(gain);return p.audioSession->snapshot().available;}if(!p.graph||!p.audioFilter)return false;
@@ -216,11 +245,6 @@ bool CaptureCardSource::setAudioGain(float gain){
     ComPtr<IBasicAudio> audio;HRESULT hr=p.graph.As(&audio);
     if(SUCCEEDED(hr)){long attenuation=gain<=0?-10000:long(std::clamp(2000.0*std::log10(double(gain)),-10000.0,0.0));hr=audio->put_Volume(attenuation);}
     p.lastAudioGain=gain;p.audioGainSupported=SUCCEEDED(hr);log::info("capture-audio",std::format("application gain={} hr=0x{:X}",gain,unsigned(hr)));return p.audioGainSupported;
-}
-void CaptureCardSource::setVerticalFlip(bool enabled){
-    auto& p=*p_;
-    if(p.verticalFlip.exchange(enabled)==enabled)return;
-    log::info("capture-flip",std::format("manual vertical flip={} (applies to the next sample; ingest only)",enabled?1:0));
 }
 void CaptureCardSource::videoPresented(double pts,int64_t time,int64_t arrival){
     if(p_->wasapi)p_->wasapi->videoPresented(double(arrival)/10000,time,arrival);
@@ -358,23 +382,58 @@ bool CaptureCardSource::connectDirectShowAudio(const SourceOpenDesc& desc){
     // commonly stereo first even when native 5.1 is available.
     auto releaseType=[](AM_MEDIA_TYPE* type){freeType(type);};
     using AudioType=std::unique_ptr<AM_MEDIA_TYPE,decltype(releaseType)>;
-    std::vector<AudioType> audioTypes;unsigned typeIndex=0;
-    for(;;){AM_MEDIA_TYPE* type=nullptr;if(types->Next(1,&type,nullptr)!=S_OK||!type)break;
-        AudioType owned(type,releaseType);sink::WavePcmFormat pcm;bool supported=false;
-        if(type->formattype==FORMAT_WaveFormatEx&&type->pbFormat)supported=sink::parseWavePcm(type->pbFormat,type->cbFormat,pcm);
+std::vector<AudioType> audioTypes;std::vector<AudioType> bitstreamTypes;unsigned typeIndex=0;
+// Dolby/DTS bitstream capability probe: the capture card may expose AC-3 /
+// E-AC-3 (Dolby Digital Plus, includes Atmos over DD+) / TrueHD / DTS instead
+// of PCM. Veyra currently consumes PCM only, so a compressed stream is reported
+// here (and then ignored) instead of being silently mis-parsed. Dolby passthrough
+// work builds on this inventory.
+unsigned bitstreamTypeCount=0;std::string bitstreamSummary;
+auto bitstreamName=[](const GUID& subtype)->const char*{
+    switch(subtype.Data1){
+    case 0x00000092u:return "AC-3(SPDIF)";
+    case 0x00002000u:return "AC-3";
+    case 0x0000000Au:return "E-AC-3/DD+";
+    case 0x0000010Au:return "E-AC-3/DD+ Atmos";
+    case 0x0000000Cu:return "TrueHD/MLP";
+    case 0x00000008u:return "DTS";
+    case 0x0000000Bu:return "DTS-HD";
+    case 0x0000010Bu:return "DTS:X(E1)";
+    case 0x0000030Bu:return "DTS:X(E2)";
+    default:return nullptr;
+    }
+};
+for(;;){AM_MEDIA_TYPE* type=nullptr;if(types->Next(1,&type,nullptr)!=S_OK||!type)break;
+AudioType owned(type,releaseType);sink::WavePcmFormat pcm;bool supported=false;
+if(type->formattype==FORMAT_WaveFormatEx&&type->pbFormat)supported=sink::parseWavePcm(type->pbFormat,type->cbFormat,pcm);
+if(!supported){
+    const char* name=bitstreamName(type->subtype);
+if(name){
+    ++bitstreamTypeCount;if(!bitstreamSummary.empty())bitstreamSummary+=",";bitstreamSummary+=name;
+    log::info("capture-audio-bitstream",std::string("mediaType=")+std::to_string(typeIndex)+" subtype=0x"+std::format("{:08X}",unsigned(type->subtype.Data1))+" kind="+name+" (passthrough candidate)");
+}
+}
         if(type->formattype==FORMAT_WaveFormatEx&&type->pbFormat&&type->cbFormat>=sizeof(WAVEFORMATEX)){
             const auto* wave=reinterpret_cast<const WAVEFORMATEX*>(type->pbFormat);
             log::info("capture-audio",std::format("mediaType={} major=0x{:08X} subtype=0x{:08X} tag={} channels={} mask=0x{:X} rate={} containerBits={} validBits={} floating={} pcm={}",typeIndex++,type->majortype.Data1,type->subtype.Data1,wave->wFormatTag,wave->nChannels,supported?pcm.layout.mask:0,wave->nSamplesPerSec,wave->wBitsPerSample,supported?pcm.validBits:0,supported&&pcm.floating?1:0,supported?1:0));
         }else log::info("capture-audio",std::format("mediaType={} major=0x{:08X} subtype=0x{:08X} format=0x{:08X} pcm=0",typeIndex++,type->majortype.Data1,type->subtype.Data1,type->formattype.Data1));
         if(supported)audioTypes.push_back(std::move(owned));
+        else if(bitstreamName(type->subtype))bitstreamTypes.push_back(std::move(owned));
     }
-    if(audioTypes.empty()){log::warn("capture-audio","audio pin has no supported PCM media type");return false;}
+log::info("capture-audio-bitstream",std::format("device bitstream types={} [{}] pcmTypes={}",bitstreamTypeCount,bitstreamSummary.empty()?"none":bitstreamSummary,audioTypes.size()));
+const bool wantBitstreamFirst=p.audioIngressMode==2;
+const bool allowBitstream=p.audioIngressMode!=1;
+if(p.audioIngressMode==1&&bitstreamTypeCount>0)log::info("capture-audio-ingress","manual PCM-only selected: bitstream types are ignored even though the device offers them");
+if(audioTypes.empty()&&(!allowBitstream||bitstreamTypes.empty())){log::warn("capture-audio","audio pin has no usable media type for the selected ingress mode");return false;}
     std::stable_sort(audioTypes.begin(),audioTypes.end(),[](const auto& a,const auto& b){
         sink::WavePcmFormat lhs{},rhs{};
         if(!sink::parseWavePcm(a->pbFormat,a->cbFormat,lhs)||!sink::parseWavePcm(b->pbFormat,b->cbFormat,rhs))return false;
         return sink::preferCaptureAudioFormat(lhs,rhs);
     });
     bool connectedAudio=false;
+    // PCM attempt as a lambda so the bitstream-preferred mode can try it after
+    // the compressed types instead of before them.
+    auto connectPcm=[&]()->bool{
     for(const auto& owned:audioTypes){
         auto* type=owned.get();
         auto session=std::make_unique<sink::CaptureAudioSession>();ComPtr<IBaseFilter> candidate;ComPtr<IPin> terminal;
@@ -396,13 +455,132 @@ bool CaptureCardSource::connectDirectShowAudio(const SourceOpenDesc& desc){
             else if(candidate)p.graph->RemoveFilter(candidate.Get());
             log::info("capture-audio",std::format("PCM ConnectDirect hr=0x{:X}",unsigned(hr)));
         }
-        if(connectedAudio)break;
+        if(connectedAudio)return true;
     }
+    return false;
+    };
+    if(!wantBitstreamFirst)connectedAudio=connectPcm();
+    // Dolby/DTS passthrough fallback: no PCM type connected, so take the best
+    // compressed type the device offers and decode it back to PCM. This is the
+    // path a PS5 feeding Dolby Atmos / Dolby Audio / DTS needs.
+    if(!connectedAudio&&allowBitstream&&!bitstreamTypes.empty()){
+        std::stable_sort(bitstreamTypes.begin(),bitstreamTypes.end(),[](const auto& a,const auto& b){
+            return sink::bitstreamPreferenceOrder(sink::classifyBitstreamSubtype(a->subtype.Data1))>
+                   sink::bitstreamPreferenceOrder(sink::classifyBitstreamSubtype(b->subtype.Data1));
+        });
+        for(const auto& owned:bitstreamTypes){
+            auto* type=owned.get();
+            const auto kind=sink::classifyBitstreamSubtype(type->subtype.Data1);
+            const bool iec=sink::bitstreamIsIec61937(type->subtype.Data1);
+            // Bitstream-first mode with an IEC 61937 framed input: forward the
+            // compressed stream unchanged to a receiver that accepts the
+            // matching carrier (exclusive WASAPI). Only the receiver can
+            // decode Dolby Atmos / DTS:X object audio; the in-player decode
+            // below would reduce it to plain 5.1 PCM. Falls back silently when
+            // no endpoint advertises the format.
+            if(wantBitstreamFirst&&iec){
+                const GUID* carrier=nullptr;
+                switch(kind){
+                case sink::BitstreamKind::Ac3:carrier=&KSDATAFORMAT_SUBTYPE_IEC61937_DOLBY_DIGITAL;break;
+                case sink::BitstreamKind::Eac3:carrier=&KSDATAFORMAT_SUBTYPE_IEC61937_DOLBY_DIGITAL_PLUS;break;
+                case sink::BitstreamKind::TrueHd:carrier=&KSDATAFORMAT_SUBTYPE_IEC61937_DOLBY_MLP;break;
+                case sink::BitstreamKind::Dts:carrier=&KSDATAFORMAT_SUBTYPE_IEC61937_DTS;break;
+                // DTS-HD has no standard IEC 61937 subtype on Windows; it
+                // stays on the decode path.
+                default:break;
+                }
+                uint32_t rate=48000;
+                if(type->pbFormat!=nullptr&&type->cbFormat>=sizeof(WAVEFORMATEX)){
+                    const auto* wave=reinterpret_cast<const WAVEFORMATEX*>(type->pbFormat);
+                    if(wave->nSamplesPerSec==44100||wave->nSamplesPerSec==48000||wave->nSamplesPerSec==96000||wave->nSamplesPerSec==192000)rate=wave->nSamplesPerSec;
+                }
+                if(carrier!=nullptr){
+                    auto passthrough=std::make_shared<sink::BitstreamAudioSink>();
+                    if(passthrough->open(*carrier,rate)){
+                        ComPtr<IBaseFilter> candidate;ComPtr<IPin> terminal;
+                        auto sink=passthrough;
+                        hr=createNativeAudioSink(*type,[sink](IMediaSample* sample){
+                            BYTE* bytes=nullptr;
+                            if(FAILED(sample->GetPointer(&bytes)))return VFW_E_SAMPLE_TIME_NOT_SET;
+                            return sink->write(bytes,size_t(sample->GetActualDataLength()))?S_OK:E_FAIL;
+                        },candidate,terminal);
+                        if(SUCCEEDED(hr))hr=p.graph->AddFilter(candidate.Get(),L"Veyra audio bitstream passthrough");
+                        if(SUCCEEDED(hr))hr=p.graph->ConnectDirect(audioPin.Get(),terminal.Get(),type);
+                        if(SUCCEEDED(hr)){
+                            p.audioSink=candidate;p.audioPassthrough=passthrough;
+                            {const std::string name=sink::bitstreamKindName(kind);p.audioBitstreamKind.assign(name.begin(),name.end());}
+                            const auto& sinkState=passthrough->state();
+                            log::info("capture-audio-bitstream",std::string("passthrough to receiver kind=")+sink::bitstreamKindName(kind)+
+                                std::format(" rate={} endpoint=\"{}\" (no in-player decode)",rate,
+                                    std::string(sinkState.endpointName.begin(),sinkState.endpointName.end())));
+                            connectedAudio=true;
+                        }else if(candidate)p.graph->RemoveFilter(candidate.Get());
+                    }else{
+                        log::info("capture-audio-bitstream",std::string("receiver passthrough unavailable for ")+sink::bitstreamKindName(kind)+"; decoding to PCM");
+                    }
+                    if(connectedAudio)break;
+                }
+            }
+            auto decoder=std::make_shared<sink::BitstreamDecoder>();
+            if(!decoder->open(kind,iec)){
+                log::warn("capture-audio-bitstream",std::string("decoder unavailable for ")+sink::bitstreamKindName(kind)+": "+decoder->lastError());
+                continue;
+            }
+            auto session=std::make_unique<sink::CaptureAudioSession>();
+            ComPtr<IBaseFilter> candidate;ComPtr<IPin> terminal;
+            auto* target=session.get();
+            auto pcmBuffer=std::make_shared<std::vector<float>>();
+            auto started=std::make_shared<bool>(false);
+            const std::string kindName=sink::bitstreamKindName(kind);
+            const std::wstring kindWide(kindName.begin(),kindName.end());
+            hr=createNativeAudioSink(*type,[target,decoder,pcmBuffer,started,kindWide](IMediaSample* sample){
+                BYTE* bytes=nullptr;REFERENCE_TIME begin=0,end=0;
+                if(FAILED(sample->GetPointer(&bytes))||FAILED(sample->GetTime(&begin,&end)))return VFW_E_SAMPLE_TIME_NOT_SET;
+                pcmBuffer->clear();
+                if(!decoder->push(bytes,size_t(sample->GetActualDataLength()),*pcmBuffer))return S_OK;
+                if(pcmBuffer->empty())return S_OK;
+                const unsigned channels=decoder->channels();
+                const unsigned rate=decoder->sampleRate();
+                if(channels==0||rate==0)return S_OK;
+                if(!*started){
+                    WAVEFORMATEXTENSIBLE wfx{};
+                    wfx.Format.wFormatTag=WAVE_FORMAT_EXTENSIBLE;
+                    wfx.Format.nChannels=WORD(channels);
+                    wfx.Format.nSamplesPerSec=rate;
+                    wfx.Format.wBitsPerSample=32;
+                    wfx.Format.nBlockAlign=WORD(channels*4);
+                    wfx.Format.nAvgBytesPerSec=rate*channels*4;
+                    wfx.Format.cbSize=sizeof(WAVEFORMATEXTENSIBLE)-sizeof(WAVEFORMATEX);
+                    wfx.Samples.wValidBitsPerSample=32;
+                    // Standard layouts: 6 = 5.1, 8 = 7.1, otherwise 5.1 as the safe default.
+                    wfx.dwChannelMask=channels==8?0x63Fu:channels==6?0x3Fu:channels==2?0x3u:0x3Fu;
+                    wfx.SubFormat=KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+                    if(!target->configure(wfx.Format,sizeof(wfx))||!target->start())return E_FAIL;
+                    target->setInputBitstream(kindWide);
+                    *started=true;
+                }
+                return target->push(pcmBuffer->data(),pcmBuffer->size()*sizeof(float),double(begin)/10000,sample->IsDiscontinuity()==S_OK)?S_OK:E_FAIL;
+            },candidate,terminal);
+            if(SUCCEEDED(hr))hr=p.graph->AddFilter(candidate.Get(),L"Veyra audio bitstream");
+            if(SUCCEEDED(hr))hr=p.graph->ConnectDirect(audioPin.Get(),terminal.Get(),type);
+            if(SUCCEEDED(hr)){
+                p.audioSink=candidate;p.audioSession=std::move(session);p.audioBitstream=decoder;
+                p.audioSessionDeferred=true;
+                {const std::string name=sink::bitstreamKindName(kind);p.audioBitstreamKind.assign(name.begin(),name.end());}
+                connectedAudio=true;
+                log::info("capture-audio-bitstream",std::string("passthrough selected kind=")+sink::bitstreamKindName(kind)+(iec?" (IEC 61937)":"")+" -> decoded to PCM on the first frame");
+            }else if(candidate)p.graph->RemoveFilter(candidate.Get());
+            log::info("capture-audio-bitstream",std::string("ConnectDirect hr=0x")+std::format("{:X}",unsigned(hr)));
+            if(connectedAudio)break;
+        }
+    }
+    if(!connectedAudio&&wantBitstreamFirst)connectedAudio=connectPcm();
     return connectedAudio;
 }
 bool CaptureCardSource::start(){
     auto& p=*p_;if(p.info.opened)return true;if(!p.configured||!p.control)return false;
-    if(p.audioSession&&!p.audioSession->start())log::warn("capture-audio","audio start failed; retaining video capture");
+    if(p.audioSession&&p.audioSessionDeferred)log::info("capture-audio-bitstream","audio session starts with the first decoded bitstream frame");
+    else if(p.audioSession&&!p.audioSession->start())log::warn("capture-audio","audio start failed; retaining video capture");
     p.audioRecovery.reset(GetTickCount64());
     p.lastFrame=Impl::Clock::now();const auto hr=p.control->Run();p.info.opened=SUCCEEDED(hr);
     if(p.info.opened&&p.wasapi&&!p.wasapi->start())p.audioError=L"WASAPI 音频启动失败；视频继续运行";
@@ -492,7 +670,8 @@ void CaptureCardSource::close()noexcept{
     auto& p=*p_;if(p.control){const HRESULT hr=p.control->Stop();if(FAILED(hr))log::error("capture-close",std::format("Stop failed hr=0x{:08X}; releasing graph",uint32_t(hr)));}if(p.grab){const HRESULT hr=p.grab->SetCallback(nullptr,0);if(FAILED(hr))log::error("capture-close",std::format("detach callback hr=0x{:08X}",uint32_t(hr)));}
     if(p.wasapi)p.wasapi->stop();p.wasapi.reset();
     if(p.audioSession)p.audioSession->stop();p.audioError.clear();
-    p.events.Reset();p.control.Reset();p.grab.Reset();p.nullFilter.Reset();p.grabFilter.Reset();p.audioSink.Reset();p.audioFilter.Reset();p.config.Reset();p.device.Reset();p.builder.Reset();p.graph.Reset();p.referenceClock.Reset();p.audioSession.reset();
+    if(p.audioPassthrough)p.audioPassthrough->close();
+    p.events.Reset();p.control.Reset();p.grab.Reset();p.nullFilter.Reset();p.grabFilter.Reset();p.audioSink.Reset();p.audioFilter.Reset();p.config.Reset();p.device.Reset();p.builder.Reset();p.graph.Reset();p.referenceClock.Reset();p.audioSession.reset();p.audioPassthrough.reset();
     av_frame_free(&p.frame);av_frame_free(&p.pendingFrame);p.info={};
     p.sequence=p.received=p.dropped=p.lastDrop=0;p.pending=p.callbackError=p.configured=p.forceDiscontinuity=false;p.lastPts=p.readAgeMs=0;
 }

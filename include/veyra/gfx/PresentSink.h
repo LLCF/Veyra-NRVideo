@@ -16,6 +16,7 @@
 
 #include "veyra/Result.h"
 #include "veyra/gfx/XessPresenter.h"
+#include "veyra/gfx/FsrFgPresenter.h"
 
 namespace veyra::gfx {
 
@@ -36,9 +37,18 @@ public:
         uint32_t height = 720;
         bool vsync = true;
         bool xess = false;
+        // AMD FSR frame generation: the provider creates the proxy swapchain.
+        bool fsr = false;
+        // Working (render) extent for the AMD provider's maxRenderSize; 0 keeps
+        // it equal to the swapchain extent.
+        uint32_t renderWidth = 0;
+        uint32_t renderHeight = 0;
         bool captureCompatible = false;
         bool hdr = false;
         bool hdr10 = false;
+        // Requested frame-generation multiplier (2 = one generated frame).
+        // Only the XeSS path consumes it today; >2 requires the provider unlock.
+        uint32_t fgMultiplier = 1;
         // Probe runs create their own window class name per process.
         std::wstring title = L"Veyra";
         HWND targetWindow = nullptr; // borrowed UI-owned child HWND; never destroyed by sink
@@ -77,6 +87,8 @@ public:
     IDXGISwapChain3* swapChain() const { return swapChain_.Get(); }
     XessPresenter* xess() const { return xess_.get(); }
     bool xessFailed() const { return xessFailed_; }
+    FsrFgPresenter* fsr() const { return fsr_.get(); }
+    bool fsrFailed() const { return fsrFailed_; }
 
     void shutdown();
 
@@ -103,11 +115,13 @@ private:
     UINT swapChainFlags_ = 0;
     bool pendingResize_ = false;
     bool xessFailed_ = false;
+    bool fsrFailed_ = false;
     ID3D12Device* device_ = nullptr;
     ID3D12CommandQueue* queue_ = nullptr;
     ComPtr<IDXGIFactory2> factory_;
     ComPtr<IDXGISwapChain3> swapChain_;
     std::unique_ptr<XessPresenter> xess_;
+    std::unique_ptr<FsrFgPresenter> fsr_;
     ComPtr<ID3D12Resource> backBuffers_[3];
     UINT backBufferIndex_ = 0;
     bool closed_ = false;

@@ -11,7 +11,7 @@ struct DashboardHistory {
         const bool active=s.running&&!s.image&&s.transport==engine::TransportState::Playing&&!s.applying;
         auto value=active?s.metrics.flow.enhancementProcessing.mean:std::optional<double>{};
         points.push_back(value);if(points.size()>120)points.pop_front();
-        const bool xess=s.applied.frameGenerationBackend==engine::FrameGenerationBackend::XeSS&&s.applied.multiplier>1;
+        const bool xess=s.applied.multiplier>1&&engine::presentSinkFrameGeneration(s.applied.frameGenerationBackend);
         const double actual=xess?s.metrics.flow.xessSdkSubmitFps:s.metrics.flow.presentSubmitFps;
         const double target=s.nominalSourceFps*(s.captureHalfRate?.5:1)*s.applied.multiplier;
         if(!active||!s.metrics.flow.rateWindowReady||target<=0){low=good=0;overloaded=false;return;}
@@ -36,13 +36,16 @@ inline void paintDashboard(HWND h,HDC dc,int w,int height,const engine::PlayerSn
     for(int i=0;i<4;++i){int x=left+i*(cw+gap);card(x,top,cw,58);text(names[i],x+6,top+7,cw-10,17,9,secondary);
         const auto& a=f.gpuTiming[size_t(stages[i])];std::wstring value=L"—";
         if(active){if(a.mean)value=std::format(L"{:.1f}",*a.mean);else if(s.metrics.gpu[size_t(stages[i])].state==diagnostics::SampleState::NotExecuted)value=(i==3&&s.applied.multiplier>1)?L"等待补帧":L"未开启";}
-        if(i==3&&s.applied.multiplier>1&&s.applied.frameGenerationBackend==engine::FrameGenerationBackend::XeSS)value=L"不可测";
+        // Present-sink FG backends now report an application-side GPU sample;
+        // show it instead of a hardcoded placeholder, and only say
+        // "sampling" while no sample has arrived yet.
+        if(i==3&&s.applied.multiplier>1&&engine::presentSinkFrameGeneration(s.applied.frameGenerationBackend)&&!a.mean)value=L"采样中";
         text(value,x+6,top+27,cw-10,24,14,textColor);
     }
     const int chartTop=104,chartH=std::max(92,height-188),bottom=chartTop+chartH+8,bw=(w-26)/2;
     card(10,chartTop,w-20,chartH);
-    const bool xess=s.applied.multiplier>1&&s.applied.frameGenerationBackend==engine::FrameGenerationBackend::XeSS;
-    text(advanced?L"精细数据":xess?L"增强处理耗时 · 不含XeSS FG":L"总增强处理耗时",20,chartTop+8,w-100,20,10,secondary);
+    const bool xess=s.applied.multiplier>1&&engine::presentSinkFrameGeneration(s.applied.frameGenerationBackend);
+    text(advanced?L"精细数据":xess?L"增强处理耗时 · 不含显示补帧":L"总增强处理耗时",20,chartTop+8,w-100,20,10,secondary);
     text(advanced?L"◂":L"▸",w-38,chartTop+5,24,24,14,secondary);
     if(!advanced){
     const auto extra=active?f.enhancementProcessing.mean:std::optional<double>{};
@@ -71,6 +74,6 @@ inline void paintDashboard(HWND h,HDC dc,int w,int height,const engine::PlayerSn
     text(L"当前状态",26+bw,bottom+6,bw-20,18,10,secondary);
     {AlphaGraphics draw(dc);Gdiplus::SolidBrush dot(Gdiplus::Color(255,GetRValue(color),GetGValue(color),GetBValue(color)));draw.get().FillEllipse(&dot,dip(h,27+bw),dip(h,bottom+35),dip(h,8),dip(h,8));}
     text(status,42+bw,bottom+27,bw-38,23,16,textColor);
-    text(xess?L"* 耗时不含XeSS FG · 队列不含SDK内部":L"增强阶段GPU计时 · 不含音频和呈现等待",12,height-18,w-24,16,8,secondary);
+    text(xess?L"* 帧生成耗时为应用侧计时，不含提供方内部插值":L"增强阶段GPU计时 · 不含音频和呈现等待",12,height-18,w-24,16,8,secondary);
 }
 }

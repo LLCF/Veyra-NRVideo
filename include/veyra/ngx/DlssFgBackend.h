@@ -1,8 +1,12 @@
 #pragma once
 
-// DLSS Frame Generation (DLSSG 2X) backend using the official NGX SDK 310.7
-// DLSSG helpers (Playbook section 14). V1 requests 2X only: one generated
-// frame per real-frame pair (MultiFrameCount = MultiFrameIndex = 1).
+// DLSS Frame Generation backend using the official NGX SDK 310.7 DLSSG helpers
+// (Playbook section 14). Multi-frame generation passes MultiFrameCount =
+// multiplier-1 and MultiFrameIndex = 1..count, so the backend supports 2X
+// through 6X (up to five generated frames per real-frame pair). The caller
+// must still validate the requested multiplier against the runtime's
+// MultiFrameCountMax capability before creating the feature; Blackwell
+// reports 5 (6X), Ada reports 1 (2X) unless the runtime gate is unlocked.
 //
 // Capability contract (Playbook 14.2): before Create, the caller must have
 // queried FrameGeneration.Available and logged GPU/driver/HAGS/runtime

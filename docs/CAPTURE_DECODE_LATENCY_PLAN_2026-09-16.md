@@ -1,10 +1,18 @@
 # 采集解码与延迟：最终架构实施方案（2026-09-16）
 
-状态：**方案文本**。包含两部分：①压缩格式（MJPEG/H.264/HEVC）的解码架构；②原生格式
-（YUY2/NV12/RGB…）的 N1–N4 优化。两者合起来的目标是"低延迟 + 顶级效果 + N/A/I 三家全覆盖"。
+状态：**方案文本，尚未施工**（本计划本体：压缩解码链路 + 原生 N1–N4）。包含两部分：①压缩格式
+（MJPEG/H.264/HEVC）的解码架构；②原生格式（YUY2/NV12/RGB…）的 N1–N4 优化。目标是一条架构做到
+"低延迟 + 顶级效果 + N/A/I 三家全覆盖"，不分期、不并行多套过渡形态。
 
-> 本文档在 main 工作区重建（原版位于隔离分支 `codex/framegen-fsr-dolby-20260916` 提交
-> `1028ddb`），并追加第 8 章"原生链路 N1–N4"。
+> **唯一权威版本（2026-09-16 晚统一）**：隔离分支旧版 `1028ddb` 与 main 重建版 `8a681d0`
+> 的内容已按并集并入本版（分支的实测依据/模块清单/施工顺序/验收表 + main 的 §8–§10 原生链路）。
+> 此后只维护本文档，合并时以本版为准。
+>
+> **相邻修复（不属本计划施工，但与本计划有交互）**：
+> - RGB24 采集方向修复（分支 `015f8a4`、main `87ad4cd`）：直连 RGB DIB 先协商 top-down，
+>   另加手动"画面上下翻转"开关。N1 要改写同一个 `copyCaptureSample`，方向契约是硬性约束（见 §8 N1）。
+>   本机没有 RGB24 设备，实机确认只能由受影响用户做（看 `[capture] DIB top-down request` 日志）。
+> - PS5 串流首帧中止修复（分支 `015f8a4`）：`2ffb5c7` 的 dangling else 回归，与延迟链路无关。
 
 ## 1. 实测依据（本机 RTX 5070 + AMD 核显 + USB3 采集卡）
 
@@ -26,70 +34,93 @@
 | 4K 采集回调：RGB565→BGR0 逐像素 | **8.41 ms/帧** | 微基准 |
 | 4K 对照：单次 16.6MB memcpy | 0.70 ms | 微基准 |
 
+完整排查过程、A/B 方法与全部原始数字见 [采集延迟调查报告](CAPTURE_LATENCY_INVESTIGATION_2026-09-16.md)。
+
+结论：**H.264/HEVC/AV1 可以靠系统硬解三家通吃；MJPEG 押不住硬解，必须我们自己解。**
+
 ## 2. 最终架构（压缩格式）
 
 ```
 采集卡 → UVC 驱动样本
-  ├─ 原生格式（§8 处理）
-  ├─ H.264 / HEVC / AV1（含 10bit） → FFmpeg D3D12VA（复用我们的 D3D12 设备/队列）
-  │        → AV_PIX_FMT_D3D12 纹理 → 图的硬件入口（已存在，文件播放就在用）
-  └─ MJPEG → 帧级并行软解（每帧独立）→ NV12 → 图的软件入口
+  ├─ 原生格式 YUY2/NV12/P010/RGB24/RGB32 → 现有原生路径（§8 N1–N4 处理）
+  ├─ H.264 / HEVC / AV1（含 10bit） → FFmpeg D3D12VA 解码（复用我们已有的 D3D12 设备/队列）
+  │        → 解出 AV_PIX_FMT_D3D12 纹理 → 图的硬件入口（已存在，文件播放就在用）
+  └─ MJPEG → 自研"帧级并行软解"（MJPEG 每帧独立，可多帧并行）
+           → NV12 帧 → 图现有的软件入口
                                    ↓
-        统一：显式颜色合同（BT.601/709/2020、full/limited、PQ/HLG）→ 增强 → 呈现(vsync=0+tearing)
+        统一：显式颜色合同（BT.601/709/2020、full/limited、PQ/HLG）
+              → GPU 色度/转换 → NR/超分/补帧 → 呈现（vsync=0 + tearing）
 ```
 
-**移除**：系统解码器 → 强制 RGB32 → SampleGrabber → NullRenderer（保留为诊断开关）。
+**彻底移除**：系统解码器 → 强制 RGB32 → SampleGrabber → NullRenderer 这条兼容路径（保留为诊断开关，不再走默认）。
 
-可行的三条依据：①图已有 `AV_PIX_FMT_D3D12` 硬件入口；②FFmpeg 的 D3D12VA 已包着我们自己的
-D3D12 设备（`FFmpegVideoDecoder::openD3D12VA`）；③构建里已有 H264/HEVC/AV1 的 D3D12VA 封装、
-没有 MJPEG 的（正好对应两条实现，不需要重建 FFmpeg）。
+### 为什么这条可行（不是画饼）
 
-## 3. 压缩链路模块改动
+1. **图已经有硬件纹理入口**：`EnhanceGraph` 支持 `AV_PIX_FMT_D3D12` 输入（`hardwareInputFrames_`），文件播放的 D3D12VA 就是走这条路 —— 采集压缩流复用同一入口，**不需要新的零拷贝管线**。
+2. **FFmpeg 已包着我们的 D3D12 设备**：`FFmpegVideoDecoder::openD3D12VA()` 用 `AVD3D12VADeviceContext` 包我们的 device/queue；采集侧复用同一套。
+3. **构建里已有需要的解码封装**：`CONFIG_H264/HEVC/AV1/VP9_D3D12VA_HWACCEL=YES`；**没有** MJPEG 的封装 → 正好对应"两条实现"。
+4. **能力探针已就绪**，可在任意机器上确认支持面（Intel 待跑）。
 
-| 模块 | 改什么 |
-| --- | --- |
-| `CaptureCardSource.cpp/.h` | 格式分类；压缩格式改 `ConnectDirect(设备pin→我们的 sink)`（不再 RenderStream+RGB32）；**视频 pin 缓冲协商**；解析 H.264/HEVC 的 sequence header 作 extradata |
-| `NativeCaptureSink.cpp/.h` | 接受压缩媒体类型，把 payload+时间戳交上层队列（压缩样本很小，拷一份即可） |
-| 新增 `CaptureDecodeQueue` | 有界队列 + 线程池；下游慢时丢旧帧（与现有 mailbox 语义一致） |
-| 新增 `CaptureDecoder` | 后端选择与三级回退：D3D12VA → 并行软解 → 单线程软解 |
-| `FFmpegVideoDecoder.*` | 抽出可复用的 D3D12VA 会话（设备/队列/池参数） |
-| `EngineController.cpp` | 采集分支接新入口；`[capture-timing]` 增加 `backend/decodeMs/queueDepth` |
-| `CapturePanel` / `SettingsWindow` | 格式排序标注（见 N3）；设备缓冲档位（见 N4） |
+## 3. 模块级改动清单
 
-## 4. 压缩链路施工顺序
+| 模块 | 改什么 | 关键点 |
+| --- | --- | --- |
+| `src/source/CaptureCardSource.cpp/.h` | ①格式分类：原生 / 压缩两族；②压缩格式改为 `ConnectDirect(设备pin → 我们的 sink)`，不再 `RenderStream`+RGB32；③对**视频**输出 pin 调 `IAMBufferNegotiation::SuggestAllocatorProperties`（现在只有音频做）；④解析 H.264/HEVC 媒体类型里的 sequence header 作为 `extradata` | 压缩类型不再要求 `captureMediaLayout`；记录实际 `cBuffers/cbBuffer` |
+| `src/source/NativeCaptureSink.cpp/.h` | 接受压缩媒体类型（不解析像素布局），把样本 payload + 时间戳交给上层队列 | 保持"借样+立即归还"，压缩样本必须**拷贝一份**（大小只有几十~几百 KB，远小于一帧未压缩数据） |
+| 新增 `src/source/CaptureDecodeQueue.cpp/.h` | 有界队列 + 工作线程池：压缩样本 → 解码 → 输出帧 | MJPEG 池化并行（2–4 路）；H.264/HEVC/AV1 走 FFmpeg D3D12VA（单路或 2 路）；下游慢时**丢旧帧**（与现有 mailbox 语义一致） |
+| 新增 `src/source/CaptureDecoder.cpp/.h` | 后端选择 + 回退：`D3D12VA(格式支持)→并行软解→单线程软解`；MJPEG 直接走并行软解 | 能力判定用 `ID3D12VideoDevice::CheckFeatureSupport`（复用探针逻辑，抽成 `decodeProfilesAvailable()`） |
+| `src/media/FFmpegVideoDecoder.*` | 抽出可复用的"D3D12VA 会话"（设备/队列/池参数），供采集解码复用 | 不改文件播放行为；`extra_hw_frames` 按最坏延迟给 2–3 |
+| `src/engine/EngineController.cpp` | 采集分支接入新入口；压缩路径的帧直接是 D3D12 纹理，原生路径不变；新增诊断字段（decodeBackend、每帧解码耗时、队列深度） | 现有 `[capture-timing]` 增加 `decodeMs`、`queueDepth`、`backend=` |
+| `apps/veyra/ui/CapturePanel.cpp` | 格式列表按"延迟成本"排序并标注：原生（最低）/卡内编码（+1~3 帧）/需系统解码（更高）；显示"需 CPU 解码"提示 | 4K60 且选到压缩格式时给一次建议 |
+| `apps/veyra/SettingsWindow.cpp` | 新增"设备缓冲：自动 / 最小 / 驱动默认"档位 | 默认=自动（按分辨率选择 cBuffers） |
+| `tests/integration/CaptureSourceTests.cpp` | 新增：压缩格式直连成功、后端选择与回退、缓冲协商数值、并行软解吞吐 | 真机可跳过（无卡时按现有约定） |
 
-①能力探测与帧契约 → ②压缩样本直连 → ③H.264/HEVC/AV1 硬解 → ④MJPEG 并行软解
-→ ⑤缓冲协商+UI（与 N4 合并）→ ⑥原生拷贝合并（与 N2 合并）→ ⑦清理默认路径 + 门禁 + 真机对比。
+## 4. 施工顺序（单一序列，不是分期方案）
 
-## 5. 压缩链路验收指标
+1. **能力与契约**：抽出 `decodeProfilesAvailable()`（探针逻辑）+ 定义"解码输出帧"契约（D3D12 纹理 或 NV12 CPU 帧）。
+2. **压缩样本直连**：压缩格式改 `ConnectDirect`，`NativeCaptureSink` 接受压缩类型并拷贝 payload；日志记录 subtype 与字节数。
+3. **H.264/HEVC/AV1 后端**：复用 FFmpeg D3D12VA，解出的纹理走图现有硬件入口；先保证"能出画面、颜色正确"。
+4. **MJPEG 并行软解**：线程池 + 有界队列 + 丢旧帧；输出 NV12 走现有软件入口。
+5. **缓冲协商 + UI**：视频 pin 协商、缓冲档位、格式排序标注。
+6. **原生格式拷贝合并**：sink 直接写进图中转缓冲（省一次整帧拷贝）。
+7. **清理与验收**：默认不再走 RGB32 兼容路径；跑完整门禁 + 真机对比。
+
+## 5. 验收指标（可量化，达不到不算完成）
+
+**本机可测（RTX 5070 + 这张 USB3 卡）**
 
 | 指标 | 目标 |
 | --- | --- |
-| 1080p60 MJPEG 全链路 callback→Present | ≤3.5 ms（现状 4.12） |
-| 4K MJPEG 每帧 CPU | ≤3 ms（现状 7.0+） |
-| 4K60 MJPEG 推算 | 每帧 CPU ≤3ms 且 `readAgeMs` ≤1 帧、`callbackFps` ≥名义 98%（不积压） |
+| 1080p60 原生，无增强 | callback→Present ≤ **3 ms**（现状 2.64，不许回退） |
+| 1080p60 MJPEG | callback→Present ≤ **3.5 ms**（现状 4.12） |
+| 4K（尽可能高帧率）MJPEG | 每帧 CPU ≤ **3 ms**（现状 7.0+） |
+| 4K MJPEG 4K60 推算 | 每帧 CPU ≤ 3 ms 且 `readAgeMs` ≤ 1 帧、`callbackFps` ≥ 名义 98%（**不出现积压**） |
 | H.264/HEVC | 解码在 GPU：每帧 CPU ≤1 ms，颜色与软解逐像素差 ≤2 code |
+| 颜色一致性 | 同一画面：压缩路径输出与"软解参考"逐像素差 ≤ 阈值（RGB32 路径作对照） |
 | 回退 | 任一级失败自动降级，不断流；日志写明后端 |
-| 门禁 | 合同 180 项、delivery 短测、预设/UI 合同全过 |
+| 门禁 | 修复合同 181 项、delivery 短测、预设/UI 合同全过；采集/导出既有行为不回归 |
 
-## 6. 压缩链路风险与对策
+**必须真机（本机替代不了）**：见 §10。
+
+## 6. 风险与对策
 
 | 风险 | 对策 |
 | --- | --- |
-| AMD 要求 reference-only allocations | 帧池按该约束建；失败回退并行软解并记日志 |
-| 卡的 MJPEG 可能是 4:2:2（N 卡只硬解 4:2:0） | MJPEG 一律走并行软解；确认 4:2:0 后再考虑启用硬解 |
-| UVC 的 H.264 sequence header 形式不一 | 同时支持 `MPEG2VIDEOINFO` 与 in-band SPS/PPS；解析失败回退软解 |
-| 并行软解与 NR/SR 抢 CPU | 线程数 = min(4, 核数-2)，占用可见 |
-| 驱动/码流兼容失败 | 三级回退（D3D12VA → 并行软解 → 单线程软解） |
-| 缓冲压太小丢帧 | 档位制（自动/最小/驱动默认），默认自动，丢帧计数可见 |
+| AMD 要求 **reference-only allocations**（探针 flags 已给出） | 解码帧池按该约束创建；初始化失败时记明确日志并回退并行软解 |
+| 卡的 MJPEG 可能是 **4:2:2**（N 卡只硬解 4:2:0） | 不押注硬解：MJPEG 一律走并行软解；若确认是 4:2:0 再启用 D3D12 MJPEG 加速 |
+| UVC 的 H.264 媒体类型 sequence header 位置/形式不一 | 同时支持 `MPEG2VIDEOINFO`(SPS/PPS) 与采样内 in-band SPS/PPS；解析失败→回退软解并记录 |
+| 并行软解和 NR/SR 抢 CPU | 线程数默认 = min(4, 核数-2)，可在诊断里看到占用；GPU 侧业务不受影响 |
+| 驱动/码流兼容导致解码失败 | 三级回退（D3D12VA → 并行软解 → 单线程软解），任何一级失败都不断流 |
+| 缓冲压到最小引发丢帧 | 档位制（自动/最小/驱动默认），默认自动；丢帧计入 `captureDropped` 并在 UI 显示 |
+| 颜色回归 | 引入"软解参考帧"作为对照测试；颜色合同沿用现有显式解析，不新增隐式转换 |
 
 ## 7. 明确不做（边界）
 
 - 不动导出链路（NVENC/MF、码率、CFR 逻辑）。
-- 不动 NR/SR/补帧算法与调度。
-- 不动文件播放路径（D3D12VA 只做"抽出来复用"）。
-- 不引入新的第三方二进制依赖。
-- 不宣称"整体延迟 X ms"：卡内部、DWM、显示器三段不可控，只能用真机端到端测量下结论。
+- 不动 NR/SR/补帧算法与其调度。
+- 不动文件播放路径（D3D12VA 文件解码只做"抽出来复用"，不改变其行为）。
+- 不引入新的第三方二进制依赖（复用已批准的 FFmpeg 构建能力；若将来需要 NVDEC 直连再单独审批）。
+- 不宣称"整体延迟 X ms"：卡内部、DWM、显示器三段不在我们控制内，只能靠真机端到端测量给结论。
 
 ## 8. 原生链路（未压缩格式）优化：N1–N4 全部实施
 
@@ -101,6 +132,11 @@ D3D12 设备（`FFmpegVideoDecoder::openD3D12VA`）；③构建里已有 H264/HE
 - **改动**：`copyCaptureSample` 对 UYVY/YVYU/BGR24/RGB555/RGB565 只做"按行原始字节拷贝"；
   `EnhanceGraph` 入口接受这些 packed 布局；着色器用**一个带 packing 常量的统一变体**，
   保留现有 `Yuy2ToLinear`/`RgbToLinear` 行为。
+- **方向契约（硬性）**：这次改的 `copyCaptureSample` 同时承担 2026-09-16 的 RGB24 方向修复：
+  RGB DIB 按协商后的 `biHeight` 符号决定翻转、手动"画面上下翻转"按样本生效（YUV 连色度行一起翻）。
+  N1 只准把逐像素转换挪走，不准改动方向判定与传递；完成后
+  `veyra_capture_color_tests.exe` 的方向断言（bottom-up 读最后一行 / top-down 直通 / 手动翻转对
+  两种输入都反相 / NV12 色度行跟随）必须继续全过，`--capture-flip` 烟测必须继续 exit 0。
 - **验收**：
   - 4K RGB565 采集回调每帧 **≤1.2 ms**（现 8.41）；4K BGR24 **≤1.5 ms**（现 3.88）；
     4K UYVY **≤1.2 ms**（现 2.22）；4K YUY2 不回退 ≤1.0 ms；
@@ -151,10 +187,11 @@ N4 → N3 → N1 → N2（N4/N3 便宜且立刻可测；N1 要动 shader 与入�
    **如实报告"该卡无收益"**，不得把未生效项写进收益。
 2. **逐像素格式必须显著改善**：RGB565/UYVY/BGR24 的采集回调每帧成本相对 §1 基线
    **至少下降 50%**（目标见 N1）。
-3. **颜色零回归**：N1 各格式与旧路径逐像素差 ≤2 code；P010(HDR) 路径不受影响。
+3. **颜色与方向零回归**：N1 各格式与旧路径逐像素差 ≤2 code；P010(HDR) 路径不受影响；
+   RGB DIB 方向契约（见 N1）断言全过。
 4. **稳定性**：4K60 连续 30 分钟（含 3 次分辨率切换、2 次暂停/恢复）无花屏、无丢帧尖峰、
    RSS 增长 ≤50 MB、无句柄泄漏。
-5. **门禁**：合同 180 项、`delivery.ps1` 短测、预设/UI 合同全过；采集/导出/图片路径无回归。
+5. **门禁**：修复合同 181 项、`delivery.ps1` 短测、预设/UI 合同全过；采集/导出/图片路径无回归。
 6. **可回退**：N1、N2 各自独立开关，出问题无需改版本即可切回旧路径。
 
 ### 8.3 原生链路真机要求
@@ -178,4 +215,7 @@ N4 → N3 → N1 → N2（N4/N3 便宜且立刻可测；N1 要动 shader 与入�
 1. Intel 显卡跑 `veyra_decode_profile_probe.exe`（只读），确认 D3D12 解码支持面；
 2. 一张真 4K30/4K60 卡：MJPEG 采样格式（4:2:0/4:2:2）、改前/改后每帧成本、掉帧率；
 3. 能输出 UYVY/BGR24/RGB565 的卡：N1 的改前/改后（否则只能合成样本验证）；
-4. 相机端到端（240fps 拍主机画面 + 显示器）：改前/改后 + OBS/PotPlayer 同条件对比。
+4. 相机端到端（240fps 拍主机画面 + 显示器）：改前/改后 + OBS/PotPlayer 同条件对比；
+5. 能输出 RGB24/BGR24 的卡（相邻修复 `015f8a4`/`87ad4cd` 的实机验收，可与第 3 项同卡同轮做）：
+   确认 `[capture] DIB top-down request … accepted=0/1` 与画面方向；若 accepted=0 仍倒置，
+   勾选面板"画面上下翻转"兜底。

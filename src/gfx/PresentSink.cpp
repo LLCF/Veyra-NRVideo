@@ -121,13 +121,79 @@ bool PresentSink::initialize(ID3D12Device* device, ID3D12CommandQueue* queue,
     scd.Flags = tearingSupported_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
 
     ComPtr<IDXGISwapChain1> swapChain1;
+    // Backend switch bookkeeping. A retained AMD proxy and a live XeSS wrapper
+    // each hold the window's single flip-model swapchain; the DXGI swapchain
+    // only dies once every reference (including the provider's) is gone, and
+    // a second CreateSwapChainForHwnd for the same window fails while it
+    // lives. Tear down whichever backend this session leaves before the next
+    // one initializes, and never pass a non-empty ComPtr::GetAddressOf() to
+    // an initializer (that overwrites without releasing and leaks the old
+    // reference, keeping the slot occupied for the process lifetime).
+    if(fsr_&&!desc.fsr&&desc.xess){
+        // Deliberately keep the proxy alive. Verified on this machine: once
+        // the FidelityFX proxy has wrapped the window, destroying it (even in
+        // the documented order, with a drained queue and the final COM
+        // reference released) leaves the window unable to host ANY later
+        // swapchain - XeSS's create and native create both fail, and the
+        // provider cannot recreate its own proxy either (ERROR_RUNTIME_ERROR).
+        // Retaining the proxy keeps the session playable; generation is
+        // switched off while the proxy presents plain frames.
+        fsr_->disableGeneration();
+    }
+    if(xess_&&!desc.xess){
+        log::info("present","releasing the XeSS swapchain");
+        waitForQueueIdle();
+        xess_.reset();
+        for(auto& b:backBuffers_)b.Reset();
+        swapChain_.Reset();
+    }
+    if(desc.fsr&&!fsr_){
+        fsr_=std::make_unique<FsrFgPresenter>();
+        IDXGISwapChain4* proxy=nullptr;
+        const uint32_t renderW=desc.renderWidth?desc.renderWidth:scd.Width;
+        const uint32_t renderH=desc.renderHeight?desc.renderHeight:scd.Height;
+        if(!fsr_->initialize(device,queue,factory_.Get(),hwnd_,scd,renderW,renderH,&proxy,desc.fgMultiplier)){
+            // Like XeSS: a missing or incompatible local runtime must never
+            // prevent basic playback.
+            log::warn("present", "AMD FSR frame generation unavailable; falling back to native presentation");
+            fsr_.reset();
+        }
+    }
+    if(fsr_){
+        if(!desc.fsr)fsr_->disableGeneration();
+        IDXGISwapChain4* proxy=fsr_->swapchainHandle();
+        ComPtr<IDXGISwapChain3> proxied;
+        if(proxy==nullptr||FAILED(proxy->QueryInterface(IID_PPV_ARGS(&proxied)))){
+            log::error("present", "retained FSR proxy swapchain is no longer usable");
+            status = Status::WindowFailure;
+            return false;
+        }
+        swapChain_=proxied;
+        log::info("present", std::format("using the retained AMD proxy swapchain (frame generation {})", desc.fsr?"on":"off"));
+    }
     if(desc.xess){
+        // The XeSS initializer writes through the pointer: release any
+        // existing reference first so the previous swapchain (native or a
+        // proxy that was kept) is actually released instead of leaked.
+        if(xess_){
+            // Re-initializing the same backend (a settings change): the old
+            // wrapper owns the window's swapchain slot until it is destroyed.
+            for(auto& b:backBuffers_)b.Reset();
+            swapChain_.Reset();
+            xess_.reset();
+        }
+        for(auto& b:backBuffers_)b.Reset();
+        swapChain_.Reset();
         xess_=std::make_unique<XessPresenter>();
-        if(!xess_->initialize(device,queue,factory_.Get(),hwnd_,scd,swapChain_.GetAddressOf())){
+        if(!xess_->initialize(device,queue,factory_.Get(),hwnd_,scd,swapChain_.GetAddressOf(),desc.fgMultiplier)){
             // XeSS is an optional experimental presenter. A missing or
             // incompatible local runtime must not prevent basic playback.
             log::warn("present", "XeSS FG initialization failed; falling back to native presentation");
-            swapChain_.Reset();
+            // Keep a retained AMD proxy when one exists: the provider keeps
+            // the HWND's DXGI swapchain alive for the process lifetime, so a
+            // fresh CreateSwapChainForHwnd for the same window is known to
+            // fail and the proxy still presents plain frames.
+            if(!fsr_)swapChain_.Reset();
             xess_.reset();
         }
     }
@@ -221,6 +287,7 @@ ID3D12Resource* PresentSink::currentBackBuffer()
 bool PresentSink::present(Status& status)
 {
     xessFailed_=false;
+    fsrFailed_=false;
     const UINT syncInterval = desc_.vsync ? 1 : 0;
     const UINT flags = (!desc_.vsync && tearingSupported_) ? DXGI_PRESENT_ALLOW_TEARING : 0;
     ++attemptedPresentCount_;
@@ -230,6 +297,7 @@ bool PresentSink::present(Status& status)
         ++presentCount_;
         backBufferIndex_ = swapChain_->GetCurrentBackBufferIndex();
         if(xess_&&!xess_->afterPresent()){xessFailed_=true;status=Status::WindowFailure;return false;}
+        if(fsr_)fsr_->afterPresent();
         return true;
     }
     ++failedPresentCount_;
@@ -346,6 +414,15 @@ void PresentSink::shutdown()
     }
     swapChain_.Reset();
     xess_.reset();
+    // The AMD proxy context is deliberately NOT destroyed here. Verified on
+    // this machine: once the FidelityFX proxy wrapped the window, destroying
+    // it (documented order, drained queue, final COM reference released)
+    // leaves the window unable to host any later swapchain - XeSS and native
+    // creation both fail and the provider cannot recreate its own proxy
+    // (ERROR_RUNTIME_ERROR). Retaining the proxy keeps FSR sessions playable
+    // across settings changes; it is torn down at process/engine teardown,
+    // where the provider's own destructor crash was fixed by flushing its
+    // presentation queue and clearing the destroyed context pointers.
     log::info("present", "sink-shutdown: sub-step window-destroy-last");
     if (hwnd_ != nullptr && !desc_.targetWindow) {
         DestroyWindow(hwnd_);

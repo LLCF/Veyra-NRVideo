@@ -214,6 +214,12 @@ int main(int argc, char** argv)
     int durationSeconds = 0;
     int maxFrames = 60;
     bool native = false, diag = false, legacyMotion = false;
+    // SR stage selection for deterministic A/B dumps: -1 = SR stage requested
+    // but disabled (plain scale to the work extent), 0 = DLSS SR, 5 = AMD FSR.
+    int srMode = 0;
+    // Watchdog: a hung provider (FidelityFX + GPU-based validation was measured
+    // to stall) must never be able to wedge an unattended run again. 0 = off.
+    int timeoutSeconds = 0;
     std::string dumpPath;
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     for (int i = 1; i < argc; ++i) {
@@ -222,6 +228,8 @@ int main(int argc, char** argv)
         if (arg == "--diag") diag = true;
         else if(arg=="--legacy-motion")legacyMotion=true;
         else if (arg == "--native") native = true;
+        else if (arg == "--sr-mode") srMode = std::atoi(value().c_str());
+        else if (arg == "--timeout-seconds") timeoutSeconds = std::max(0, std::atoi(value().c_str()));
         else if (arg == "--frames") maxFrames = std::atoi(value().c_str());
         else if (arg == "--dump") dumpPath = value();
         else if (arg == "--corpus") corpusManifest = value();
@@ -234,6 +242,20 @@ int main(int argc, char** argv)
         else { std::fprintf(stderr, "unknown arg %s\n", arg.c_str()); return 2; }
     }
     if (durationSeconds < 0 || durationSeconds > 240 || maxFrames <= 0) return 2;
+    if (timeoutSeconds > 0) {
+        // Unattended hardening: a provider that stalls mid-dispatch (measured
+        // with FidelityFX + GPU-based validation) must die on its own instead of
+        // holding memory/VRAM until the machine runs out - 2026-09-16 incident.
+        std::thread watchdog([timeoutSeconds]() {
+            std::this_thread::sleep_for(std::chrono::seconds(timeoutSeconds));
+            std::fprintf(stderr, "[quality-probe] watchdog: %d s budget exceeded, terminating (hung provider?)\n",
+                         timeoutSeconds);
+            std::fflush(stderr);
+            TerminateProcess(GetCurrentProcess(), 4);
+        });
+        watchdog.detach();
+        std::fprintf(stderr, "[quality-probe] watchdog armed: %d s\n", timeoutSeconds);
+    }
     if (corpusManifest.empty() && inputPath.empty()) {
         std::fprintf(stderr, "--corpus or --input required\n");
         return 2;
@@ -280,7 +302,26 @@ int main(int argc, char** argv)
     ddesc.commandSlotCount = 4;
     if(diag){ComPtr<ID3D12Debug> debug;ComPtr<ID3D12Debug1> gbv;
         if(FAILED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)))||FAILED(debug.As(&gbv)))return 1;
-        debug->EnableDebugLayer();gbv->SetEnableGPUBasedValidation(TRUE);ddesc.enableDebugLayer=true;}
+        debug->EnableDebugLayer();
+        // GPU-based validation does not complete the FidelityFX upscale dispatch:
+        // the standalone probe (tools/fsr_upscale_probe --diag, minimal verified
+        // states) stalls before its dispatch line, so this is a validation-layer
+        // interaction, not a state bug in the graph. Keep the debug layer for the
+        // FSR SR configuration and say so instead of hanging the run.
+        // GPU-based validation roughly triples working-set requirements; the
+        // 2026-09-16 incident was system virtual-memory exhaustion while it ran.
+        MEMORYSTATUSEX memory{};
+        memory.dwLength = sizeof(memory);
+        const bool enoughMemory = GlobalMemoryStatusEx(&memory) &&
+            memory.ullAvailPhys >= (6ull << 30);  // 6 GiB headroom
+        if(srMode==int(veyra::engine::kVideoSrFsr)){
+            veyra::log::warn("quality-probe","GPU-based validation skipped for the AMD FSR SR configuration (validation layer does not complete the FidelityFX upscale dispatch); debug layer stays on");
+        }else if(!enoughMemory){
+            veyra::log::warn("quality-probe","GPU-based validation skipped: less than 6 GiB available physical memory (it is the most memory-hungry mode in this tool)");
+        }else{
+            gbv->SetEnableGPUBasedValidation(TRUE);
+        }
+        ddesc.enableDebugLayer=true;}
     Status st = Status::Ok;
     if (!ctx.initialize(ddesc, st)) { noteFail("device init failed"); return 1; }
     veyra::gfx::CommandSlotRing ring;
@@ -337,7 +378,8 @@ int main(int argc, char** argv)
         gd.sourceWidth = srcW;
         gd.sourceHeight = srcH;
         gd.workWidth = native ? srcW : 3840; gd.workHeight = native ? srcH : 2160;
-        gd.enableSr = nrOn && (srcW != gd.workWidth || srcH != gd.workHeight);
+        gd.enableSr = nrOn && (srcW != gd.workWidth || srcH != gd.workHeight) && srMode >= 0;
+        if (srMode > 0) gd.videoSrQuality = uint32_t(srMode);
         actualWorkW = gd.workWidth; actualWorkH = gd.workHeight;
         gd.enableNr = nrOn;
         gd.enableFg = false;

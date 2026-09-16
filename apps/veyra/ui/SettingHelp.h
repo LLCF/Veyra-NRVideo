@@ -35,7 +35,8 @@ inline const wchar_t* settingHelp(int id){
     case 205:return L"选择内容节奏。采集60→30适合60Hz信号里重复的30帧游戏内容；真60帧别硬砍半。时间戳仍保留。";
     case 206:return L"让框选区域少受NR改动，最多4块。只管NR，不给超分和补帧当保镖。";
     case 207:return L"选择DLSS SR或RTX视频超分，以及视频超分质量。两条路线各有脾气，试着看画质和耗时。";
-    case 208:return L"选择DLSS或实验XeSS补帧。XeSS目前为预览2X，不支持视频导出；别只看名字，看实际效果。";
+    case 208:return L"选择DLSS、实验XeSS或AMD FSR补帧。XeSS/FSR的生成帧只存在于显示交换链，导出管线拿不到；导出时会自动改用DLSS补帧，显卡不支持则关闭补帧，提示和日志都会写明。别只看名字，看实际效果。";
+    case 508:return L"导出码率：只决定导出文件的大小与画质，不影响预览。自动＝编码器恒定质量档（NVENC CONSTQP / 系统编码器质量模式）。H.264 一般 10-40 Mbps 够用，4K 或高动态建议 60-150；HEVC 同等画质可以取更低。";
     case 209:return L"选择运动估算后端。NVOF、FidelityFX、GPU DIS负责看出物体怎么动。DIS是实验算法，走通用计算单元，可能和NR抢活干，不保证更快；选它不会换掉你的补帧方式，也不会解锁AMD NR。";
     case 211:return L"把增强参数恢复为内建默认。调迷路了就走这里，保存的用户预设不会被删。";
     case 213:return L"在画面上拖框添加NR保护区域，Esc取消。把不想被改的地方圈出来。";
@@ -54,7 +55,7 @@ inline const wchar_t* settingHelp(int id){
     case 313:return L"给选中的预设换名，配方不变。";
     case 314:return L"删除选中的预设，需要确认；当前画面不会跟着被删。";
     case 315:return L"设为下次启动的增强默认配方。软件仍从日常模式打开。";
-    case 500:return L"H.264兼容性广，HEVC通常更省空间。HDR视频须选HEVC，保存为Main10 / PQ；别把HDR硬塞进普通H.264。";
+    case 500:return L"H.264兼容性广，HEVC通常更省空间。HDR视频须选HEVC，保存为Main10 / PQ；别把HDR硬塞进普通H.264。编码器按显卡自动选择：N卡用NVENC（零拷贝最快），A卡/I卡用系统硬件编码（驱动自带的H.264/HEVC编码器），HDR导出仍需N卡。";
     case 501:return L"选保存位置并导出视频。参数在开始时冻结，NR按原生处理；低延迟预览顺序不带进导出。";
     case 502:return L"保存当前图片或视频帧。精彩的一瞬间，留下来。";
     case 503:return L"暂停或继续导出任务，不是暂停你正在看的视频。";

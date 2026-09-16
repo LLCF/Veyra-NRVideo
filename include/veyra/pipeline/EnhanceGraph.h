@@ -40,6 +40,7 @@ namespace veyra::guidance { class AmdOpticalFlow; class GpuDisOpticalFlow; }
 namespace veyra::gfx {
 class D3D12DeviceContext;
 class CommandSlotRing;
+class FsrSrBackend;
 }
 
 namespace veyra::ngx {
@@ -53,6 +54,10 @@ class NvOfSession;
 
 namespace veyra::pipeline {
 struct ColorDescription;
+
+// One generated-frame texture per (parity, subframe): 2 parities x 5 generated
+// frames = 6X multi-frame generation. Sized once, reused for every FG backend.
+inline constexpr unsigned kGeneratedPoolSlots=10;
 
 struct EnhanceGraphDesc {
     uint32_t sourceWidth = 0;
@@ -142,7 +147,7 @@ public:
     bool nextFrameSlotAvailable()const {
         const unsigned slot=unsigned(realFrameIndex_%2);
         if(!realLeases_[slot].expired())return false;
-        for(unsigned i=slot;i<6;i+=2)if(!generatedLeases_[i].expired())return false;
+        for(unsigned i=slot;i<kGeneratedPoolSlots;i+=2)if(!generatedLeases_[i].expired())return false;
         return true;
     }
     // Nonblocking. The scheduler polls at a GPU-ready/deadline boundary; no
@@ -197,6 +202,18 @@ public:
     DXGI_FORMAT outputFormat() const { return hdr10Output()?DXGI_FORMAT_R10G10B10A2_UNORM:desc_.hdrOutput?DXGI_FORMAT_R16G16B16A16_FLOAT:DXGI_FORMAT_R8G8B8A8_UNORM; }
     bool highQualityPresentation() const { return desc_.highQualityPresentation; }
     bool xessEnabled() const { return desc_.enableFg && !desc_.noFeatures && !desc_.stillImage && desc_.frameGenerationBackend==engine::FrameGenerationBackend::XeSS; }
+    bool fsrEnabled() const { return desc_.enableFg && !desc_.noFeatures && !desc_.stillImage && desc_.frameGenerationBackend==engine::FrameGenerationBackend::Fsr; }
+    // Frame generation implemented by the present sink (XeSS, FSR) instead of
+    // the in-graph DLSSG path; both consume the same guidance motion texture.
+    bool presentSinkFg() const { return xessEnabled() || fsrEnabled(); }
+    // AMD FSR upscaling replaces the SR stage; it is a FidelityFX effect, not
+    // an NGX feature, so it also works on non-NVIDIA adapters.
+    bool fsrSrRequested() const { return desc_.enableSr && !desc_.stillImage && desc_.videoSrQuality==engine::kVideoSrFsr; }
+    // Out of line: the backend type is only forward declared here.
+    bool fsrSrEnabled() const;
+    // Requested output multiplier (2 = one generated frame). Consumed by the
+    // present sink so the XeSS provider knows how many frames to generate.
+    uint32_t fgMultiplier() const { return desc_.fgMultiplier; }
     ID3D12Resource* presentMotion(uint32_t slot) const { return presentMotion_[slot%2].Get(); }
     ID3D12Resource* presentDepth() const { return depthTex_.Get(); }
     bool presentMotionValid(uint32_t slot) const { return presentMotionValid_[slot%2]; }
@@ -240,6 +257,11 @@ private:
     bool initZeroAndDepthTextures();
     bool initNvof();
     bool initNgxFeatures();
+    bool initFsrSr();
+    // RTX 40 series: opens the Blackwell-only multi-frame gate in the mapped
+    // DLSS-G runtime. Never touched on any other architecture.
+    void applyAdaMfgUnlock();
+    void applyAmpereMfgUnlock();
     bool createComputePasses();
 
     gfx::D3D12DeviceContext& context_;
@@ -278,8 +300,8 @@ private:
     ComPtr<ID3D12Resource> confTex_;
     ComPtr<ID3D12Resource> flowTex_;
     ComPtr<ID3D12Resource> depthTex_;
-    ComPtr<ID3D12Resource> genFrame_[6];
-    ComPtr<ID3D12Resource> fgDisable_[6],fgDisableReadback_[6],fgDisableInit_;
+    ComPtr<ID3D12Resource> genFrame_[kGeneratedPoolSlots];
+    ComPtr<ID3D12Resource> fgDisable_[kGeneratedPoolSlots],fgDisableReadback_[kGeneratedPoolSlots],fgDisableInit_;
     ComPtr<ID3D12Resource> nrZeroMotion_;
     ComPtr<ID3D12Resource> nrZeroDepth_;
     ComPtr<ID3D12Resource> nvofRawTex_;
@@ -312,6 +334,9 @@ private:
     std::unique_ptr<guidance::GpuDisOpticalFlow> gpuDis_;
     std::unique_ptr<ngx::VideoSrBackend> videoSrBackend_;
     std::unique_ptr<ngx::DlssFgBackend> fgBackend_;
+    std::unique_ptr<gfx::FsrSrBackend> fsrSrBackend_;
+    ComPtr<ID3D12Resource> fsrSrDepth_, upFsrSrDepth_;
+    size_t fsrSrDepthPitch_=0;
     NVSDK_NGX_Parameter* ngxParams_ = nullptr;
     NVSDK_NGX_Handle* nrHandle_ = nullptr;
     uint64_t nrResult_ = 0;
@@ -322,7 +347,7 @@ private:
     // Per-run state.
     uint64_t realFrameIndex_ = 0;
     uint64_t epoch_ = 0;
-    std::weak_ptr<FrameLease> realLeases_[2],generatedLeases_[6];
+    std::weak_ptr<FrameLease> realLeases_[2],generatedLeases_[kGeneratedPoolSlots];
     uint32_t nextListSlot_ = 0;
     uint64_t uploadFences_[2] = {};
     // FFmpeg may recycle a hardware surface as soon as its AVFrame is freed.

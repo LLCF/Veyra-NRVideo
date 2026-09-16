@@ -1,14 +1,182 @@
 # 2026-09-11 继续修复目标模式执行中
 
-## 2026-09-16 RGB24 采集倒像修复并入 main（用户选定 A+B，不做强制转换 C）
+## 2026-09-16 计划文档统一与状态刷新（纯文档，无代码改动）
 
-用户完成隔离分支上的两个修复后，要求把修复并入 main 并建立 git 存档。审计发现 main（693db07）**不包含** 2ffb5c7（采集音频手动入口），因此 PS5"无法打开视频"回归只存在于隔离分支与由其打出的 1.3.1beta 测试包；main 原本没有该缺陷。本次在 main 只移植 RGB24 方向修复，并把同一处 `else` 补上大括号防呆（行为不变）。
+用户指示"先把计划改好"（处理合并前发现的文档分叉）。本次只改 docs：
 
-内容：直连 RGB DIB（RGB24/RGB32/ARGB32/555/565）且 `biHeight>0` 时先向驱动协商 top-down（`SetFormat` 负高度），接受则按实际连接类型不翻转，拒绝则保持原符号翻转；新增采集面板"画面上下翻转"开关（`captureFlipVertical`，按样本立即生效、预设 schema v12→v13、`--capture-flip` 仅诊断）；`copyCaptureSample` 支持可选翻转参数（RGB 与 YUV 通用，YUV 色度行同步翻转）；采集颜色测试补上真正的方向断言（此前单元用例自证式、GPU 用例每行相同，上下翻转测不出来）。
+- `docs/CAPTURE_DECODE_LATENCY_PLAN_2026-09-16.md`：把隔离分支旧版 `1028ddb` 与 main 重建版 `8a681d0` 按**并集**重写为唯一权威版本（分支的实测依据/模块级清单/施工顺序/验收表 + main 的 §8–§10 原生链路）。新增：N1 的 **RGB24 方向契约硬性约束**（改写 `copyCaptureSample` 不得改动方向判定，方向断言与 `--capture-flip` 烟测必须继续过）、相邻修复状态（`015f8a4`/`87ad4cd` 与 PS5 首帧中止）、调查报告链接、门禁项数改为当前分支实测的 181 项、§10 追加 RGB24 实机验证项。main 上的旧版本在被合并时以本版为准。
+- `docs/FRAMEGEN_FSR_DOLBY_PLAN_2026-09-16.md`：实施结果表从凌晨快照刷新到当前事实——A-2 节奏 hook **已移植并实测**（`ef016ba`）、40 系 Ada 解锁 **已实现**（`9179449`+`aa168ab`）、30 系原生 DLSS-G **已实现**（`4154733`+`3dd5add`）、杜比 **解码 `56bb0f6` + 直通 `275c3f2` 两条路都已实现**；保留各项未验证边界（40/30 实机、真实位流卡端到端）。
+- `docs/FRAMEGEN_FSR_DOLBY_STATUS_2026-09-16.md`：头部日期与关键提交节点、§二 A-2 小节结论、§三 验收清单同步到当前：main 现在到 `87ad4cd`、EXE 哈希不再冻结（PE 时间戳漂移）、40 系改用正式解锁路径（不再用 `VEYRA_TEST_FG_FORCE_MULTIPLIER`）、30 系看 `[ampere-mfg]`、杜比两条路径的期望日志。
 
-验证：`cmd.exe /c out\build\veyra-build-x64-release.cmd` exit 0（166/166）；`veyra_capture_color_tests.exe` failures=0（新增方向用例全 PASS）；`veyra_repair_contract_tests.exe` 145 checks 0 failures；`veyra_repair_preset_tests.exe <tmp>` 48 组迁移 + 全字段往返通过；实卡烟测 `capture:0:0:-1:0 --smoke-seconds 8 --capture-flip` exit 0、frames=458、failed=false、captureDropped=0，日志 `[capture-flip] manual vertical flip=1`；delivery 短测 23/23 PASS，48.69 秒，`logs/delivery/94abadd1321948ad84fb46a1c1920e0a/result.json`，EXE SHA256 `A7AF379D7DD7F6183965CED7E01CA7ED423EE747CBAB28AE514C65E3127B8CFD`。
+验证：纯文档改动，未构建、未重跑门禁（代码与二进制未动）；`git status` 仅这三个文档 + 本条目。未合并 main、未推送、未发布。
 
-未执行：本机无 RGB24 设备，`DIB top-down request` 协商是否被问题卡接受仍待受影响用户实机确认（被拒绝时用面板开关兜底）；未打包、未发布、未 push。分支侧两个修复的存档为 `015f8a4` / tag `checkpoint/ps5-rgb24-fixes-20260916`，main 侧为 tag `checkpoint/main-rgb24-orientation-20260916`。完整记录见 [RGB24 采集倒像修复](CAPTURE_RGB24_ORIENTATION_2026-09-16.md)。
+## 2026-09-16 RGB24 采集倒像：直连 top-down 协商 + 手动上下翻转（用户选 A+B，不做强制转换 C）
+
+用户反馈部分设备用 RGB24 时画面上下颠倒，其他格式正常、其他软件正常。判定：全链路只有 `captureMediaLayout` 按 DIB 的 `biHeight` 符号决定是否翻转（`copyCaptureSample`），YUV 一律按 top-down 读、不看符号；这些设备的 RGB24 媒体类型声明方向与实际样本不一致。RGB24 自 1.1.0 起是原生直连（1.0.x 走系统 RGB32 转换），因此只有该格式暴露该矛盾。旧测试是自证式（单元用例用同一公式算期望）或用等值横条纹（GPU 用例），方向没有任何断言。
+
+**A. 直连 RGB DIB 先协商 top-down**（`src/source/CaptureCardSource.cpp`）：对 Bgr32/Bgra32/Bgr24/RGB555/565 且 `biHeight>0` 的 caps 类型，先把 `biHeight` 取负再 `SetFormat`；成功则重新 `GetFormat` 并按实际连接类型解析（负高度→不翻转），失败则恢复原符号、保持按符号翻转。新增日志 `[capture] DIB top-down request hr=0x… accepted=0/1 bottomUp=…`。诚实的 bottom-up 设备两种结果都保持正确。
+
+**B. 采集面板"画面上下翻转"开关**（立即生效）：新增 `EnhancementSettings::captureFlipVertical`（默认关；加入 `sameVideoConfiguration` 的实时字段，切换不重建图）；`CaptureCardSource::setVerticalFlip`（原子标志，DirectShow 回调按样本生效，RGB 与 YUV 都支持，YUV 连色度行一起翻转；`copyCaptureSample` 增加可选 flip 参数）；引擎在 configure 前、start 前、重连、每帧与实时设置块同步；采集面板新增 checkbox 15 与帮助文本，AppShell 接线；`--capture-flip` 仅作诊断/烟测。预设 schema v15→v16（行尾追加 bool；v1–v15 旧文件仍可读，老版本读到 v16 会拒绝并保留原文件）。
+
+**验证**：
+
+- `veyra_capture_color_tests.exe`：failures=0；新增方向断言全部 PASS（bottom-up RGB24 读最后一行、top-down 直通、手动翻转对两种输入都反相、NV12 色度行跟随翻转）。
+- `veyra_repair_contract_tests.exe`：181 checks 0 failures（含 "capture vertical flip defaults off"）。
+- `veyra_repair_preset_tests.exe <tmp>`：66 组 v4–v14 迁移 + 全字段往返（含 v16 翻转字段）通过，exit 0；测试内的 schema 版本断言同步改为 16。
+- `cmd.exe /c out\build\veyra-build-x64-release.cmd` exit 0（93/93）。
+- 实卡烟测：`veyra.exe "capture:0:0:-1:0" --smoke-seconds 10 --no-nr --no-sr --no-fg --capture-flip` exit 0、`frames=573`、`failed=false`、`captureDropped=0`，日志 `[capture-flip] manual vertical flip=1`（YUY2 路径翻转后仍稳定）；最终构建再复测 8 秒 exit 0。
+- 总开关关闭时也立即生效：`applySettings` 的 enhancement-off 分支改为与 `forceSdrPreview` 一起转发 `captureFlipVertical`（否则首次默认"全关"状态下勾选不会下发）。
+- delivery 短测 PASS，42.84 秒，`logs/delivery/3f749a7819ae4ae6842eab73ed04e235/result.json`，最终 EXE SHA256 `D7539CBC7CC8D5728DAE559175912181375E1FF62FE0C9F1D15A937FAC93098A`（gate 自身仍标 `capture=awaiting_user_capture_test`）。
+
+**未执行（如实记录）**：本机没有 RGB24 设备，"A 的 top-down 协商在问题卡上是否被接受"仍须受影响用户实机验证；若驱动拒绝协商，B 的开关可立即救场。未打包、未发布、未提交/推送。
+
+**补记（同日，存档后）**：另一个 Agent 在本分支追加了 `4efc0d5`（D3D12 解码 profile 探针，工具目标）与 `1028ddb`（解码/延迟方案文档），本修复提交为 `015f8a4`（tag `checkpoint/ps5-rgb24-fixes-20260916`）。重建后 EXE SHA256 变为 `19BC2C306EE7D73FF27B1CCB12D4EB70A9F8752114AA576694186E1ACFF1E6CB`：链接器未使用 /Brepro，PE 时间戳使逐次链接的哈希不同，源码未变；交付闸门在分支顶端复跑 PASS，42.39 秒，`logs/delivery/45aefe5dcbdc44f79ecba8167b83f1f0/result.json`。另：这两个修复已并入 main（提交 `87ad4cd`，tag `checkpoint/main-rgb24-orientation-20260916`）；PS5 回归本就不在 main，main 侧只同步了 `else` 大括号防呆。
+
+## 2026-09-16 PS5 串流"无法打开视频"回归修复（音频入口插入语句改坏 else 绑定）
+
+用户反馈 1.2 能串流、1.3.1beta 测试包不行，面板提示"无法打开视频，请查看诊断"。
+
+**根因（代码与日志双向确认）**：`2ffb5c7`（2026-09-16 10:40 采集音频手动入口）在 `EngineController::run()` 的 `#ifdef VEYRA_ENABLE_REMOTEPLAY … }else` 与"打开源"检查之间插入 `if(physicalCapture)captureSource.setAudioIngress(...)`。C++ 的 `else` 只绑定紧随其后的单条语句，这一插入把原本绑定 open 检查的 `else` 静默改绑到新语句上，导致 **PS5 串流也执行 `activeSource->open(od)`**；`RemotePlaySessionSource::open()` 固定返回 false → `status("无法打开视频，请查看诊断",true)` → break。因为 remote 分支先阻塞等待第一帧，失败固定发生在解码器产出第一帧后 3~5ms：日志只见 `teardown begin … cancelled=true`，没有任何 graph/present 行。失败包为 `E:\App\Veyra-1.3.1beta-win64-portable`（= `final-30x86-r4`，EXE SHA256 `2DF130AC…`），日志 `E:\App\Veyra-1.3.1beta-win64-portable\logs\veyra-app.log`（三次尝试 10:49:57 / 10:50:16 / 10:50:29，另 11:18–11:19 两次干净进程复现）。
+
+**版本对照（git 验证）**：v1.2.0 与 v1.3.0 tag 的 `}else` 直接绑定 open 检查（结构正常；1.2.0 桌面测试版本机 18:51 实测串流可用，仓库 `logs\veyra-app.log` 10:51:49–10:56:11 段）；含 `2ffb5c7` 的 r2/r3/r4 与 `final/` 1.3.1beta 包全部中招。文件/采集卡不受影响（它们的路径本来就要走这条检查）。
+
+**修复**（`src/engine/EngineController.cpp`，+11/-5）：把 `setAudioIngress` 移到 `#ifdef` 分支链之前（仍早于 `captureSource.configure`，采集语义不变），并给 `}else{ … }` 补大括号，防止以后再次插入语句改变绑定。
+
+**验证**：
+
+- `cmd.exe /c out\build\veyra-build-x64-release.cmd` exit 0（增量 23/23，RemotePlay ON，patched FFmpeg/dav1d 保持）。
+- `scripts/gates/delivery.ps1 -Root . -BuildDirectory out/build/audio-continuity-repair-20260915` PASS，46.98 秒，`logs/delivery/206a0c5ffe7f4e2eb4f72f42146455f3/result.json`，EXE SHA256 `91A7116F78A3ACE3105C20894A3E9332A04C3CDA4E997FB6E897955297E5B6D1`（gate 自身仍标 `capture=awaiting_user_capture_test`）。
+- 实机采集卡烟测 `veyra.exe "capture:0:0:-1:0" --smoke-seconds 12 --no-nr --no-sr --no-fg`：exit 0、`frames=694`、`failed=false`、`captureDropped=0`，音频入口调用顺序未回归。
+
+**未执行（如实记录）**：真实 PS5 串流复测（需要主机；修复后第一次连接须由实机确认能到 `display-color`/图初始化）；未重打 1.3.1beta 测试包（等实机确认后再打包替换）。工作区改动未提交、未推送。
+
+## 2026-09-16 帧生成 / FSR / 杜比：隔离分支夜间施工（未合并 main）
+
+用户要求"开工前创建 GIT 存档、建立隔离区分支、所有操作在隔离区进行、人工验收合格前不允许合并 main"。已建 tag `checkpoint/pre-framegen-fsr-dolby-2026-09-16`（main `693db07`）与分支 `codex/framegen-fsr-dolby-20260916`。
+
+本轮完成并实测：
+
+- **DLSS 6X**（提交 `35dd632`）：生成池 3→5/parity、`FrameBatch` 4→6、present SRV 堆 8→12、DLSSG 后端上限 3→5、倍率 1..6；新增能力驱动的倍率 UI 与"超上限拒绝/按上限降级并提示"。实测 RTX 5070：`--fg-multiplier 6` → `multiFrameMax=5`、445 真帧 / 2215 生成帧、exit 0；模拟 40 系上限（`VEYRA_TEST_FG_MULTIFRAME_MAX=1`）→ 4X 请求降级为 2X 且保留补帧。UI 合同 PASS、修复合同 146 项 0 失败、预设 48 组 PASS。
+- **XeSS MFG 解锁**（提交 `4124a9d`）：移植 OptiScaler（GPL-3.0，`70676c5f`）五处补丁到 `XessMfgUnlock`；模块身份（大小 + SHA-256 + PE 标识）与逐字节校验、事务安装、回读校验、上下文销毁后回滚；`XessPresenter` 接入真实上限查询与 `SetNumInterpolatedFrames`。DLL 审计五处原始字节全匹配；实测 RTX 5070 `--fg-xess --fg-multiplier 4` → `maxInterpolatedFrames=3`、`framesPresented=4`、563 真帧 / 1677 生成帧、exit 0、`rolled back 5/5`；归属写入 `THIRD_PARTY_NOTICES.md`。
+- **杜比位流探测 + 40 系实验开关**（提交 `e68b79d`）：采集音频 subtype 分类与每设备汇总；参考采集卡实测 `bitstream types=0 [none] pcmTypes=15`，证明该设备硬件层不提供杜比位流。`VEYRA_TEST_FG_FORCE_MULTIPLIER=1`（仅测试）供 4060 机器直接请求 3X/4X，观察真实插帧/重复帧/黑屏。
+- delivery 短测 23/23 PASS、48.9 秒（`logs/delivery/89286afbb28d4785925ae3772e0409c4`），EXE SHA256 `9B8EA46AECF7A95E99472B7A31D60F9B5B9D8008D7B6BE0966C261095FDD0263`。
+
+未完成（如实记录）：XeSS 节奏 hook（`XeFGPacing`）未移植、>2X 生成帧间距未测量；40 系 DLSS MFG 解锁（RenoDX 的架构比较 + PTX 中点修正 + flip metering）未实现；30 系原生 2X 未开始；AMD FSR（帧生成 4.0.x / 超分）未开始（SDK 2.3.0 未下载）；杜比直通/解码未实现。完整状态、验收清单与边界见 [隔离分支施工状态](FRAMEGEN_FSR_DOLBY_STATUS_2026-09-16.md)。未合并 main、未推送、未发布。
+
+### 2026-09-16 40 系 6X 完整移植（用户要求"能加一起加了"）
+
+用户指出上一轮对 40 系上游的审计过粗，要求重新研究并把 dashdogy 项目里能加的实现合并进产品。复核与施工记录：
+
+- **重新审计（逐仓库打开原文，不看 GitHub 侧栏）**：`sdli1995/dlssg_for_sm86` 实测**无任何 `.c/.cpp/.h` 源码、无 LICENSE 文件**（`git ls-files` 只有 18 个 DLL + ini + 文档；README 自述 GPLv3 但无许可证文本），本体是伪装系统 DLL 的代理加载器。真正含源码的 40 系上游是 `dashdogy/RTX40MFG-Unlock`（MIT，v1.3.3，commit `33b41835dc39c5d8ab1ef93efb2449be31139c09`，143 个源文件），我们此前的 C-2 只搬了其中一部分。
+- **缺口一：`ngx_mfg_gate` count/index validator 补丁**（`source/native/ngx_mfg_gate.h`）。pattern `84 d2 0f 84 03 01 00 00 be 05 00 00 00`（`test dl,dl / jz / mov esi,5`），近跳头 `0f 84` → `eb 04` 强制走 `mov esi,5`。这是上游 v1.3.3 changelog "Fixed MFG getting stuck at 2x and related freezing, flickering and black screens" 的直接机制之一。Veyra 的 310.7 构建里该 pattern **唯一匹配**（文件偏移 0x64b42 / RVA 0x65742），jz 目标 `41 83 f8 01` 校验通过，但此前完全没有打这个补丁。
+- **缺口二：三段 SHA-256 身份链 + 结构字段校验**（`source/native/midpoint_fix.cpp` legacy profile）。source fatbin（98408 B）`5A8E0284…`、解压 PTX（99362 B）`46C05996…`、重建 fatbin（127200 B）`19FB3CD5…`，外加 sm120/sm89 条目字段（28024/28017/90490、30384/30379/99362/0x2041）。我们此前的校验只有 PE 时间戳 + PTX 长度。
+- **哈希复现（决定性证据）**：用 `out/build/ptx_patch_digest.py` 从本地 `runtime_local/nvidia/nvngx_dlssg.dll` 复现重建流程，输出完整 fatbin SHA256 = `19FB3CD5500BFD1FC88F96C36B381E096D6AB1DFC7B1DB02A04D40A00849104B`，与上游 profile 记录**逐位一致**。上一轮报告"输出哈希不一致"是拿补丁后 PTX 的哈希（`44FEF743…`）去比全 fatbin 哈希（`19FB3CD5…`）——比错了对象，本次更正。
+- **实现**（`include/veyra/ngx/AdaMfgUnlock.h` / `src/ngx/AdaMfgUnlock.cpp`）：新增 mfg gate 补丁点（唯一匹配 + 偶地址 + 分支目标 `cmp r8d,1` 三重校验，VirtualProtect 写 + FlushInstructionCache，失败整体回滚）；三段 BCrypt SHA-256 闸（source fatbin → PTX → 重建 fatbin；**重建哈希作为发布闸，与上游字节流不一致即拒绝并回滚**）；sm120/sm89 字段校验；`distinctFatbins` 统计（本机=1，8 个 descriptor 指向同一 fatbin）。`scan/State` 字段、探针、`EnhanceGraph` 预检与日志同步更新；UI 侧保留现有 1/3/5 能力驱动逻辑（`nvidia_mfg_policy` 语义一致）。
+- **负向测试抓出一个既有崩溃 bug**：kernel fix 被拒绝时的回滚路径直接向只读页写回原字节（无 VirtualProtect），触发即 ACCESS_VIOLATION（0xC0000005）。修复为 VirtualProtect→写→恢复保护。该路径此前从未被执行过（原 probe 只测成功路径），修复后三场景全部干净。
+- **本机证据（RTX 5070，结构 + 补丁机制，非 40 系行为）**：原版 `--apply-test` → `applied=1 readBack=1 restored=1`，gates=2 / mfgGate=1(1) / descriptors=8；篡改 fatbin 1 字节 → `kernel fix refused: source fatbin SHA-256 does not match` + 完整回滚，无崩溃，exit 1；篡改 gate pattern → 预检拒绝 exit 1。delivery 短测 PASS（`logs/delivery/d0a266a1e549402ca26c2c8ec8d27022/result.json`）。
+- **30 系**：复查后维持搁置。dashdogy v1.3.3 有 30 系实验路径，但 `BUILD.md` 原文写明依赖**不在源码树的 validated SM86 kernel cache**（"A source checkout alone cannot reproduce the DLL without them"）；`sdli1995` 无源码不可搬。决策文档与 notices 已更新。
+- **未验证**：40 系实机行为（6X 真实插帧质量、Ada 缺硬件 flip metering 的冻结风险）仍需用户实机验收；XeSS/FSR/杜比各项边界与上一段一致。
+- **测试包（本轮重打）**：`C:\veyra-test-packages\final-40x6x\Veyra-1.3.1beta-win64-portable.zip`，469,753,546 字节，SHA256 `B0581D3628F744805EBC4324509E32473B8EABECD147D64C96C6193F052B6848`；包内 `Veyra.exe` SHA256 `BBBF0C4E4AB8EC346928E8DD2CD6E073DD28085482AAEAD5E3B20ECBB7A80C68`（与构建树一致）、`runtime/experimental/nvngx_dlssg.dll` 仍为审计原版 `135EAF07…`（补丁只存在于进程内存，磁盘文件未改动）。包内 EXE `--smoke-seconds 5` 播放 4K30 GTAVI exit 0。旧包 `C:\veyra-test-packages\final\` 保留未动（被本包取代）。
+
+### 2026-09-16 RTX 30（sm_86）原生 DLSS-G 解析与实现（用户授权 A 路线）
+
+用户决策："直接开工 A，FSR 终究只是替代方案，还是在隔离区操作"。施工全部在 `codex/framegen-fsr-dolby-20260916` 分支。
+
+- **结构解析（本机实测，非推断）**：审计版 310.7 `nvngx_dlssg.dll` 含 69 个 fatbin，**sm_86 目标 0 个**（100 个 sm_89 PTX + 31 个 sm_120 PTX + 31 个 sm_89 cubin）。引用结构：25 个程序 fatbin 位于 8 组×25 条 48 字节注册表记录的 +8 字段（共 200 个指针槽），38 个 `.rdata` 神经网络 fatbin + 6 个 `.data` 辅助 fatbin（font/capture/clear）各由一条 RIP-relative `lea` 引用（共 44 处）；两处 `cmp …, 0x1b0` 架构门。
+- **上游对照**：dashdogy v1.3.3 的 `ampere_gpu.cpp`（`FindUniqueSm89Ptx`/`BuildAmpereSm86Fatbin`/发布事务）正是同一机制；他的三个 gate pattern（metadata/create-validation/sl-availability）在 310.7 上 **0 匹配**（为 310.9 fixture 设计），故按 310.7 自有结构重新实现，gate 采用 40 系同款两处架构比较（0x1b0→0x170，30/40/50 全放行）。
+- **实现**：`include/veyra/ngx/AmpereMfgUnlock.h` + `src/ngx/AmpereMfgUnlock.cpp`（提交 `4154733`）：把全部 69 个 fatbin 重建为单条目 sm_86 PTX（拒绝 `.e4m3/.e5m2/wgmma./tcgen05./sm_90/sm_120` 等 Ada/Blackwell 专有构造），temporal 程序附带与 40 系一致的中点修正；重建集用 VirtualQuery 在模块 ±1.25 GiB 内分配（保证 lea 位移可编码），发布 200 个指针槽 + 44 个 lea + 2 个 gate，全部记录并可回滚。
+- **预验证**：发布前用私有 CUDA context 逐个 `cuModuleLoadDataEx` 加载重建程序，任一被拒即整体拒绝。本机（5070）实测 `preflight=69/69`。
+- **产品接入**（提交 `3dd5add`）：`EnhanceGraph::applyAmpereMfgUnlock()` 在 FG 能力查询前调用（仅 RTX 30 设备窗口触发）；provider 在 30 系上仍会报 FG 不可用（Ada/Blackwell 门控），当审计版解锁已安装时宽限继续并把缺失的 MultiFrameCountMax 补为审计上限 5（显式更小的报告值仍被尊重）；shutdown 与 Ada 解锁对称释放。
+- **本机证据**（仅结构与机制）：probe `veyra_dlssg_ampere_probe` → scan 全绿（runs=8/200 槽/25+38+6 fatbin/44 lea/2 gate/temporal 唯一）、apply `applied=1 preflight=69/69 readBack=1 restored=1`；delivery 短测 PASS `logs/delivery/548a606d92484286806f272d4744d2a7/result.json`。
+- **未验证（如实）**：RTX 30 实机行为——provider 是否还有 310.7 特有的额外 gate、sm_86 内核的实际插帧质量/性能、以及 dashdogy 自述的 "very early and experimental" 风险（可能部分配置不工作）。需要 30 系机器按 `Veyra.exe --fg-multiplier 6 --smoke-seconds 15 <视频>` 取证并回传日志。
+- **测试包（含 30 系解锁，当前交付版）**：`C:\veyra-test-packages\final-30x86-r2\Veyra-1.3.1beta-win64-portable.zip`，469,773,588 字节，SHA256 `8933605B22527E6393BC0995CE5A8E0A0317716E90C1F7A57FB9BFF9ED1B2E80`；包内 `Veyra.exe` SHA256 `1C19D80EC6A4A4FCDCACC05121C35EF7A153CBD004986F33F0C13CA71B7AF389`（与构建树一致）、`nvngx_dlssg.dll` 仍为审计原版 `135EAF07…`；包内 EXE 4K30 烟测 exit 0。此包同时包含 40 系 6X、50 系 6X、XeSS、FSR、杜比兜底与采集音频手动选择，可一次覆盖 30/40/50 三台机器验收。较早的 `final-30x86\` 包同内容、旧 zip 时间戳，保留作存档。后续 FSR/XeSS 修复（本节末）在此包之后，需要重新打包才包含。
+
+### 2026-09-16 FSR 补帧停止 / XeSS 切换 / 崩溃三项排查与修复（`870358c`）
+
+用户报告"FSR 开启后完全不补帧、显示受限"与"XeSS 切换不过去"。以生产日志（`E:\App\Veyra-1.3.1beta-win64-portable\logs\veyra-app.log`）+ UI 级脚本复现定位：
+
+- **FSR"完全不补帧"根因＝视图守卫**：`VideoPresenter` 用 `view==PreviewView{}`（浮点精确比较）门控 present-sink FG。用户滚轮缩放后 center 定格在 `0.49875…`（日志实证 `[preview-view] zoom=1 center=0.4987547,0.50221384`），此后 XeSS/FSR 每帧 `enabled` 恒 false，provider 静默不生成、无任何错误。修复：生成区域改为跟随视图（contain×zoom+pan，裁剪到窗口、偶对齐），移除精确比较。实测（`ui-fsr-xess-switch.py`）：滚轮缩放后 FSR 生成继续（118→238）。
+- **teardown 崩溃（排查中实抓）**：`FsrFgPresenter::shutdown()` 被执行两次（显式调用＋析构），而 FFX `DestroyContext` 不清空 context 指针 → 第二次对已销毁 context 调 `Dispatch` → AV in `amd_fidelityfx_framegeneration_dx12.dll`（WER 0xC0000005，偏移 0x10b9a9）。修复：销毁后置空指针、销毁前排空 present 队列、**不再 FreeLibrary loader**（卸载时同样 AV）、每步 flush 日志便于取证。
+- **FSR→XeSS 实机边界（结论）**：FidelityFX 代理占用窗口唯一的 flip-model swapchain 槽位；**完整销毁**（官方顺序＋排空＋释放最后 COM 引用，refcount 实测归 2→0）后窗口仍无法承载任何新 swapchain——XeSS 创建、native 创建、甚至 FFX 自己重建代理全部失败（逐一实测）。因此改为：保留代理、拒绝切换、回滚到健康的 FSR 会话（无崩溃，FSR 继续生成：477 帧）；恢复路径给 UI 提示"切到 XeSS 需要重启软件"。`xefgSwapChainD3D12InitFromSwapChain` 包装路径已实现，留作 FFX 行为变化后的入口。
+- 附带修复：`PresentSink` 重新初始化前 `swapChain_.Reset()`（`ComPtr::GetAddressOf` 直接写入会泄漏旧引用）；测试脚本 `scripts/acceptance/ui-fsr-xess-switch.py`（PASS）。
+- 证据：delivery `logs/delivery/899266286a2f46cda5480bae0a3721bb/result.json`。
+- **（后续已补：见下节 2026-09-16 杜比位流直通）**
+
+### 2026-09-16 杜比/DTS 位流直通输出（用户要求"杜比直通先做"）
+
+- **端点能力探测**（`tools/bitstream_audio_probe`，`veyra_bitstream_probe`）：枚举渲染端点，在独占模式下对 AC-3 / E-AC-3(DD+，Atmos 载体) / DTS / TrueHD 逐一 `IsFormatSupported`。**本机实测**：Realtek Digital Output（SPDIF）**AC-3 与 DTS 均为 exact 支持**；模拟输出、虚拟声卡、NVIDIA HDMI（S2700）全部 `0x88890008`（不支持的格式）。**E-AC-3/TrueHD 全端点不支持**——Windows 端点上 DD+/Atmos 直通声明面窄是平台现实，探测如实报告。
+- **`sink::BitstreamAudioSink`**（`include/veyra/sink/BitstreamAudioSink.h` / `src/sink/BitstreamAudioSink.cpp`）：独占 WASAPI（16-bit 立体声 IEC 61937 载波、500ms 缓冲），自动选择第一个精确接受目标载波的活跃端点（可传入首选端点），按字节流转发压缩数据（IEC 61937 自同步，无需重打包），帧对齐由内部尾缓冲保证。自主实现，无第三方代码。
+- **接线**（`CaptureCardSource`）：在"位流优先"模式（`captureAudio=2`）且输入为 IEC 61937 封装时，**先尝试直通**（按 kind 选择 AC-3/DD+/TrueHD/DTS 载波，采样率取媒体类型）；端点不支持或连接失败则**回退到现有的软件解码路径**（G-2），不改变自动/强制 PCM 模式的任何行为。直通会话不经过 `CaptureAudioSession`（位流无法调音量/无法软件同步，这是直通的固有语义）；视频调度不依赖该会话（`videoPresented` 双路径判空，安全）。
+- **验证**：`veyra_bitstream_probe 48000 --write-test` 在本机 SPDIF 上打开独占 AC-3 载波并写穿数据通路（`endpoint[1] wrote 245760 bytes through the exclusive carrier`）；delivery 短测 PASS `logs/delivery/e09ea0d7fdb34e38b238ee12dd255fc5/result.json`。UI 文案与帮助同步更新（"位流优先：优先直通给功放（无直通时解码为 PCM）"）。
+- **未验证（如实）**：本机采集卡不提供位流（G-1），**没有端到端的真实 Dolby 源验证**；需要持"支持位流输入的采集卡 + 支持解码的功放/回音壁"的用户按"位流优先"模式实测并回传 `capture-audio-bitstream` 日志（应出现 `passthrough to receiver kind=... endpoint="..."`）。E-AC-3/Atmos 直通依赖端点驱动声明，当前主流 Windows 端点普遍不支持。
+
+### 2026-09-16 FSR 统计显示修复：SDK 提交归零 / 补帧受限误报 / 帧生成耗时不可测
+
+用户报告 FSR 开启后"SDK提交 0.0 fps + 当前状态：补帧受限"，而实测日志显示 FSR 在正常补帧（`real=479 generated=466 presented=945`）。排查定位两处统计缺陷并修复：
+
+- **提交计数相位丢失**（EngineController）：present-sink FG 的 `xessSdkSubmitFps` 原来按"每次提交前后计数差"喂入；AMD provider 在**自己的线程**上报呈现，回调落在提交窗口之后时差值恒 0（XeSS 的计数在渲染线程同步维护所以"秒出"）。改为**累计对齐**：每次提交后喂"累计值 - 已喂值"，任何迟到的增量都会在下一次提交补上；settings 变化时随 presenter 一起归零。UI 的"补帧受限"判定（`actual<target*0.95` 连续 8 次）以该值为输入——归零被修复后误报随之消失。
+- **帧生成耗时"不可测"**（VideoPresenter/EngineController/UI）：present-sink FG 现在在提交列表上对 XeSS/FSR 的应用侧工作（输入拷贝、barrier、provider prepare）打 `FgBatch` GPU 时间戳；`measured.gpu[FgBatch]` 在 present-sink 模式下取 presenter 样本（图内 DLSS FG 仍用 graph 样本）；Dashboard/Panel 去掉硬编码"不可测"，无样本时显示"采样中"。实测 `gpuFgBatchP95Ms=0.197`（4K30 + FSR 2X）。
+- 证据：本机 30 秒 FSR 运行 `real=839/generated=838/presented=1677`、`presentSubmitFps=30.00`、`gpuFgBatchP95Ms=0.197`；delivery 短测 PASS `logs/delivery/442f41e29b684e7e87174bc075d4e282/result.json`。
+- **边界（如实）**：FgBatch 为**应用侧**计时（提供方内部的插值工作不经过我们的队列，无法打点）；用户机器上"SDK提交=0"的原始触发未能在本机复现（本机 r3 正常），累计对齐是针对该症状的根治性修法，需要用户在 r4 包上复测确认。
+
+### 2026-09-16 采集卡延迟全面排查（只排查，未改产品代码）
+
+用户要求"找出延迟低的原因和延迟高的原因，再给优化方案，不要擅自动手"。审计+实测报告见 [采集卡延迟排查](CAPTURE_LATENCY_INVESTIGATION_2026-09-16.md)。本轮**未改任何产品代码**，也**没有强杀 OBS** 去抢占采集卡。
+
+- **实测（OBS 虚拟摄像头 NV12 1440p60，同一条 DirectShow 原生路径，12 秒窗口）**：无特效 callback→Present 返回 p95 **12.45ms**（60.00fps、0 丢帧）；NR+SR **24.44ms**；NR+SR+FG2X 20.35ms（schedulingWait 6.0ms）；NR+SR+`--realtime` **12.51ms**。历史实卡（2026-09-07，MJPEG 1080p50）全关 3.67ms / NR 4.77ms / NR+FG 16.28ms。指标是软件内部计时，UI 已标注"非 HDMI→显示总延迟"。
+- **实卡今天测不了**：`USB3 Video` 被 OBS 独占，`Run` 返回 0x800705AA（ERROR_NO_SYSTEM_RESOURCES）；枚举显示该卡有 YUY2 1080p60/4K18 与 MJPEG 1080p60/4K18 两族格式。
+- **低延迟原因（代码证据）**：自实现原生终点滤波器替代 SampleGrabber（借样、无额外队列）＋`ConnectDirect` 零转换器＋容量 1 mailbox/双自有缓冲（慢消费者丢旧保新）＋等显示链路就绪再 Run（deferredRun）＋FG 最多等半个输入间隔（≤33.33ms）＋固定 System Clock＋呈现 `vsync=0`+tearing（`SyncInterval=0`）。
+- **高延迟原因（分层）**：①选到 MJPEG/H.264（"MPEG"）走兼容路径：卡内编码器 + 系统解码器重排序 + 颜色转换 + SampleGrabber CPU 拷贝 + NullRenderer，合计 100–300ms；格式默认是"记上次，否则第 0 项"，很多卡把 MJPEG 排前面、4K60 只能选它。②`audioSync=Automatic` 的 A/V 补偿会主动等视频（置信带 80ms/目标上限 1500ms、手动 ±250ms），这部分不体现在 callback→Present 指标里。③NR/SR/FG 在高分辨率高帧率下实测让管线从 12.45→24.44ms。④DWM/vsync 相位与刷新率漂移再 +1 帧。⑤USB 链路/卡固件/电视后处理属用户侧。
+- **方案（未实施）**：P0 格式"低延迟优先"排序与标注、解码器 `CODECAPI_AVLowLatencyMode`、视频 pin `IAMBufferNegotiation` 最小缓冲、音频同步补偿加上限；P1 采集延迟分层面板、WASAPI 低延迟档、独占全屏选项；P2 采集改用 Media Foundation + D3D11 纹理共享、卡内 H.264/HEVC 走硬件解码。
+- **待用户配合的实测**：释放卡后在 YUY2 与 MJPEG 之间 A/B（命令见文档 §6），以及用手机慢动作拍"主机画面+显示器"得到端到端光子延迟（同条件对比 OBS/PotPlayer）。反馈用户只需给四行日志（`[capture] configured upstreamSubtype=`、`[present] vsync/tearing`、`[capture-timing]` 那行、音频同步模式）。
+
+### 2026-09-16 字幕系统重做：多格式 / 内嵌轨 / 双语 / 样式 / 延时 / 自动对齐
+
+用户："字幕你列出来的功能全部都加上吧……先修字幕，其他不动"。实现、证据与未做项见 [字幕系统](SUBTITLE_ENGINE_2026-09-16.md)；**未触碰 4K HEVC 解码、播放/导出链路**。
+
+- **引擎**：`Subtitles.*` 重写为"轨道"模型——外挂 SRT/ASS/SSA/WebVTT（扩展名 + 内容嗅探，UTF-8/UTF-16LE，16MB 上限）；ASS 解析 Script Info(PlayRes)/Styles(字体/字号/颜色 BGR→ARGB/Bold/Italic/Outline/Shadow/Alignment/Margin)/Events(`\N` 换行、覆盖块剥离、`\an`/`\pos`)；`rebuildIndex()` + 二分 `cuesAt()` 取代每帧线性扫描；`loadEmbeddedSubtitleTracks()` 用 FFmpeg 逐轨解码内嵌文本字幕（实测 Matroska 给的是 `Layer,0,Style,...,Effect,Text` 形态，两种前缀都能正确剥离且不吃正文逗号），PGS/DVB 无解码器时列出并标注；`alignSubtitleToAudio()`（实验）用 8kHz 包络 + 全局 F1 + 50% 重叠门限做 ±30s 常数偏移对齐。
+- **渲染**：`SubtitleOverlay` 重写为带样式多行渲染（字体/字号/颜色/描边/阴影/背景条/对齐/边距/`\pos`），主字幕在下副字幕在上；修掉旧代码函数级 static GDI+ 对象在 `GdiplusShutdown` 后析构导致的 0xC0000005 退出崩溃（本轮实测踩到）。
+- **播放器**：打开文件自动加载同名外挂字幕 + 枚举内嵌轨（主字幕优先中文轨）；菜单分区提供开关/载入/重扫/主轨选择/副轨选择/延时(±1s,±50ms)/自动对齐/字号/描边/背景条/位置/字体切换；快捷键 `B`(开关) `Z`/`X`(延时∓50ms，Shift 为∓1s) `T`/`Y`(主/副轨循环)；`ui-preferences` 升到 v3（旧版可读）；新增测试用 CLI：`--subtitle-primary/-secondary/-offset-ms/-font-size/-no-outline/-background/-auto-align`。
+- **实测**：MKV 内嵌 SRT/ASS 正确出字（`a16-subs.mkv`）；外挂同名 ASS 自动加载（`\an8` 顶部 + 多行）；双语同帧输出两轨文本；`Z,Z,X,B` 按键延时 -50/-100/0ms 与关闭字幕；自动对齐在真值 -3000ms 的合成素材上给出 `shift=-3000ms score=0.949`。
+- **回归**：修复合同 180 项 0 失败（新增 10 项字幕检查，`veyra_repair_contract_tests` 因此链接 `veyra_engine` + FFmpeg 头）、预设往返 PASS、UI 合同 PASS、delivery 短测 PASS `logs/delivery/48d9555716234d7ca3e1ad254c78c37c/result.json`。
+- **未做（如实）**：OpenSubtitles 在线搜索/下载（需要 API key 与联网/隐私决定）；libass 级 ASS 特效（`\move`/`\t`/`\clip`/`\k` 等，需引入 libass 依赖链）；PGS/DVB 图形字幕（FFmpeg 未编解码器）；音轨选择（属音频管线，按"其他不动"未做）。
+
+### 2026-09-16 格式矩阵测试 + MKV 跳转排查（只测只查，未改产品代码）
+
+用户："各种视频格式的导入导出都测试一下确保没问题……有用户反馈 MKV 跳转要卡半分钟……这轮只做导入导出测试和问题排查，不要开始自顾自修复"。完整矩阵、命令与原始数据见 [格式矩阵与跳转排查](FORMAT_MATRIX_AND_SEEK_FINDINGS_2026-09-16.md)，素材在 `out/format-matrix/`（含驱动脚本 `run-seek.ps1`）。
+
+- **导入 20/20 通过**：MP4/MKV/MOV/AVI/WebM/TS/FLV × H.264/HEVC/HEVC10/VP9/AV1/MPEG-4/MPEG-2/ProRes，含 PCM、Opus、MP3、AAC 5.1、HDR PQ/HLG、内嵌字幕轨、多音轨、旋转元数据。仅 AVI 日志有一条解码告警但继续播放。
+- **导出 19/22 通过**：3 类被拒——① AVI（前几帧时间戳 0/50/66.7/83.3ms，非严格 CFR）；② 非标准恒定帧率（8.57fps：CFR 候选表只有 24/25/30/48/50/60/100/120 与 NTSC 档）；③ 真 VFR。另发现 PCM / MPEG 层 2 音频被原样复制进 MP4（第三方兼容性风险），而导出校验只验证视频帧。
+- **4K HEVC 播放失败（本轮最重发现，非回归）**：NVENC 产出的 4K HEVC（8/10bit、有无 B 帧）、以及**我们自己导出的 `export-4k-nr-vsr-fg.mp4`** 都在硬解时 `send_packet -22` → 回退软解 → `DXGI_ERROR_DEVICE_REMOVED (0x887A0005)` → 整场挂掉（0 帧）。系统 ffmpeg 走同一条 D3D12VA 路径**同样失败**（`hardware accelerator failed to decode picture`），软件解码正常；1440p/1080p HEVC 与 4K H.264 正常；**x265 生成的 4K HEVC 能硬解，NVENC 的不能**（同为 Main/L5.0）；旧包 `E:\App\Veyra-1.3.1beta-win64-portable` 同样失败 → 非本轮回归。需要其它机器复现确认驱动面/普遍面。
+- **MKV 跳转不是 MKV 的问题**：本机同一内容 A/B（1080p HEVC、2s GOP）MKV 17–62ms vs MP4 14–64ms；20s GOP 也只要 89–300ms；砍掉尾部索引 22–57ms；开 NR+SR 25–56ms。代码侧确认跳转后丢帧发生在进增强图**之前**（`EngineController` L803），不花 NR/SR/补帧时间。30 秒量级只可能来自：软解回退（软解 1080p60 HEVC 60–150fps × 长 GOP）、极长 GOP、慢存储、或 §3 的设备移除路径。定位只需用户两行日志：`[source-file] opened … hw=` 与 `[seek-latency] … firstPresentMs/decodedToTarget/drainAndDemuxMs`。
+- **其它实锤**：旋转元数据被忽略（竖拍视频横着放、导出也丢）；多音轨只用第一条（AAC 2ch 覆盖 AC3 5.1，无音轨选择 UI）。
+- **字幕现状**：只支持外挂 SRT（UTF-8/UTF-16LE，8MB/5万条上限）；同名 `.srt` 自动加载有，**时间轴对齐/延时调整没有**；MKV 内嵌 SRT/ASS 不读、无字幕轨选择，PGS/DVB 解码器未编入；无样式/双语；导出不烧录不封装；`subtitleAt()` 每帧线性扫描。建议功能清单（延时微调 → ASS/libass → 内嵌轨+轨选择 → 双语 → 自动匹配下载 → 音频指纹对齐 → 样式）见文档 §7。
+- **本轮未改任何产品代码**；未在其它显卡/驱动复现 4K HEVC；未取得反馈用户的 seek 日志。
+
+### 2026-09-16 导出编码器多厂商化（AMD/Intel 可导出）+ 可调码率
+
+用户："能不能换编码？让全部都支持导出？还有加个可以调整码率的功能"。完整方案、证据与边界见 [导出编码器与码率](EXPORT_ENCODER_BITRATE_2026-09-16.md)。
+
+- **现状确认**：导出此前硬性要求 NVENC，非 N 卡直接拒绝（AMD/Intel 用户导不出任何文件）；我们的 FFmpeg 是只解不编的定制构建（无 x264/amf/qsv/mf 编码器），所以"用 FFmpeg 的编码器"要重建 FFmpeg。
+- **实现**：新增 `VideoEncoder` 抽象与工厂（`include/veyra/sink/VideoEncoder.h`、`src/sink/VideoEncoderFactory.cpp`）：NVIDIA 走 NVENC（零拷贝不变），其余显卡走 Media Foundation 硬件 MFT；NVENC 被拒时自动回落 MF。`src/sink/MfVideoEncoder.cpp` 移植 FFmpeg `mfenc.c`（LGPL-2.1+，已记入 `THIRD_PARTY_NOTICES.md`）的 MFT 枚举/异步解锁/类型协商/ICodecAPI/事件循环/收尾流程，输入为 Veyra D3D12 图渲染的 NV12 经 readback 打包。
+- **两个真问题（本轮实测抓出）**：① 本机同时枚举到 `AMDh264Encoder` 与 `NVIDIA H.264 Encoder MFT`，取第一个会在无 A 卡时 `MF_E_HW_MFT_FAILED_START_STREAMING (0xC00D6D76)` → 改为按显卡厂商优选 + 逐候选完整协商；② 硬件 MFT 自己分配输出样本（替换 `out.pSample`），错误地取自己的空指针导致 300 帧全被丢弃、导出"成功"却 0 帧 → 已修，现 `drained submitted=300 written=300`。
+- **码率**：`EnhancementSettings.exportBitrateMbps`（0=恒定质量档，上限 300；不参与 `sameVideoConfiguration`，改码率不重建预览管线）；NVENC VBR(平均=峰值, VBV 半秒)、MF PeakConstrainedVBR；预设格式 v14→v15（行尾追加，解析顺序须与写出顺序一致——本轮踩过一次并修复）；UI 导出页新增"导出码率"下拉（自动/6/10/16/24/40/60/100/150/200 Mbps）；CLI `--bitrate-mbps`。
+- **非 N 卡特性门控**：导出的 NR/DLSS-SR/NVOF/DLSS-FG 仅 NVIDIA，AMD FSR 超分保留；请求不可用功能时降级并写明，不再整任务失败。
+- **实测（RTX 5070）**：NVENC 6/40 Mbps → 实际 6.11/32.8；强制 MF 10/30 Mbps → 10.16/26.1，300 帧逐帧验证通过；`VEYRA_TEST_NVENC_FIRST_OPEN_FAILS=2`（模拟用户那种 NVENC 被拒）→ 自动 MF，exit 0；MF + XeSS→DLSS 2X 补帧 → 600 帧验证通过；HDR 走 MF → 明确拒绝且不留 partial，HDR 走 NVENC 正常（无回归）。修复合同 169 项 0 失败、预设往返 PASS、delivery 短测 PASS `logs/delivery/35f4f46808fb4236856701704e5a7f52/result.json`。
+- **未做/边界**：MF 只支持 8bit（HDR 仍需 NVENC）；MF 输入经 CPU readback（4K 有开销，后续可做 D3D12 共享纹理 + D3D11 互操作）；**AMD/Intel 实卡未验证**（本机只有 N 卡，走同一 API 但需实机复测）；AMF/QSV 原生后端与软件 x264/x265 未接入。
+- **测试包（提交 `4002d83`，未合并 main/未推送/未发布）**：`C:\veyra-test-packages\final-encoders-r6\Veyra-1.3.1beta-win64-portable.zip`，469,804,907 字节，SHA256 `B2D6BFE2FD62772E87DD3E17B60BC9DCA0B18CBFAFA952D7CAC786A1F6250E5A`；包内 `Veyra.exe` `DE306CB03A81A8AD3904FF0CB331EB124EAF567B3640A5479C85ED55DDE414DB`（与构建树一致）。GUI 子进程导出（ExportJobManager 共享内存 IPC）实测 `encoder=NVIDIA-NVENC ... bitrateMbps=12`、24 帧验证通过；delivery 短测 PASS `logs/delivery/f3d3e5808a3a42889d092b3c3a7cfc0c/result.json`。
+
+### 2026-09-16 导出失败两例修复 + XeSS/FSR 补帧导出（用户："修，并且看看是不是用XeSS补帧没办法导出，也一起修了"）
+
+两位粉丝群用户的导出失败日志逐条定位到根因，并按"必须能出文件"的目标修掉；完整复现素材、命令与证据见 [导出修复与补帧导出](EXPORT_REPAIR_AND_FG_EXPORT_2026-09-16.md)。
+
+- **案例一（5 个 worker 全部 0 帧失败）**：`[nvenc] OpenD3D12Session status=15`（`NV_ENC_ERR_INVALID_VERSION`）。同一日志里设备/NVOF/NGX/DLSS-G 全部正常，只有 NVENC 会话按版本号被拒（RTX 5060 / 驱动 32.0.15.8157，重装驱动后用户侧消失）。`NvencD3D12Encoder` 改为首次失败后按 13.0→12.0→11.0 降级重试并记录实际接受的版本；H.264/HEVC+D3D12+低延迟在 11.0 起都覆盖。本机复现不出陈旧 DLL，用仅测试钩子 `VEYRA_TEST_NVENC_FIRST_OPEN_FAILS=1` 验证阶梯能跑通并恢复（300 帧导出 exit 0、逐帧验证通过）。
+- **案例二（99% 处整体失败，两份 12MB 日志同点）**：`CFR rejected source=51247 pts=854.133 expected=854.1166666666667`。60fps MKV（1ms 量化，854.15s）**最后一帧时间戳整整晚一个帧间隔**，被逐帧收紧的相位窗拒绝，25 分钟导出死在最后 1 帧。新增 `CfrTimeline::tailAccepts()`：只对"容器时长×帧率"估算出的最后 3 帧放行 ≤1.5 帧间隔偏差（估不出总帧数则不放行），编码器本来就按帧序写 CFR 网格，因此尾部对齐只改最后一帧显示时长、不动已写帧、不影响音画；中间跳变仍硬失败；成功/失败文案分别写明"尾部 N 帧已按恒定帧率对齐"与"第 N 帧偏移 X 毫秒…保留 partial"。
+- **XeSS/FSR 补帧导出**：结论是取不到纹理，不是没接线 —— XeSS-FG 3.0.2 只有 `xefg_swapchain*` 头与 `xefgSwapChain*` 导出（无任何输出到应用纹理的入口），FSR 交换链上下文由 provider 自己持有代理链，生成帧直接进显示链路。旧实现直接拒绝整个导出；新行为是改用图内 DLSS 补帧（导出本就要求 NVENC），DLSS 被拒则降 2X、整体不可用则只出原始帧，三种结果都写进提示/日志/完成消息，不静默。
+- **本机证据**：自造复现素材 `out/tail-jump.mkv`（300 帧 1080p30，尾帧 10.000s 而非 9.967s）：无补帧 300 帧 @30fps、`--fg-xess 4X` 1200 帧 @120fps（backend=DLSS 替换）、`--fg-fsr 2X` 600 帧 @60fps、`VEYRA_TEST_FG_MULTIFRAME_MAX=1` 降级 2X 600 帧、`=0` 补帧关闭 300 帧 —— 全部 exit 0 且逐帧解码验证通过；修复合同测试新增 4 项尾帧规则后 169 项 0 失败；delivery 短测 PASS `logs/delivery/95a4effb615949cbaedd502d87272cb1/result.json`（46.9s）。
+- **顺带修**：`--fg-xess/--fg-fsr/--fg-dlss` 在第一遍参数解析里未识别会落进 `autoInput`（`clip.mp4 --fg-xess` 会去打开名为 `--fg-xess` 的文件），已改为位置无关；设置页补帧方式与帮助文案同步更新。
+- **未做（如实）**：FFX SDK 2.3.0 的非交换链 FG（`ffxDispatchDescFrameGeneration{outputs[4]}`）理论上能做真正的 FSR 补帧导出，本轮未实现；XeSS 无此入口，只能替换/关闭；案例一的陈旧 DLL 现场本机无法复现，需原用户用新包复测。
+- **测试包（提交 `6c70eb2`，未合并 main/未推送/未发布）**：`C:\veyra-test-packages\final-exportfix-r5\Veyra-1.3.1beta-win64-portable.zip`，469,779,240 字节，SHA256 `A7B10DD98C47A052F5479ED5B652BBA67E1B0D8F7D3C645D5388B611AB9930EC`；包内 `Veyra.exe` `81782558FE0486632A6A544F7E19B0D91D76D2B2C716681094AAEC5AE5E70D26`（与构建树一致），包内 EXE 复测 XeSS 替换导出 600 帧 @60fps、逐帧验证通过、exit 0。
 
 ## 2026-09-15 采集卡直播窗口标题修复（第三方工具“识别不到 Veyra”）
 
@@ -2302,6 +2470,236 @@ HDR修改ColorMetadata/FramePacket/MediaFileSource静态元数据继承，HdrTon
 
 最终候选SHA256 `02BBC51FF46A8DEBCCA9961BEC48500E2AA77FE62B238174172D4E238ACA6401`，入口沿用 `out/start-user-issues-candidate.cmd`。详细文件/命令/SDK结果及边界见FG_OUTPUT_RATE_AUDIT。回调至Present返回P95前后44.606/50.328ms，不能从丢帧改善推论屏幕延迟降低；真实屏幕与帧间均匀性尚未测量，下一步交用户同一组合游玩验收。HDR改动一同保留为本地可回退记录，运行库/SDK/媒体未入Git。
 ## 2026-09-15 1.3.0发布后文档对齐
+
+## 2026-09-16 AMD FSR 帧生成接入（隔离分支 codex/framegen-fsr-dolby-20260916）
+
+按 `docs/FRAMEGEN_FSR_DOLBY_PLAN_2026-09-16.md` 的 E 工作流施工，**只在隔离分支**，
+未合并 main、未推送、未发布。详细设计、API 顺序、约束与命令清单见
+`docs/FSR_FRAMEGEN_INTEGRATION_2026-09-16.md`。
+
+新增 `FsrFgPresenter`（FidelityFX loader + 帧生成/代理交换链上下文 + 每帧 prepare/configure/
+插帧 dispatch + 提供方 present 回调计数与合成）、`PresentSink`/`VideoPresenter`/`EnhanceGraph`/
+`EngineController`/UI/预设 schema v13 接入，`--fg-fsr` 开关，`tools/fsr_probe` 扩成完整流水线探针
+（计数回调、upscale 几何、pipelined 模式、销毁后重建检查）。
+
+关键实测（本机 RTX 5070 / 616.56，全部为玩家真实运行）：
+
+- 探针：90 帧 → 89 生成帧、0 失败（`logs/fsr/probe-recreate.log`）；请求 2/3 张生成帧时提供方
+  仍只给 1 张/真实帧 → **3.1.x 上限就是 2X**，故引擎与预设把 FSR 倍率门限设为 2X；
+- 玩家 1080p：226 真实 / 222 生成，exit 0（`logs/fsr/smoke-fsr-final.log`）；
+- 玩家 4K 渲染：render 3840×2160 → display 1280×712，559 真实 / 555 生成，exit 0
+  （`logs/fsr/smoke-fsr-4k.log`）；
+- 设置事务重建（开超分）后继续补帧，exit 0（`logs/fsr/smoke-fsr-rebuild2.log`）；
+- 回归：DLSS 6X 875/177、XeSS 4X 639/217 均 exit 0（`logs/fsr/regress-dlss6x.log`、`regress-xess4x.log`）；
+- `scripts/gates/delivery.ps1` PASS（`logs/delivery/4f387d93def9440f8fa9f7efe92d6bd3/result.json`）；
+  `veyra_repair_contract_tests` 157 项 0 失败；`veyra_repair_preset_tests` 全通过
+  （其中两条旧断言因 XeSS 4X 放宽而失效，已按现合同修正，不是掩盖失败）。
+
+过程中修掉的两个真实缺陷：插帧命令列表必须在 `Configure(frameGenerationEnabled=true)` 之后查询，
+否则拿到空列表导致 `ffxDispatch` 返回 `ERROR_RUNTIME_ERROR`；`EnhanceGraph::applySettings` 的
+DLSSG 能力门控没有排除 FSR，导致 FSR 会话下任何就地设置变更被回滚。
+
+**未验证/未完成**：AMD 显卡实机、HDR10 输出、采集卡实时输入下的 FSR 帧生成；FSR 4.0.1 ML 提供方
+在本机 NVIDIA 上未被枚举。以上均不得当作已完成能力对外描述。
+
+## 2026-09-16 40 系 DLSS MFG 解锁调研（未实施）
+
+### 2026-09-16 FSR 超分可行性（N 卡）与接入点勘察
+
+### 2026-09-16 FSR 超分接入产品（同一分支，未合并 main）
+
+### 2026-09-16 40 系 DLSS MFG 解锁（C-2）实现 + 本机结构/补丁机制验证
+
+### 2026-09-16 杜比/DTS 位流解码兜底（G-2）实现 + 本地解码验证
+
+### 2026-09-16 采集音频改为可手动指定（用户反馈自动识别不好用）
+
+### 2026-09-16 XeSS 节奏 hook（A-2）移植 + 用 4K/30fps 素材实测
+
+### 2026-09-16 1.3.1beta 测试包（用户统一验收用）
+
+版本号改成 **1.3.1beta**：CMake 数值版本 1.3.1（`project(VERSION)` 不接受非数字），
+新增 `VEYRA_DISPLAY_VERSION=1.3.1beta` 写入 EXE 版本资源（`FileVersion`/`ProductVersion`
+实测均为 `1.3.1beta`）。打包脚本新增 `-Label beta` 只影响 staging/ZIP 名，
+版本校验改为"数值前缀匹配"，并新增 1.3.1 起把 **AMD FidelityFX 组件**放进包：
+
+| 文件 | 目录 | 版本 | 签名 | SHA-256 |
+| --- | --- | --- | --- | --- |
+| amd_fidelityfx_loader_dx12.dll | runtime_local/amd/fidelityfx | 2.3.0.2740 | Valid (AMD) | E2D85AA0…608AA |
+| amd_fidelityfx_framegeneration_dx12.dll | 同上 | 4.0.1.2740 | Valid (AMD) | 02297BEE…C2F18 |
+| amd_fidelityfx_upscaler_dx12.dll | 同上 | 4.1.1.2740 | Valid (AMD) | D0DCCCC7…C9FB46 |
+
+许可证 `licenses/AMD-FIDELITYFX-LICENSE.txt`（MIT，取自 vendored SDK `docs/license.md`），
+三者单独写在 `runtime_local/amd/fidelityfx/release-runtime-manifest.json`（含大小/哈希/版本/签名类别/
+experimental/removable）——这一步是补的：脚本原先只给两个旧目录写 manifest，AMD 目录会漏。
+
+产物：`C:\veyra-test-packages\final\Veyra-1.3.1beta-win64-portable.zip`
+469,750,063 字节 / SHA256 `CD72F80456736E0FC7A110B273ED33B7EB87ED7D87D31450F0B143C55707D000`，
+包内 `Veyra.exe` 报告版本 `1.3.1beta`，`package-manifest.json` 107 个文件。
+
+**从包内实跑验证（不是只打包）**：
+
+| 路径 | 结果 |
+| --- | --- |
+| FSR 帧生成 `--fg-fsr`（4K 源） | `using the retained AMD proxy swapchain`，282 真实 / 278 生成，exit 0 |
+| XeSS 4X `--fg-xess --fg-multiplier 4`（4K 源） | unlock 5/5、`pacing installed`、inBurstGaps mean **8.305ms**（目标 8.33）、refused=0、exit 0 |
+| FSR 超分 `--video-sr 5`（1080p→4K） | `fsr-sr providers count=2 selected=3.1.5`、`graph sr=1`、228 帧 exit 0 |
+| DLSS 6X `--fg-multiplier 6`（1080p 源） | `multiFrameMax=5`、160 真实 / 790 生成、exit 0 |
+
+注：4K 源 + 默认 4K 目标时 SR 不会被应用（`sr=0`，无需放大），这是正确行为，不是包的问题。
+先前一次打包（AMD 目录缺 manifest）的产物仍在 `C:\veyra-test-packages\` 根目录，属被取代的版本，
+本环境策略禁止 Agent 删文件，需用户自行删除。
+
+移植 `Coldwood1026/OptiScaler`（GPL-3.0，`70676c5f`）`XeFGPacing.h` 的**核心调度调用**到
+`include/veyra/gfx/XessPacing.h` + `src/gfx/XessPacing.cpp`（present thunk `0x25C0` 用既有
+`ThunkHook` 接管，返回地址过滤 `0x2202ED`/`0x220467`，把循环里的生成帧交给提供方自己的调度器
+`0x21EE30`，参数 `gate=burst[0xC0]&1` + ring 快照 `0x224CF0(ctx+0x168)`）。
+安装前三处 thunk 的目标逐一校验（present→`0x21F730`、sched→`0x21EE30`、ring→`0x224CF0`），
+不匹配就拒绝；只在 >2X 会话安装，退出时 `ThunkHook::remove()` 原字节恢复。
+
+测试素材：用户指定的 `GTAVI_An_Extended_Look_4K_Native.mp4`（4K / 30fps）。
+
+**4X 实测（`logs/fsr/xess4x-final.log`）**：
+
+- `[xess-pacing] installed for 4X: present thunk hooked, scheduler wired`；
+- 提供方调度器在线（日志里 `ctx+0x340=0 ctx+0x341=1`），`refused=0` → 每次调用都真的执行，
+  不是"打进去但被门控空转"；
+- **同一 burst 内生成帧间距 mean=8.303–8.306ms、min≈8.14–8.19、max≈8.37–8.42**，
+  而 30fps 4X 的目标间距是 33.33/4 = **8.33ms** → 间距由提供方自己的调度器给出并与目标吻合；
+- 339 真实帧 / 1005 生成帧（≈3×，即 4X）、exit 0、30.00fps 播放、无丢帧；
+- 退出：`unlock rolled back 5/5`，`xess-pacing removed (scheduled=… refused=0 bypassed=0)`。
+
+**对照（`VEYRA_DISABLE_XESS_PACING=1`，`logs/fsr/xess4x-unpaced.log`）**：4X 仍然每真实帧出 4 帧，
+但**没有任何调度发生**（无 scheduling 日志）——中间帧不带呈现时间，就是修复前的状态。
+这个对照只能证明"有没有调度"，修复前的观感数字（一串挤一起）来自上游分析，不作为本机实测。
+
+**顺带修掉一个真 bug**：`XessPresenter` 原先对 2X 也走解锁路径，而解锁在"无需解锁"时返回
+`applied=false`，被当成失败 → **XeSS 2X 会静默退回原生呈现（等于没补帧）**。现在 >1 才解锁，
+2X 走提供方原生 2X：实测 `Create result=0`、`maxInterpolations=1 => 2X`、280 真实 / 276 生成、
+exit 0（`logs/fsr/xess2x-fixed.log`）。
+
+回归：delivery 短测 PASS（`logs/delivery/05331f9d7c294b03b190dd8aeed19936/result.json`）、
+`veyra_repair_contract_tests` 165 项 0 失败。
+
+**未移植**：上游的时间戳/截止时间层（`0x3430`/`0x7A30`）与墙钟回退；当前只做核心调度调用。
+
+用户反馈"自动识别并不好用"，要求在采集面板里像 HDR 那样手动选。已加：
+
+- 采集面板新增下拉框「采集音频（变更需重连）」：**自动**（优先线性 PCM，PCM 不可用时位流解码）、
+  **强制线性 PCM**（不接受 Dolby/DTS 位流）、**位流优先**（Dolby/DTS 直通解码为 PCM，
+  适合 PS5 已设成 Dolby 输出但设备同时提供 PCM 的情况），并带与 HDR 那两项同风格的说明文本。
+- 设置持久化：`EnhancementSettings::captureAudio`（`engine::CaptureAudioIngress`），
+  预设 schema 升到 **v14**（旧版本读入默认"自动"），UI 走 `applySettings` 与 HDR 选项同一条路。
+- 采集端按模式执行：`CaptureCardSource::setAudioIngress` + `configureAudio()` 里
+  `位流优先` 先试压缩类型、失败再回退 PCM；`强制 PCM` 完全忽略位流类型并写日志说明。
+  命令行测试开关 `--capture-audio 0|1|2`。
+- **修掉一个真 bug**：`setAudioIngress` 原先在采集源 `configure()` 之后才调用，
+  第一次连接不会生效；现在移到配置之前（日志顺序 `capture-audio-ingress` →
+  `device bitstream types` → `selected media type` 即为证）。
+- 本机参考采集卡三种模式实测（本身无位流类型）：mode0/1/2 均 exit 0、330–335 帧、60fps、
+  选中 48kHz/2ch PCM（`logs/fsr/capture-audio-mode{0,1,2}.log`）。**位流优先的"真的优先"分支
+  只能靠有 Dolby 输出的设备验收**，本机无法触发。
+- 回归：契约测试 165 项 0 失败；预设 66 组迁移 + 全字段往返（含新模式）通过；
+  delivery 短测 PASS（`logs/delivery/72b1dec41e0540f7ae5fa6856f8a18b7/result.json`）。
+
+新增 `include/veyra/sink/BitstreamAudio.h` + `src/sink/BitstreamAudio.cpp`（FFmpeg libavcodec/libswresample）：
+按 KSDATAFORMAT/WAVE subtype 分类 AC-3 / E-AC-3(含 DD+ Atmos 载体) / TrueHD-MLP / DTS / DTS-HD/DTS:X，
+S/PDIF 的 IEC 61937 突发自动解框，解码为交错 float PCM 并给出真实声道数与采样率。
+
+采集接线（`CaptureCardSource::configureAudio`）：PCM 媒体类型仍然优先；当**没有任何 PCM 能连接**时，
+按 TrueHD > DD+ > DTS-HD > DTS > AC-3 的优先级选压缩类型直通，首帧解码后用它报的声道数/采样率
+配置并启动 `CaptureAudioSession`（`audioSessionDeferred`），随后按原有 `push()` 契约进入既有 5.1 管线；
+状态面板新增"位流解码为 N 声道 (kind)"一行。本机参考采集卡没有位流类型（`device bitstream types=0`），
+因此该分支不会被触发，PCM 路径实测不变：`capture:0:0:0` 425 帧 60fps、exit 0（`logs/fsr/capture-after-g2.log`）。
+
+**本地可验证的部分已实测**：`veyra_bitstream_audio_test` 用同一份 FFmpeg 编码 2 秒 5.1 测试信号
+（每声道不同幅度、LFE 用 60Hz 低音），再经 `BitstreamDecoder` 分块解码：
+
+- AC-3 448kbps：6 声道、95232 帧，逐声道 RMS `0.3531/0.2824/0.2118/0.1765/0.1412/0.0706`
+  → 与编码幅度（0.5/0.4/0.3/0.25/0.2/0.1 的正弦 RMS）逐项吻合，**声道映射与幅度都正确**；
+- 同一份 AC-3 再套 IEC 61937 突发头：结果逐位一致 → 解框正确；
+- E-AC-3 640kbps：同样 6 声道与同样的幅度序列。
+
+**未验证**：真实采集卡的位流协商与长时稳定性（本机设备不提供位流）；TrueHD/DTS-HD 只验证了解码器存在
+（`avcodec_find_decoder` 命中）而没有真实素材，不得对外宣称已支持这两种格式的实机采集。
+证据：`logs/fsr/bitstream-decode-test.log`；delivery 短测 PASS（`logs/delivery/622908bcc14b47a381340e8662c5b0a2/result.json`）。
+
+移植 `ImDreamt/MFGAdaUnlock-RenoDx`（MIT，`third_party_local/community/`）到产品库
+`include/veyra/ngx/AdaMfgUnlock.h` + `src/ngx/AdaMfgUnlock.cpp`：两处 `0x1b0`(Blackwell) 架构比较
+改写为 `0x190`(Ada)、PTX 中点修正（注入 temporal 参数 + 104 处 `mul.ftz.f32 ...,0f3F000000`
+替换为 `%f136/%f134` + fatbin 截断为非压缩强制 JIT）、8 个 `dlfg_kernel` 描述符槽位重定向；
+全部只改进程内映射镜像，磁盘文件不动、不重签名；失败即回滚。
+
+本机 RTX 5070（Blackwell）只做**结构与补丁机制**验证，不做行为验证：
+
+- `veyra_dlssg_unlock_probe`（默认只读扫描）：本机 `runtime_local/nvidia/nvngx_dlssg.dll`
+  310.7.0.0 / SHA256 `135EAF07…E36F`，TimeDateStamp `0x69FB633C`、SizeOfImage `0x00745000` 与审计身份一致；
+  扫描得到 **gates=2、descriptors=8、ptx=99362、midpoints=104、joinLabelUnique=1**——与上游全部结构假设逐一吻合
+  （`logs/fsr/dlssg-unlock-scan.log`）。
+- `--apply-test`：应用后回读 gates=0、descriptors=0（槽位已指向重建 fatbin），随后
+  `release()` 回滚回 gates=2/descriptors=8/ptx=99362/midpoints=104，`applied=1 readBack=1 restored=1`
+  → 事务与回滚机制在真实运行库镜像上成立（`logs/fsr/dlssg-unlock-applytest.log`）。
+- 引擎接入：`EnhanceGraph::initNgxFeatures()` 在 DLSSG 能力查询前按
+  `AdaMfgUnlock::adapterIsAda(vendor, deviceId)`（0x10DE 且 deviceId 在 0x2680–0x28FF）决定是否解锁，
+  50 系直接不进入；`VEYRA_DISABLE_ADA_MFG_UNLOCK=1` 可关闭；`shutdown()` 里在 NGX core 释放后回滚。
+  解锁后运行时若仍只报 1 张生成帧，会明确告警"当前 DLSS-G 不是审计过的本地版本"。
+- **50 系不受影响实测**：`--fg-multiplier 6` 仍为 `multiFrameMax=5`、875 生成/177 真实、exit 0，
+  日志里**没有任何** `ada-mfg` 行（门控直接跳过）（`logs/fsr/blackwell-6x-after-ada-unlock.log`）。
+
+**未验证（必须 40 系实机）**：解锁后 3X/4X 是否真的生成并带真实运动；Ada 上 Blackwell 硬件
+flip metering 缺失是否导致画面冻结（上游在 Streamline 侧有软件回退，我们直接走 NGX，没有那一层）。
+测试命令：`veyra.exe --fg-multiplier 4 --smoke-seconds 15 <视频>`，期望日志出现
+`[ada-mfg] ... unlock applied=1 gates=2 descriptors=8 kernel=1` 与 `multiFrameMax=5`。
+
+先前的"只做可行性"结论已升级为**已接入并实测**：
+
+- 新增 `include/veyra/gfx/FsrSrBackend.h` + `src/gfx/FsrSrBackend.cpp`（FidelityFX 超分上下文 +
+  逐帧 `ffxDispatchDescUpscale`），`EnhanceGraph` 新增 `initFsrSr()` 与 `runSr()` 的 FSR 分支，
+  只启用 FSR 超分时不再要求 NGX 核心；`videoSrQuality = 5`（`kVideoSrSrFsr`）作为新档位，
+  设置项"AMD FSR 超分 · 3.1.x（N卡可用）"，非 NVIDIA 归一化不再关掉该档，
+  创建失败走既有 `FailedBackend::Sr` 降级并提示（不静默直通）。
+- 运行库目录统一为 `runtime_local/amd/fidelityfx/`（loader + framegeneration + upscaler），
+  FSR 补帧路径同步改名后**回归通过**（218 真实 / 214 生成，exit 0）。
+- 实测（RTX 5070 / 提供方 3.1.5）：
+  - 播放器 `--video-sr 5`：206 帧、205 次 dispatch、0 失败、exit 0（`logs/fsr/smoke-fsrsr.log`）；
+  - 非 NVIDIA 形状：`--video-sr 5 --flow-amd`（AMD FFX 光流）226 次 dispatch、0 失败、exit 0
+    （`logs/fsr/smoke-fsrsr-amdflow.log`）；
+  - 质量探针 `--sr-mode 5`：19/19、`d3dDiagErrors=0`（`logs/fsr/q-fsrsr-diag.log`）；
+  - **同帧对照**（index=45、同 NR、4K 输出）：平均绝对差 0.31/255、平均亮度 115.98 vs 116.03
+    → 内容正确（`tools/image_check/compare_sr.ps1`）；
+  - **相对画质不如直通**：梯度能量 0.500 vs 0.563（比值 0.888），如实记录，不宣称更清晰。
+- 新工具/改动：`tools/quality_probe --sr-mode`（-1 直通 / 0 DLSS / 5 FSR，用于确定性 A/B）、
+  `tools/image_check/compare_sr.ps1`（内容一致性 + 梯度能量）、`--flow-amd` / `--flow-gpudis` 测试开关。
+- 已知限制：HDR 输出不支持（主动不创建）、flow 必须与源同尺寸、
+  GPU-based validation 与 FidelityFX 超分 dispatch 不兼容（探针显式跳过并打印警告）。
+- 回归：delivery 短测 PASS（`logs/delivery/1f0f1976eca045b9a22529e9b8f11fa4/result.json`）、
+  `veyra_repair_contract_tests` 160 项 0 失败、`veyra_repair_preset_tests` 全通过。
+
+新增 `tools/fsr_upscale_probe`（目标 `veyra_fsr_upscale_probe`）：枚举超分提供方 →
+建上下文 → 上传 64 像素棋盘 + 水平渐变（1280×720）→ FSR 放大到 2560×1440 → 回读校验内容。
+本机 RTX 5070 结果（`logs/fsr/upscale-probe.log`）：提供方只有 **3.1.5 与 2.3.4**（4.x ML 不出现）、
+CreateContext OK、Dispatch OK、回读 mean=127.33 / min=0 / max=255 / distinctLevels=15 /
+棋盘相位校验通过 → **N 卡能跑 FSR 3.1.x 超分，4.1 必须等 AMD 实机**。
+
+接入点、需要的输入（`srcRgba_` + 源分辨率光流 + 常量深度）、以及三个不能跳过的验证点
+（MV 符号必须像 FG 那样先核对、常量深度的质量代价、画质 A/B）写在
+`docs/FSR_UPSCALING_PLAN_2026-09-16.md`。**产品代码本轮未改，不算完成功能。**
+
+定位到上游 `ImDreamt/MFGAdaUnlock-RenoDx`（MIT，ReShade addon，README 明确写"仅内存修改"），
+已克隆到 `third_party_local/community/MFGAdaUnlock-RenoDx`（gitignore）。其解锁由四件事组成：
+
+1. `DLSSGInstanceManager::PopulateParameters` 中 NVAPI 架构 id 与 `0x1b0`(Blackwell) 的比较（两种编码）；
+2. 同一常量的第二处比较，驱动"是否真的生成"的能力标志（只改 1 不改 2 会出黑帧）；
+3. **PTX 中点修正**：把插值核心里编译期常量 `0.5`（104 处 `mul.ftz.f32 ..., 0f3F000000`）改成
+   核函数自身的 temporal 参数，并把 fatbin 在 sm_89 PTX 项之后截断、以非压缩方式重发，
+   逼驱动走 JIT（否则驱动用 sm_89 cubin，改写无效）；
+4. 关闭 Blackwell 的硬件 flip metering（该 patch 针对 Streamline 插件，Veyra 直接走 NGX，不适用）。
+
+本轮**没有实施**，原因不是"做不了"，而是不能在本机证明：本机只有 5070（Blackwell），PTX 改写在
+Blackwell 上会改变一条已经正常工作的路径，无法区分"补丁生效"与"破坏原生 MFG"。上游也明确
+指出单改门控会出现黑帧/重复帧。下一步做法（写入计划文档）：把 1+2+3 逐项做成带模块身份、
+模式校验、回滚的进程内补丁，只在 Ada 上启用，并用真实 40 系机器验收；在那之前
+`VEYRA_TEST_FG_FORCE_MULTIPLIER=1` 只能用来观察未打补丁时的失败现象。
 
 用户要求更新长期未维护的文档。审计发现 README/README_EN 已指向1.3.0，但 `docs/BUILD.md` 仍有1.2.0构建、打包和PS5标题，`docs/LOCAL_INTEGRATION_STATUS_2026-09-15.md` 仍把1.2.0写成当前未发布版本。
 

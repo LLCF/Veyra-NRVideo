@@ -13,18 +13,18 @@ bool nameOk(const std::wstring& s){return !s.empty()&&s.size()<=48&&s.front()!=L
 std::wstring trim(std::wstring s){auto a=s.find_first_not_of(L" \t\r\n");if(a==s.npos)return {};auto b=s.find_last_not_of(L" \t\r\n");return s.substr(a,b-a+1);}
 }
 std::string PresetStore::serialize()const{
-    std::ostringstream o;o.imbue(std::locale::classic());o<<std::setprecision(std::numeric_limits<float>::max_digits10)<<"VEYRA_PRESETS 13\n"<<std::quoted(utf8(default_))<<' '<<entries_.size()<<'\n';
-    for(auto& p:entries_){const auto& s=p.settings;const auto& m=s.model;const auto& r=s.residual;o<<std::quoted(utf8(p.name))<<' '<<m.intensity<<' '<<m.tone<<' '<<m.structure<<' '<<m.skin<<' '<<m.style<<' '<<m.autoMask<<' '<<m.uiCorrection<<' '<<r.total<<' '<<r.darken<<' '<<r.brighten<<' '<<r.color<<' '<<r.luminance<<' '<<s.nr<<' '<<s.sr<<' '<<s.multiplier<<' '<<int(s.nrPolicy)<<' '<<int(s.flow)<<' '<<int(s.content)<<' '<<s.protection.enabled<<' '<<s.protection.featherPixels;for(auto q:s.protection.regions)o<<' '<<q.left<<' '<<q.top<<' '<<q.right<<' '<<q.bottom;o<<' '<<s.videoSrQuality<<' '<<int(s.frameGenerationBackend)<<' '<<int(s.srTarget)<<' '<<int(s.opticalFlowBackend)<<' '<<s.amdFlowHalfResolution<<' '<<int(s.audioSync)<<' '<<s.audioOffsetMs<<' '<<int(s.nrRuntime)<<' '<<s.captureCompatible<<' '<<s.lowLatency<<' '<<s.forceSdrPreview<<' '<<s.captureFlipVertical<<'\n';}return o.str();
+    std::ostringstream o;o.imbue(std::locale::classic());o<<std::setprecision(std::numeric_limits<float>::max_digits10)<<"VEYRA_PRESETS 16\n"<<std::quoted(utf8(default_))<<' '<<entries_.size()<<'\n';
+    for(auto& p:entries_){const auto& s=p.settings;const auto& m=s.model;const auto& r=s.residual;o<<std::quoted(utf8(p.name))<<' '<<m.intensity<<' '<<m.tone<<' '<<m.structure<<' '<<m.skin<<' '<<m.style<<' '<<m.autoMask<<' '<<m.uiCorrection<<' '<<r.total<<' '<<r.darken<<' '<<r.brighten<<' '<<r.color<<' '<<r.luminance<<' '<<s.nr<<' '<<s.sr<<' '<<s.multiplier<<' '<<int(s.nrPolicy)<<' '<<int(s.flow)<<' '<<int(s.content)<<' '<<s.protection.enabled<<' '<<s.protection.featherPixels;for(auto q:s.protection.regions)o<<' '<<q.left<<' '<<q.top<<' '<<q.right<<' '<<q.bottom;o<<' '<<s.videoSrQuality<<' '<<int(s.frameGenerationBackend)<<' '<<int(s.srTarget)<<' '<<int(s.opticalFlowBackend)<<' '<<s.amdFlowHalfResolution<<' '<<int(s.audioSync)<<' '<<s.audioOffsetMs<<' '<<int(s.nrRuntime)<<' '<<s.captureCompatible<<' '<<s.lowLatency<<' '<<s.forceSdrPreview<<' '<<int(s.captureAudio)<<' '<<s.exportBitrateMbps<<' '<<s.captureFlipVertical<<'\n';}return o.str();
 }
 bool PresetStore::parse(const std::string& data,std::vector<UserPreset>& out,std::wstring& def){
     if(data.size()>65536)return false;std::istringstream in(data);in.imbue(std::locale::classic());std::string magic,d;int version=0;size_t count=0;
-    if(!(in>>magic>>version)||magic!="VEYRA_PRESETS"||(version<1||version>13)||!(in>>std::quoted(d)>>count)||count>64)return false;def=wide(d);if(!d.empty()&&def.empty())return false;
+    if(!(in>>magic>>version)||magic!="VEYRA_PRESETS"||(version<1||version>16)||!(in>>std::quoted(d)>>count)||count>64)return false;def=wide(d);if(!d.empty()&&def.empty())return false;
     for(size_t i=0;i<count;++i){UserPreset p;std::string n;int policy,flow,content,nr,sr;auto& s=p.settings;auto& m=s.model;auto& r=s.residual;
         if(!(in>>std::quoted(n)>>m.intensity>>m.tone>>m.structure>>m.skin>>m.style>>m.autoMask>>m.uiCorrection>>r.total>>r.darken>>r.brighten>>r.color>>r.luminance>>nr>>sr>>s.multiplier>>policy>>flow>>content))return false;
         if(version>=2){int enabled;if(!(in>>enabled>>s.protection.featherPixels)||enabled<0||enabled>1)return false;s.protection.enabled=enabled!=0;
             for(auto& q:s.protection.regions)if(!(in>>q.left>>q.top>>q.right>>q.bottom))return false;}
         if(version>=3&&!(in>>s.videoSrQuality))return false;
-        if(version>=4){int backend;if(!(in>>backend)||backend<0||backend>(version>=6&&version<=7?2:1))return false;
+        if(version>=4){int backend;if(!(in>>backend)||backend<0||backend>(version>=13?2:(version>=6&&version<=7?2:1)))return false;
             // Before v8, 1 meant removed FRUC and 2 meant XeSS. New writes use v10.
             s.frameGenerationBackend=version<8
                 ?(backend==2?FrameGenerationBackend::XeSS:FrameGenerationBackend::Dlss)
@@ -36,8 +36,11 @@ bool PresetStore::parse(const std::string& data,std::vector<UserPreset>& out,std
         if(version>=10){int capture;if(!(in>>capture)||capture<0||capture>1)return false;s.captureCompatible=capture!=0;}
         if(version>=11){int low;if(!(in>>low)||low<0||low>1)return false;s.lowLatency=low!=0;}
         if(version>=12){int sdr;if(!(in>>sdr)||sdr<0||sdr>1)return false;s.forceSdrPreview=sdr!=0;}
-        // v13 appends the manual capture vertical flip to the line.
-        if(version>=13){int flip;if(!(in>>flip)||flip<0||flip>1)return false;s.captureFlipVertical=flip!=0;}
+        if(version>=14){int ingress;if(!(in>>ingress)||ingress<0||ingress>2)return false;s.captureAudio=static_cast<CaptureAudioIngress>(ingress);}
+        // v15 appends the export bitrate to the line, so it must be read last.
+        if(version>=15){if(!(in>>s.exportBitrateMbps))return false;}
+        // v16 appends the manual capture vertical flip after the bitrate.
+        if(version>=16){int flip;if(!(in>>flip)||flip<0||flip>1)return false;s.captureFlipVertical=flip!=0;}
         p.name=wide(n);if(!nameOk(p.name)||std::any_of(out.begin(),out.end(),[&](auto& a){return a.name==p.name;})||nr<0||nr>1||sr<0||sr>1)return false;
         s.nr=nr;s.sr=sr;s.nrPolicy=static_cast<pipeline::NrSizePolicy>(policy);s.flow=static_cast<FlowQuality>(flow);s.content=static_cast<ContentRate>(content);
         if(!s.validate().empty())return false;out.push_back(std::move(p));

@@ -3,6 +3,7 @@
 #include "ui/SettingHelp.h"
 #include "veyra/engine/PresetStore.h"
 #include "veyra/RuntimePaths.h"
+#include "veyra/gfx/XessMfgUnlock.h"
 #include <filesystem>
 #include <sstream>
 #include <iomanip>
@@ -55,6 +56,35 @@ void syncProtection(const engine::ProtectionSettings& protection){
     putText(206,(L"NR保护区域 · "+std::to_wstring(count)+L"/4").c_str());
 }
 void selectDiscrete(int group,int value){for(int j=0;j<(group==0?3:2);++j){auto h=item(700+group*10+j);if(j==value)SetPropW(h,L"veyra.selected",HANDLE(1));else RemovePropW(h,L"veyra.selected");InvalidateRect(h,nullptr,FALSE);}}
+// Multiplier list is capability-driven: the DLSS runtime reports how many
+// generated frames it supports (1 = 2X only on Ada, 5 = 6X on Blackwell), and
+// the XeSS unlock path raises its own ceiling. Unknown capability offers the
+// full list; the engine gate rejects an unsupported request with a message.
+int multiplierChoiceCount(engine::FrameGenerationBackend backend){
+    int cap=6;
+    if(backend==engine::FrameGenerationBackend::XeSS){
+        // Stock provider is 2X only; the audited OptiScaler unlock raises it to
+        // 4X. Hash the provider once, and prefer the ceiling an actual session
+        // already reported.
+        static const bool providerAudited=[](){
+            const auto path=veyra::runtime::localDataDirectory()/L"intel"/L"experimental"/L"libxess_fg.dll";
+            return veyra::gfx::XessMfgUnlock::providerIsAudited(path.wstring());
+        }();
+        cap=providerAudited?4:2;
+        if(controller){const auto snapshot=controller->snapshot();if(snapshot.xessMaxInterpolatedFrames>1)cap=std::clamp(snapshot.xessMaxInterpolatedFrames+1,2,4);}
+    }
+    else if(backend==engine::FrameGenerationBackend::Fsr){
+        // AMD 3.1.x frame generation delivers one generated frame per present;
+        // tools/fsr_probe measured the same count for 2/3/4 requested frames.
+        cap=2;
+        if(controller){const auto snapshot=controller->snapshot();if(snapshot.fsrMaxGeneratedFrames>0)cap=std::clamp(int(snapshot.fsrMaxGeneratedFrames)+1,2,2);}
+    }
+    else if(controller){const auto snapshot=controller->snapshot();if(snapshot.fgMultiFrameMax>0)cap=std::clamp(snapshot.fgMultiFrameMax+1,2,6);}
+    int count=1;
+    for(size_t i=1;i<engine::kFgMultiplierChoiceCount;++i)if(int(engine::kFgMultiplierChoices[i])<=cap)++count;
+    return count;
+}
+int multiplierChoiceIndex(uint32_t multiplier){for(size_t i=0;i<engine::kFgMultiplierChoiceCount;++i)if(engine::kFgMultiplierChoices[i]==multiplier)return int(i);return 0;}
 void populate(engine::EnhancementSettings s){
     populating=true;
     float v[]={s.model.intensity,s.model.tone,s.model.structure,s.model.skin,float(s.model.style),float(s.model.autoMask),float(s.model.uiCorrection),s.residual.total,s.residual.darken,s.residual.brighten,s.residual.color,s.residual.luminance};
@@ -63,10 +93,11 @@ void populate(engine::EnhancementSettings s){
     check(200,enhancementEnabled&&s.nr?BST_CHECKED:BST_UNCHECKED);
     check(201,enhancementEnabled&&s.sr?BST_CHECKED:BST_UNCHECKED);
     for(int j=0;j<3;++j){auto h=item(730+j);if(j==int(s.srTarget))SetPropW(h,L"veyra.selected",HANDLE(1));else RemovePropW(h,L"veyra.selected");InvalidateRect(h,nullptr,FALSE);}
-    const int multiplierCount=s.frameGenerationBackend==engine::FrameGenerationBackend::XeSS?2:4;
-    if(send(202,CB_GETCOUNT)!=multiplierCount){send(202,CB_RESETCONTENT);const wchar_t* choices[]={L"关闭补帧",L"2X · 一张中间帧",L"3X · 两张中间帧",L"4X · 三张中间帧"};for(int i=0;i<multiplierCount;++i)send(202,CB_ADDSTRING,0,LPARAM(choices[i]));}
-    send(207,CB_SETCURSEL,s.videoSrQuality,0);send(202,CB_SETCURSEL,s.multiplier-1,0);
+    const int multiplierCount=multiplierChoiceCount(s.frameGenerationBackend);
+    if(send(202,CB_GETCOUNT)!=multiplierCount){send(202,CB_RESETCONTENT);const wchar_t* choices[]={L"关闭补帧",L"2X · 一张中间帧",L"3X · 两张中间帧",L"4X · 三张中间帧",L"6X · 五张中间帧"};for(int i=0;i<multiplierCount;++i)send(202,CB_ADDSTRING,0,LPARAM(choices[i]));}
+    send(207,CB_SETCURSEL,s.videoSrQuality,0);send(202,CB_SETCURSEL,multiplierChoiceIndex(s.multiplier),0);
     send(208,CB_SETCURSEL,int(s.frameGenerationBackend),0);send(203,CB_SETCURSEL,int(s.nrPolicy),0);
+    send(508,CB_SETCURSEL,int(engine::exportBitrateIndex(s.exportBitrateMbps)),0);
     send(218,CB_SETCURSEL,int(s.nrRuntime));
     check(219,s.captureCompatible?BST_CHECKED:BST_UNCHECKED);check(220,s.lowLatency?BST_CHECKED:BST_UNCHECKED);
     send(204,CB_SETCURSEL,int(s.flow),0);send(205,CB_SETCURSEL,int(s.content),0);
@@ -84,14 +115,19 @@ bool read(engine::EnhancementSettings& s,bool allPages=false){s=enhancementEnabl
     s.model={v[0],v[1],v[2],v[3],int(v[4]),int(v[5]),int(v[6])};s.residual={v[7],v[8],v[9],v[10],v[11]};if(enhancementEnabled){s.nr=checked(200)==BST_CHECKED;s.sr=checked(201)==BST_CHECKED;}s.videoSrQuality=uint32_t(send(207,CB_GETCURSEL,0,0));s.nrPolicy=static_cast<pipeline::NrSizePolicy>(send(203,CB_GETCURSEL,0,0));if(allPages){
         const auto multiplier=send(202,CB_GETCURSEL,0,0),generation=send(208,CB_GETCURSEL,0,0),flowBackend=send(209,CB_GETCURSEL,0,0),flowQuality=send(204,CB_GETCURSEL,0,0),content=send(205,CB_GETCURSEL,0,0);
         if(multiplier==CB_ERR||generation==CB_ERR||flowBackend==CB_ERR||flowQuality==CB_ERR||content==CB_ERR){message(L"设置控件未完成初始化；未保存预设");return false;}
-        s.multiplier=uint32_t(multiplier+1);s.frameGenerationBackend=static_cast<engine::FrameGenerationBackend>(generation);s.opticalFlowBackend=static_cast<engine::OpticalFlowBackend>(flowBackend);s.amdFlowHalfResolution=checked(215)==BST_CHECKED;s.flow=static_cast<engine::FlowQuality>(flowQuality);s.content=static_cast<engine::ContentRate>(content);
+        s.multiplier=(multiplier>=0&&multiplier<int(engine::kFgMultiplierChoiceCount))?engine::kFgMultiplierChoices[multiplier]:1;s.frameGenerationBackend=static_cast<engine::FrameGenerationBackend>(generation);s.opticalFlowBackend=static_cast<engine::OpticalFlowBackend>(flowBackend);s.amdFlowHalfResolution=checked(215)==BST_CHECKED;s.flow=static_cast<engine::FlowQuality>(flowQuality);s.content=static_cast<engine::ContentRate>(content);
+        {const int bitrate=send(508,CB_GETCURSEL,0,0);if(bitrate==CB_ERR||bitrate<0||bitrate>=int(engine::kExportBitrateChoiceCount)){message(L"导出码率控件未完成初始化；未保存设置");return false;}s.exportBitrateMbps=engine::kExportBitrateChoices[bitrate];}
         s.audioSync=static_cast<engine::AudioSyncMode>(send(216,CB_GETCURSEL));
         s.nrRuntime=static_cast<engine::NrRuntime>(send(218,CB_GETCURSEL));
         s.captureCompatible=checked(219)==BST_CHECKED;s.lowLatency=checked(220)==BST_CHECKED;
         wchar_t offset[32]{};GetWindowTextW(item(217),offset,32);wchar_t* offsetEnd=nullptr;const auto parsed=wcstol(offset,&offsetEnd,10);
         if(offsetEnd==offset||*offsetEnd||parsed<-250||parsed>250){message(L"声音偏移须为 -250 至 250 ms");return false;}s.audioOffsetMs=int(parsed);
         for(int j=0;j<3;++j)if(GetPropW(item(730+j),L"veyra.selected")){s.srTarget=static_cast<pipeline::SrTarget>(j);break;}
-        if(s.frameGenerationBackend==engine::FrameGenerationBackend::XeSS)s.multiplier=std::min(s.multiplier,2u);
+        if(engine::presentSinkFrameGeneration(s.frameGenerationBackend)){
+            const int choices=multiplierChoiceCount(s.frameGenerationBackend);
+            const size_t index=size_t(std::clamp(choices-1,1,int(engine::kFgMultiplierChoiceCount)-1));
+            s.multiplier=std::min(s.multiplier,engine::kFgMultiplierChoices[index]);
+        }
     }if(!s.validate().empty()){message(L"参数越界，未提交。悬停数值框查看允许范围。");return false;}return true;}
 
 // Each notification changes one field on the latest desired settings. Hidden
@@ -99,7 +135,8 @@ bool read(engine::EnhancementSettings& s,bool allPages=false){s=enhancementEnabl
 bool liveField(int id){
     if(id==202){
         const auto index=send(id,CB_GETCURSEL);if(index==CB_ERR)return false;
-        const bool accepted=SendMessageW(GetParent(window),WM_APP+44,202,index+1)!=0;
+        const uint32_t requested=(index>=0&&index<int(engine::kFgMultiplierChoiceCount))?engine::kFgMultiplierChoices[index]:1;
+        const bool accepted=SendMessageW(GetParent(window),WM_APP+44,202,requested)!=0;
         populate(enhancementEnabled?controller->snapshot().desired:configuredSettings);
         message(accepted?L"已请求补帧；无需先开启NR。":L"总增强正在切换，请待当前事务完成。");return accepted;
     }
@@ -115,13 +152,14 @@ bool liveField(int id){
         case 203:s.nrPolicy=static_cast<pipeline::NrSizePolicy>(send(id,CB_GETCURSEL));break;
         case 204:s.flow=static_cast<engine::FlowQuality>(send(id,CB_GETCURSEL));break;
         case 205:s.content=static_cast<engine::ContentRate>(send(id,CB_GETCURSEL));break;
-        case 208:s.frameGenerationBackend=static_cast<engine::FrameGenerationBackend>(send(id,CB_GETCURSEL));if(s.frameGenerationBackend==engine::FrameGenerationBackend::XeSS)s.multiplier=std::min(s.multiplier,2u);break;
+        case 208:{s.frameGenerationBackend=static_cast<engine::FrameGenerationBackend>(send(id,CB_GETCURSEL));if(engine::presentSinkFrameGeneration(s.frameGenerationBackend)){const int choices=multiplierChoiceCount(s.frameGenerationBackend);const size_t index=size_t(std::clamp(choices-1,1,int(engine::kFgMultiplierChoiceCount)-1));s.multiplier=std::min(s.multiplier,engine::kFgMultiplierChoices[index]);}break;}
         case 209:s.opticalFlowBackend=static_cast<engine::OpticalFlowBackend>(send(id,CB_GETCURSEL));break;
         case 220:s.lowLatency=checked(id)==BST_CHECKED;break;
         case 215:s.amdFlowHalfResolution=checked(id)==BST_CHECKED;break;
         case 216:s.audioSync=static_cast<engine::AudioSyncMode>(send(id,CB_GETCURSEL));break;
         case 217:{wchar_t value[32]{};GetWindowTextW(item(id),value,32);wchar_t* end=nullptr;const auto parsed=wcstol(value,&end,10);if(end==value||*end||parsed<-250||parsed>250){message(L"声音偏移须为 -250 至 250 ms");return false;}s.audioOffsetMs=int(parsed);break;}
         case 207:s.videoSrQuality=uint32_t(send(id,CB_GETCURSEL));break;
+        case 508:{const int index=send(id,CB_GETCURSEL,0,0);if(index==CB_ERR||index<0||index>=int(engine::kExportBitrateChoiceCount))return false;s.exportBitrateMbps=engine::kExportBitrateChoices[index];break;}
         case 700:case 701:case 702:s.model.style=id-700;break;
         case 710:case 711:s.model.autoMask=id-710;break;
         case 720:case 721:s.model.uiCorrection=id-720;break;
@@ -186,7 +224,7 @@ case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.
     SetPropW(item(219),L"veyra.tip",HANDLE(L"直播兼容模式：切换显示交换链，会短暂停顿；不改变增强算法或导出。不保证所有捕获方式有效。"));
     add(L"STATIC",L"补帧与运动估算",1103,0,1,12,12,-1,30);
     add(L"STATIC",L"补帧方式",1111,0,1,12,50,-1,24);
-    combo(208,1,78,{L"DLSS 帧生成",L"Intel XeSS · 实验显示补帧 2X"});
+    combo(208,1,78,{L"DLSS 帧生成",L"Intel XeSS · 实验显示补帧 2X-4X",L"AMD FSR 帧生成 · 2X"});
     add(L"STATIC",L"补帧倍率",1112,0,1,12,122,-1,24);
     combo(202,1,150,{L"关闭补帧",L"2X · 一张中间帧",L"3X · 两张中间帧",L"4X · 三张中间帧"});
     add(L"STATIC",L"运动估算",1113,0,1,12,194,-1,24);
@@ -211,13 +249,18 @@ case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.
     button(L"暂停 / 继续导出",503,3,12,310);button(L"取消导出",504,3,12,354);
     add(L"BUTTON",L"优先观看 · 降低导出占用",505,BS_AUTOCHECKBOX|WS_TABSTOP,3,12,406,-1,36);check(505,BST_CHECKED);
     add(L"STATIC",L"",506,0,3,12,458,-1,120);add(L"STATIC",L"",507,0,3,12,588,-1,80);
+    // Export bitrate row, inserted between the codec selector and everything
+    // below it (the page scrolls, so the shift keeps the reading order).
+    for(auto& entry:items)if(entry.page==3&&entry.y>=108)entry.y+=72;
+    add(L"STATIC",L"导出码率",1121,0,3,12,104,-1,24);
+    combo(508,3,132,{L"自动 · 恒定质量",L"6 Mbps",L"10 Mbps",L"16 Mbps",L"24 Mbps",L"40 Mbps",L"60 Mbps",L"100 Mbps",L"150 Mbps",L"200 Mbps"});
     add(L"STATIC",L"",400,0,-1,12,900,-1,92);add(L"STATIC",L"",401,0,-1,12,996,-1,86);
     for(auto& entry:items)if(entry.page==0&&entry.y>=146)entry.y+=176;
     add(L"BUTTON",L"NR保护区域",206,BS_AUTOCHECKBOX|WS_TABSTOP,0,12,146,-1,36);
     button(L"框选区域",213,0,12,188,140);button(L"清除区域",214,0,162,188);
     add(L"STATIC",L"最多4区，左键拖框，Esc取消。仅抑制NR变化；不保护SR或补帧。可随预设保存；换源清空。",1109,0,0,12,232,-1,82);
     for(auto& entry:items)if(entry.page==0&&entry.y>=104)entry.y+=48;
-    combo(207,0,100,{L"DLSS SR",L"RTX 视频超分 · 低",L"RTX 视频超分 · 中",L"RTX 视频超分 · 高",L"RTX 视频超分 · 最高"});
+    combo(207,0,100,{L"DLSS SR",L"RTX 视频超分 · 低",L"RTX 视频超分 · 中",L"RTX 视频超分 · 高",L"RTX 视频超分 · 最高",L"AMD FSR 超分 · 3.1.x（N卡可用）"});
     for(auto& entry:items)if(entry.page==0&&entry.y>=100)entry.y+=44;
     button(L"2K",730,0,12,100,80);button(L"4K",731,0,100,100,80);button(L"8K",732,0,188,100,80);
     for(auto& entry:items)if(entry.page==0&&entry.y>=56)entry.y+=80;
@@ -278,7 +321,7 @@ case WM_COMMAND:{const int id=LOWORD(wp);if(!populating&&((id>=202&&id<=205||id=
 case WM_HSCROLL:{int id=GetDlgCtrlID(reinterpret_cast<HWND>(lp));if(id>=600&&id<612){int index=id-600;float v=float(SendMessageW(reinterpret_cast<HWND>(lp),TBM_GETPOS,0,0))/(index>=4&&index<=6?1:100);if(index==3&&v<0)v=-1;std::wostringstream o;o<<std::setprecision(4)<<v;putText(100+index,o.str().c_str());}return 0;}
 case WM_TIMER:{auto s=controller->snapshot();syncProtection(enhancementEnabled?s.desired.protection:configuredSettings.protection);if(enhancementEnabled&&!dirty&&displayedSettings!=s.desired)populate(s.desired);check(200,enhancementEnabled&&s.desired.nr?BST_CHECKED:BST_UNCHECKED);check(201,enhancementEnabled&&s.desired.sr?BST_CHECKED:BST_UNCHECKED);std::wostringstream o;if(!s.running&&!s.frames&&s.transport!=engine::TransportState::Opening)o<<L"未打开媒体 · 设置待启用\n";else{
     o<<L"期望版本 "<<s.desired.revision<<L" / 已应用 "<<s.applied.revision<<(s.applying?L" · 应用中":L"");
-    const wchar_t* backend=s.applied.frameGenerationBackend==engine::FrameGenerationBackend::XeSS?L"XeSS":L"DLSS";
+    const wchar_t* backend=s.applied.frameGenerationBackend==engine::FrameGenerationBackend::XeSS?L"XeSS":s.applied.frameGenerationBackend==engine::FrameGenerationBackend::Fsr?L"AMD FSR":L"DLSS";
     o<<L"\n"<<backend<<L" · "<<(s.applied.multiplier<=1?L"补帧关闭":s.fgActive?L"补帧运行":L"等待有效补帧");
     if(!s.backendWarning.empty())message(s.backendWarning);
     else if(!displayedBackendWarning.empty())message(L"设置已应用");

@@ -17,6 +17,7 @@ using ComPtr = Microsoft::WRL::ComPtr<T>;
 struct AdapterInfo {
     std::wstring description;
     uint32_t vendorId = 0;
+    uint32_t deviceId = 0;               // PCI device id, e.g. 0x2684 = AD102
     std::string vendorIdHex;             // "0x10DE"
     std::string luidString;              // "0xHigh:0xLow"
     uint64_t dedicatedVideoMemoryBytes = 0;
