@@ -7,7 +7,7 @@
 - 拷贝优化：翻转时源正序读、目标倒序写（原来倒序读源把 4K RGB24 拖到 1.88ms）；无翻转且行距相等时整平面一次 memcpy。
 - 测试：构建 exit 0（含 dxc 编译新 shader）；`veyra_capture_color_tests` failures=0；`veyra_hdr_color_tests` 全 15 格式 × full/limited GPU 用例 pass（新格式 error=0）；修复合同 191/0；预设 66 组 exit 0。
 - 微基准（新工具 `veyra_capture_copy_bench`，4K 3840×2160、30 次/帧，N1 行拷贝 vs 旧 CPU 拆包 ms/帧）：YUY2 0.611；UYVY 0.640 vs 2.47；YVYU 0.595 vs 2.51；RGB24 1.120 vs 5.23；RGB555 0.791 vs 11.06；RGB565 0.828 vs 10.87；NV12 0.199。全部达到 N1 目标（YUY2≤1.0、BGR24≤1.5、UYVY/RGB555/565≤1.2）。
-- 未执行（如实）：真卡冒烟与 delivery 门禁本轮未跑——用户自己的 Veyra 实例（21:33 启动、GPU 71%）正占用采集卡与 GPU，待释放后补跑；"旧 CPU vs 新 GPU 全图逐像素平均/最大误差"未单独做（GPU 用例以黑白/10bit 阶梯验证 error=0）。
+- 补跑（用户释放设备后）：真卡冒烟 `capture:0:0:-1:0` 10 秒 → exit 0、frames=576、dropped=0、callback→Present P95 2.566ms、processCpuP95 0.453ms（YUY2 链路在 N1 后完好，`[capture-buffer]` 日志仍如实标注驱动忽略协商）；delivery 短测 **PASS** 23/23、43.89 秒（`logs/delivery/12ea5baac571465fb1296d2b5c6eda29/result.json`）。"旧 CPU vs 新 GPU 全图逐像素平均/最大误差"未单独做（GPU 用例以黑白/10bit 阶梯验证 error=0）。
 
 ## 2026-09-16 采集链路 N3：格式排序与延迟标注
 
