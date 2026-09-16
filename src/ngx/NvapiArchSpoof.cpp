@@ -26,14 +26,19 @@ constexpr uint32_t kNvGpuArchInfoVersion = 0x20010u;
 using NvapiInitializeFn = int(__cdecl*)();
 
 // The audited provider resolves NvAPI_GPU_GetArchInfo through a small internal
-// wrapper at RVA 0x1670. Its first 24 bytes are a stable prologue ending at the
-// next instruction boundary; a 14-byte absolute jump fits in the first 14 of
-// them, and a trampoline holding the original 24 bytes plus a jump back runs the
-// real logic. That keeps every real field (implementation/revision included)
-// and only rewrites the architecture the provider adopts.
-constexpr uint8_t kExpectedPrologue[24] = {
+// wrapper at RVA 0x1670. Only its first 16 bytes are relocated into a
+// trampoline: they are pure stack/register moves and therefore position
+// independent. The instruction that follows is RIP-relative
+// ("lock add [rip+0x73144C],1") and must keep executing at its original
+// address, so the trampoline jumps back to entry+16. Copying that instruction
+// verbatim broke the provider inside NVSDK_NGX_D3D12_Init (seh=0xC0000005)
+// because the displacement then pointed somewhere else entirely.
+constexpr uint8_t kExpectedPrologue[16] = {
     0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x20,
-    0x48, 0x8B, 0xFA, 0x48, 0x8B, 0xF1,
+    0x48, 0x8B, 0xFA, 0x48, 0x8B, 0xF1};
+// Structural check of the RIP-relative instruction we deliberately leave in
+// place (lock add dword ptr [rip+0x73144C],1).
+constexpr uint8_t kExpectedRipRelative[8] = {
     0xF0, 0x83, 0x05, 0x4C, 0x14, 0x73, 0x00, 0x01};
 constexpr size_t kRelocatedBytes = sizeof(kExpectedPrologue);
 constexpr size_t kJumpBytes = 14; // ff 25 00 00 00 00 <addr64>
@@ -126,9 +131,14 @@ bool NvapiArchSpoof::install(HMODULE module, uint32_t reportedArchitecture) {
         g.entry = nullptr;
         return false;
     }
+    if (std::memcmp(g.entry + kRelocatedBytes, kExpectedRipRelative, sizeof(kExpectedRipRelative)) != 0) {
+        g.detail = L"provider GetArchInfo wrapper layout changed after the relocated prologue";
+        g.entry = nullptr;
+        return false;
+    }
     g.targetResolved = true;
 
-    // Trampoline: the original 24 bytes followed by "jmp [rip+0] <wrapper+24>".
+    // Trampoline: the 16 relocated bytes followed by "jmp [rip+0] <wrapper+16>".
     g.trampoline = static_cast<uint8_t*>(VirtualAlloc(
         nullptr, kTrampolineBytes, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
     if (g.trampoline == nullptr) {
@@ -181,7 +191,7 @@ void NvapiArchSpoof::release() {
         g.trampoline = nullptr;
     }
     log::info("nvapi-spoof", std::format(
-        "provider architecture load site restored={} (process memory only)", restored ? 1 : 0));
+        "provider GetArchInfo wrapper restored={} (process memory only)", restored ? 1 : 0));
     g.installed = false;
     g.entry = nullptr;
 }

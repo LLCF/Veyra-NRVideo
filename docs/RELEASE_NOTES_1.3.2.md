@@ -57,6 +57,25 @@ MJPEG 1080p60 7176 帧 / MJPEG 4K18 2150 帧，全部 0 丢帧、无重连。
 .\Veyra.exe <任意视频> --fg --fg-multiplier 6 --smoke-seconds 15
 ```
 
+## 1.3.2beta4：30 系（RTX 30）DLSS 补帧的新路径
+
+上一版里 30 系解锁虽然"应用成功"，但 provider 的补帧可用性闸门仍拒绝 sm_86（真实 3060
+日志：`FG.Available=false`）。本版加入了**进程内的 NVAPI 架构伪装**，并把顺序修正为
+"在 NGX 初始化之前安装"，**在 RTX 30 上默认启用**（其余架构完全不走这条路径）：
+
+- provider 被告知运行在 Blackwell 上（0x1B0）→ 架构闸门通过；
+- 内核仍由 sm_86 重写提供（69 个 fatbin）→ 程序真的能在 Ampere 上运行；
+- 伪装装不上时自动回退到旧的重定向路径，不会因此不可用；
+- 可用环境变量调试：`VEYRA_TEST_NVAPI_SPOOF_ARCH=0`（关闭伪装、回到旧重定向路径）、
+  `VEYRA_DISABLE_AMPERE_MFG_UNLOCK=1`（整体关闭 30 系解锁）。**不要设 0x190**：本机实测按 Ada
+  上报时第一个生成帧会 Evaluate 故障并挂住进程。
+
+**本机验证（RTX 5070，模拟 30 系配置）**：伪装 + sm_86 内核 → `FG capability available=true
+multiFrameMax=5`、376 真实帧/374 生成帧、无崩溃；50 系默认路径与 40 系路径都不安装伪装
+（对照运行无 `nvapi-spoof` 活动）。**真实 30 系硬件未验证**——这正是这个包要测的东西：
+把 `logs/veyra-app.log` 里 `[ampere-mfg] ... spoofed=?`、`FG capability ...`、
+`[ngx] fg-backend ...` 与 `[app] smoke frames=/generated=` 几行发回来即可。
+
 ## 采集链路（本次重点）
 
 - **压缩格式不再走系统解码器**：MJPEG/H.264/HEVC/AV1/VP9 由 `ConnectDirect` 直接送入我们的

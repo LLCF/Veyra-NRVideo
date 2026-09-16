@@ -40,17 +40,55 @@
 
 **30 系用户测试指引（1.3.2beta4）**
 
-默认运行（不设环境变量）：保持与 1.3.2beta3 相同的行为（预期仍报 FG 不可用，但不会崩溃）。
-要试新路径：
+默认即启用（Ampere 上自动装伪装 + sm_86 内核补丁 + 跳过 arch-gate 重定向）；伪装装不上时
+自动回退到旧的重定向路径。要覆盖行为可用环境变量：
 
 ```powershell
-$env:VEYRA_TEST_NVAPI_SPOOF_ARCH='0x1B0'
+# 默认：上报 Blackwell（0x1B0），6X 上限
+# 备选：上报 Ada（0x190），4X 上限
+$env:VEYRA_TEST_NVAPI_SPOOF_ARCH='0x190'
+# 关闭伪装（回到旧的重定向路径）
+$env:VEYRA_TEST_NVAPI_SPOOF_ARCH='0'
+# 完全关闭 30 系解锁
+$env:VEYRA_DISABLE_AMPERE_MFG_UNLOCK='1'
 .\Veyra.exe <视频> --fg --smoke-seconds 15
 ```
 
 期望日志：`[nvapi-spoof] provider GetArchInfo wrapper hooked ... will report 0x1B0`、
-`FG capability available=true multiFrameMax=5`、`generated=` 接近 5×；若出现 Evaluate
-`seh` 或补帧不出现，把日志发回即可继续迭代。
+`[ampere-mfg] ... spoofed=1 reportedArch=0x1B0 ... gates=0`、
+`FG capability available=true multiFrameMax=5`、`generated=` 接近 5×。
+
+**收尾：RIP 相对陷阱 + 默认启用后的本机验证**
+
+- 首个 hook 版本把包装函数的前 24 字节整体搬进跳板，其中 `lock add [rip+0x73144C],1` 是
+  **RIP 相对指令**——搬到新地址后位移失效，写坏 provider 内存，`NVSDK_NGX_D3D12_Init` 直接
+  `seh=0xC0000005`（被 SEH 兜住、退化为无补帧）。修复：只搬**位置无关的前 16 字节**
+  （到 `mov rsi,rcx` 为止），RIP 相对那条留在原地址执行，跳板跳回 entry+16。
+- 修复后**模拟 30 系配置**（`VEYRA_TEST_FORCE_AMPERE_UNLOCK=1`，伪装默认 0x1B0）：
+  `spoofed=1 reportedArch=0x1B0 gates=0` → `FG capability available=true multiFrameMax=5`
+  → **376 真实帧 / 374 生成帧、0 崩溃**。这是 3060 将要走的同一条代码路径
+  （provider 被告知 Blackwell + 内核替换为 sm_86）。
+- 对照组：**50 系默认路径**无任何 `nvapi-spoof` 活动、380 真实/378 生成；
+  **40 系路径**（`VEYRA_TEST_FORCE_ADA_UNLOCK=1`）只有 `ada-mfg` 日志、381 生成帧、无 spoof。
+  即伪装只可能在 Ampere 分支上出现。
+- 门禁：修复合同 191/0、采集颜色 0 失败、压缩解码 ALL PASS、`delivery.ps1` PASS。
+
+**仍未验证（必须由 30 系实机回答）**：真实 GA10x 上 provider 采纳 0x1B0 后的行为
+（真实 Ampere 缺少 Blackwell 的 flip metering；若 Evaluate 失败会是 SEH 兜底后无补帧，
+日志里能看到 `fg-backend failed ... seh=`）。**不要试 0x190**：本机实测按 Ada 上报时
+provider 只给 `multiFrameMax=1`，且第一个生成帧 Evaluate 报 `seh=0xC0000005`、进程随后挂住
+（需手动结束）——它没有帮助，只会浪费一轮测试。
+
+**完整验证矩阵（本机 RTX 5070）**
+
+| 配置 | 结果 |
+| --- | --- |
+| 50 系默认（不设任何变量） | 380 真实 / 378 生成，**无任何 `nvapi-spoof` 活动** |
+| 40 系路径（`VEYRA_TEST_FORCE_ADA_UNLOCK=1`） | `ada-mfg` 全部 patch 应用、381 生成，无 spoof |
+| **30 系目标配置**（force-ampere + 默认 spoof 0x1B0） | `spoofed=1 reportedArch=0x1B0 gates=0` → `multiFrameMax=5` → **379/377**，exit 0 |
+| 30 系 6X（上述 + `--fg-multiplier 6`） | 360 真实 / **1600 生成**，exit 0 |
+| 30 系回退（`VEYRA_TEST_NVAPI_SPOOF_ARCH=0`） | 走旧重定向路径，376/374，exit 0 |
+| 30 系 + 0x190（Ada 上报） | `multiFrameMax=1` → Evaluate `seh=0xC0000005` → 进程挂住（**不推荐**） |
 
 ## 2026-09-17 3060 DLSS FG 深挖：patch 正确性实机级验证 + 上游方案拆解
 

@@ -513,11 +513,12 @@ void EnhanceGraph::prepareAmpereFgSpoof()
                                                    modulePath.string(), GetLastError()));
         return;
     }
-    // Disabled by default: the hook is still under investigation (it changes the
-    // architecture the provider adopts but does not yet produce a stable
-    // frame-generation session on the test host). Set VEYRA_TEST_NVAPI_SPOOF_ARCH
-    // to a NV_GPU_ARCHITECTURE_ID (e.g. 0x1B0 for Blackwell) to try it.
-    uint32_t spoofArchitecture = 0;
+    // Ampere default: tell the provider it runs on Blackwell (0x1B0). That is
+    // what makes its frame-generation availability gate pass; the sm_86 kernel
+    // rewrite is what makes the programs actually run. Ada/Blackwell never reach
+    // this function. VEYRA_TEST_NVAPI_SPOOF_ARCH overrides the reported id (e.g.
+    // 0x190 for Ada, 0x170 to disable the trick), 0 refuses the spoof entirely.
+    uint32_t spoofArchitecture = ngx::NvapiArchSpoof::kArchBlackwell;
     {
         wchar_t overrideText[16]{};
         if (GetEnvironmentVariableW(L"VEYRA_TEST_NVAPI_SPOOF_ARCH", overrideText, 16) > 0) {
