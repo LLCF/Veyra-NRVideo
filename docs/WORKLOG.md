@@ -80,6 +80,7 @@
 - **非 N 卡特性门控**：导出的 NR/DLSS-SR/NVOF/DLSS-FG 仅 NVIDIA，AMD FSR 超分保留；请求不可用功能时降级并写明，不再整任务失败。
 - **实测（RTX 5070）**：NVENC 6/40 Mbps → 实际 6.11/32.8；强制 MF 10/30 Mbps → 10.16/26.1，300 帧逐帧验证通过；`VEYRA_TEST_NVENC_FIRST_OPEN_FAILS=2`（模拟用户那种 NVENC 被拒）→ 自动 MF，exit 0；MF + XeSS→DLSS 2X 补帧 → 600 帧验证通过；HDR 走 MF → 明确拒绝且不留 partial，HDR 走 NVENC 正常（无回归）。修复合同 169 项 0 失败、预设往返 PASS、delivery 短测 PASS `logs/delivery/35f4f46808fb4236856701704e5a7f52/result.json`。
 - **未做/边界**：MF 只支持 8bit（HDR 仍需 NVENC）；MF 输入经 CPU readback（4K 有开销，后续可做 D3D12 共享纹理 + D3D11 互操作）；**AMD/Intel 实卡未验证**（本机只有 N 卡，走同一 API 但需实机复测）；AMF/QSV 原生后端与软件 x264/x265 未接入。
+- **测试包（提交 `4002d83`，未合并 main/未推送/未发布）**：`C:\veyra-test-packages\final-encoders-r6\Veyra-1.3.1beta-win64-portable.zip`，469,804,907 字节，SHA256 `B2D6BFE2FD62772E87DD3E17B60BC9DCA0B18CBFAFA952D7CAC786A1F6250E5A`；包内 `Veyra.exe` `DE306CB03A81A8AD3904FF0CB331EB124EAF567B3640A5479C85ED55DDE414DB`（与构建树一致）。GUI 子进程导出（ExportJobManager 共享内存 IPC）实测 `encoder=NVIDIA-NVENC ... bitrateMbps=12`、24 帧验证通过；delivery 短测 PASS `logs/delivery/f3d3e5808a3a42889d092b3c3a7cfc0c/result.json`。
 
 ### 2026-09-16 导出失败两例修复 + XeSS/FSR 补帧导出（用户："修，并且看看是不是用XeSS补帧没办法导出，也一起修了"）
 

@@ -81,3 +81,20 @@ delivery 短测 PASS `logs/delivery/35f4f46808fb4236856701704e5a7f52/result.json
   不是"能不能导出"的必要条件。
 - 软件编码（x264/x265）未接入：需要重建带编码器的 FFmpeg 或引入 openh264/x264 依赖，
   且 4K 软件编码速度不现实；当前策略是"任何现代显卡的驱动 MFT"。
+
+## 5. 测试包（未合并 main / 未推送 / 未发布）
+
+`C:\veyra-test-packages\final-encoders-r6\Veyra-1.3.1beta-win64-portable.zip`，
+469,804,907 字节，SHA256
+`B2D6BFE2FD62772E87DD3E17B60BC9DCA0B18CBFAFA952D7CAC786A1F6250E5A`；包内 `Veyra.exe`
+SHA256 `DE306CB03A81A8AD3904FF0CB331EB124EAF567B3640A5479C85ED55DDE414DB`（与构建树一致）。
+包内 EXE 实测：NVENC 20 Mbps 导出 300 帧验证通过；强制 MF 12 Mbps 导出 300 帧验证通过。
+
+## 6. 给 AMD / Intel 测试者的最小复现步骤
+
+1. 打开任意本地视频 → 专业模式 → 导出页 → 编码器不用选（自动），码率选 20 Mbps →
+   选择一个输出路径导出；
+2. 日志（`logs\export-worker-<pid>.log`）应出现
+   `[export] encoder=MediaFoundation-MFT ...` 与 `[mf-encoder] selected MFT <驱动编码器名>`；
+3. 若失败，把该日志与 `[mf-encoder] candidate[...]` 行发回：那里会列出该机器上所有候选
+   MFT 名称与协商结果，足以定位是驱动没有编码器还是类型协商被拒。
