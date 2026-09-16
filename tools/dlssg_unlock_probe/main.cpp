@@ -61,10 +61,13 @@ int wmain(int argc, wchar_t** argv) {
                 veyra::ngx::AdaMfgUnlock::kKnownTimeDateStamp, veyra::ngx::AdaMfgUnlock::kKnownSizeOfImage);
 
     const auto scan = veyra::ngx::AdaMfgUnlock::scan(module);
-    std::printf("[dlssg-unlock] scan: valid=%d identity=%d gateSites=%llu descriptors=%llu ptx=%llu midpoints=%llu joinLabelUnique=%d\n",
+    std::printf("[dlssg-unlock] scan: valid=%d identity=%d gateSites=%llu mfgGateSites=%llu mfgGateValid=%d descriptors=%llu distinctFatbins=%llu ptx=%llu midpoints=%llu joinLabelUnique=%d\n",
                 scan.moduleValid ? 1 : 0, scan.identityMatched ? 1 : 0,
                 static_cast<unsigned long long>(scan.archGateSites),
+                static_cast<unsigned long long>(scan.mfgGateSites),
+                scan.mfgGateValid ? 1 : 0,
                 static_cast<unsigned long long>(scan.descriptorSlots),
+                static_cast<unsigned long long>(scan.distinctFatbins),
                 static_cast<unsigned long long>(scan.ptxBytes),
                 static_cast<unsigned long long>(scan.midpointCount),
                 scan.joinLabelUnique ? 1 : 0);
@@ -72,6 +75,8 @@ int wmain(int argc, wchar_t** argv) {
 
     const bool structureOk = scan.moduleValid && scan.archGateSites >= veyra::ngx::AdaMfgUnlock::kMinArchGateSites &&
                              scan.archGateSites <= veyra::ngx::AdaMfgUnlock::kMaxArchGateSites &&
+                             scan.mfgGateSites == veyra::ngx::AdaMfgUnlock::kExpectedMfgGateSites &&
+                             scan.mfgGateValid &&
                              scan.descriptorSlots > 0 && scan.ptxBytes == veyra::ngx::AdaMfgUnlock::kExpectedPtxBytes &&
                              scan.midpointCount == veyra::ngx::AdaMfgUnlock::kExpectedMidpoints &&
                              scan.joinLabelUnique;
@@ -88,29 +93,40 @@ int wmain(int argc, wchar_t** argv) {
     }
 
     const auto applied = veyra::ngx::AdaMfgUnlock::apply(module, true);
-    std::printf("[dlssg-unlock] apply: applied=%d gates=%d(%llu) kernel=%d descriptors=%llu detail=%s\n",
+    std::printf("[dlssg-unlock] apply: applied=%d gates=%d(%llu) mfgGate=%d(%llu) kernel=%d descriptors=%llu detail=%s\n",
                 applied.applied ? 1 : 0, applied.archGatesPatched ? 1 : 0,
-                static_cast<unsigned long long>(applied.archGateSites), applied.kernelPatched ? 1 : 0,
+                static_cast<unsigned long long>(applied.archGateSites),
+                applied.mfgGatePatched ? 1 : 0,
+                static_cast<unsigned long long>(applied.mfgGateSites), applied.kernelPatched ? 1 : 0,
                 static_cast<unsigned long long>(applied.descriptorSlots), toUtf8(applied.detail).c_str());
 
     // Read-back: the gate bytes must now read 0x90 and the descriptors must point
     // at the rebuilt fatbin, so a second scan sees zero gates and no matching
-    // descriptor any more (the rebuilt one is uncompressed).
+    // descriptor any more (the rebuilt one is uncompressed). The count/index
+    // validator scan must still find its unique site, now carrying the patched
+    // jump, and report it as valid.
     const auto afterApply = veyra::ngx::AdaMfgUnlock::scan(module);
-    std::printf("[dlssg-unlock] post-apply scan: gateSites=%llu descriptors=%llu ptx=%llu detail=%s\n",
+    std::printf("[dlssg-unlock] post-apply scan: gateSites=%llu mfgGateSites=%llu mfgGateValid=%d descriptors=%llu ptx=%llu detail=%s\n",
                 static_cast<unsigned long long>(afterApply.archGateSites),
+                static_cast<unsigned long long>(afterApply.mfgGateSites),
+                afterApply.mfgGateValid ? 1 : 0,
                 static_cast<unsigned long long>(afterApply.descriptorSlots),
                 static_cast<unsigned long long>(afterApply.ptxBytes), afterApply.detail.c_str());
-    const bool readBack = applied.applied && afterApply.archGateSites == 0;
+    const bool readBack = applied.applied && afterApply.archGateSites == 0 &&
+                          afterApply.mfgGateSites == 1 && afterApply.mfgGateValid;
 
     veyra::ngx::AdaMfgUnlock::release();
     const auto afterRelease = veyra::ngx::AdaMfgUnlock::scan(module);
-    std::printf("[dlssg-unlock] post-release scan: gateSites=%llu descriptors=%llu ptx=%llu midpoints=%llu\n",
+    std::printf("[dlssg-unlock] post-release scan: gateSites=%llu mfgGateSites=%llu mfgGateValid=%d descriptors=%llu ptx=%llu midpoints=%llu\n",
                 static_cast<unsigned long long>(afterRelease.archGateSites),
+                static_cast<unsigned long long>(afterRelease.mfgGateSites),
+                afterRelease.mfgGateValid ? 1 : 0,
                 static_cast<unsigned long long>(afterRelease.descriptorSlots),
                 static_cast<unsigned long long>(afterRelease.ptxBytes),
                 static_cast<unsigned long long>(afterRelease.midpointCount));
     const bool restored = afterRelease.archGateSites == scan.archGateSites &&
+                          afterRelease.mfgGateSites == scan.mfgGateSites &&
+                          afterRelease.mfgGateValid == scan.mfgGateValid &&
                           afterRelease.descriptorSlots == scan.descriptorSlots &&
                           afterRelease.ptxBytes == scan.ptxBytes;
     std::printf("[dlssg-unlock] applied=%d readBack=%d restored=%d\n", applied.applied ? 1 : 0, readBack ? 1 : 0,

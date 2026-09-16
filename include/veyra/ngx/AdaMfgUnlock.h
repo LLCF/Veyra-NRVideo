@@ -29,6 +29,17 @@ namespace veyra::ngx {
 //      kernel's own temporal parameter, and the fatbin is truncated after that
 //      PTX entry so the driver JITs the corrected code instead of loading the
 //      precompiled cubin.
+//   4. the DLSS-G provider's count/index validator (ported from
+//      dashdogy/RTX40MFG-Unlock v1.3.3 ngx_mfg_gate) gates the accepted
+//      numFramesToGenerate on the runtime-detected arch; without it Ada can
+//      advertise multi-frame and still refuse to generate more than one frame.
+//
+// Identity is verified in three SHA-256 steps against the audited 310.7 build,
+// mirroring the upstream midpoint_fix profiles:
+//   source fatbin (98408 B) -> decompressed PTX (99362 B) -> rebuilt fatbin
+//   (127200 B). The rebuilt-form digest is the publication gate: the patched
+//   image must match the upstream-verified byte stream exactly before the
+//   descriptor is redirected, otherwise everything rolls back.
 //
 // Safety rules baked in:
 //   - never applied on Blackwell (50 series keeps its native path untouched);
@@ -50,12 +61,28 @@ public:
     static constexpr size_t kMaxArchGateSites = 4;
     static constexpr uint32_t kAdaArchId = 0x190u;      // NVAPI arch id, Ada
     static constexpr uint32_t kBlackwellArchId = 0x1B0u;
+    // Audited fatbin identity (dashdogy/RTX40MFG-Unlock v1.3.3 legacy profile,
+    // MIT; hashes reproduced byte-for-byte against runtime_local 310.7).
+    static constexpr uint64_t kExpectedSourceFatbinBytes = 98408ull;
+    static constexpr uint64_t kExpectedRebuiltFatbinBytes = 127200ull;
+    static constexpr const char* kExpectedSourceFatbinSha256 =
+        "5A8E0284AAB8AC14FC82B0504BBEEF25D2FCE1D13A1C11D8BDB3F91FEE8145FC";
+    static constexpr const char* kExpectedSourcePtxSha256 =
+        "46C05996A2EF199BBE39378681734ED5EE757655DE70410D9900D85BA91222F1";
+    static constexpr const char* kExpectedRebuiltFatbinSha256 =
+        "19FB3CD5500BFD1FC88F96C36B381E096D6AB1DFC7B1DB02A04D40A00849104B";
+    // The count/index validator pattern is expected exactly once in the
+    // audited build; a different count is a refusal, not a guess.
+    static constexpr size_t kExpectedMfgGateSites = 1;
 
     struct Scan {
         bool moduleValid = false;
         bool identityMatched = false;
         size_t archGateSites = 0;
+        size_t mfgGateSites = 0;
+        bool mfgGateValid = false;
         size_t descriptorSlots = 0;
+        size_t distinctFatbins = 0;
         uint64_t ptxBytes = 0;
         size_t midpointCount = 0;
         bool joinLabelUnique = false;
@@ -68,7 +95,9 @@ public:
         bool applied = false;
         bool archGatesPatched = false;
         bool kernelPatched = false;
+        bool mfgGatePatched = false;
         size_t archGateSites = 0;
+        size_t mfgGateSites = 0;
         size_t descriptorSlots = 0;
         std::wstring detail;
     };

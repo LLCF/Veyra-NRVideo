@@ -153,26 +153,59 @@ before its dispatch), so that validation mode is skipped for the FSR SR
 configuration with an explicit log line. See
 [AMD FSR frame generation integration record](docs/FSR_FRAMEGEN_INTEGRATION_2026-09-16.md).
 
-## MFGAdaUnlock-RenoDx (RTX 40 series DLSS multi-frame unlock — ported)
+## RTX 40 series DLSS multi-frame unlock (ported)
 
-[ImDreamt/MFGAdaUnlock-RenoDx](https://github.com/ImDreamt/MFGAdaUnlock-RenoDx)
-(MIT) is the source of Veyra's RTX 40 series multi-frame unlock. Ported into
-`include/veyra/ngx/AdaMfgUnlock.h` / `src/ngx/AdaMfgUnlock.cpp` and adapted:
+Two upstream projects are ported into `include/veyra/ngx/AdaMfgUnlock.h` /
+`src/ngx/AdaMfgUnlock.cpp`; both are MIT-licensed and are attributed separately.
 
-- the two architecture compares (`0x1b0` → `0x190`), the kernel PTX midpoint
-  correction (inject the temporal parameter, replace the 104 compiled-in `0.5`
-  multiplies, truncate the fatbin so the driver JITs the corrected code) and the
-  `dlfg_kernel` descriptor redirect are the upstream technique;
-- Veyra adds hard architecture gating (never applied on Blackwell, so RTX 50
-  keeps its native path), audited build identity, structural verification of the
-  PTX before any write, read-back verification and full rollback when the
-  session ends;
-- the upstream Streamline-side hardware flip-metering workaround is **not
-  applicable**: Veyra calls NGX directly and does not load Streamline or any
-  ReShade/RenoDX add-on. That risk is documented as unverified for Ada.
+### ImDreamt/MFGAdaUnlock-RenoDx (initial port)
+
+https://github.com/ImDreamt/MFGAdaUnlock-RenoDx , commit
+`a8aa0d9289471facc1e32013d17fd9c1195bc2cd` (MIT). The initial port brought:
+
+- the two architecture compares (`0x1b0` → `0x190`);
+- the kernel PTX midpoint correction (inject the temporal parameter, replace the
+  104 compiled-in `0.5` multiplies, truncate the fatbin so the driver JITs the
+  corrected code instead of loading the precompiled cubin);
+- the `dlfg_kernel` descriptor redirect, all process-memory only.
+
+### dashdogy/RTX40MFG-Unlock v1.3.3 (completion port, 2026-09-16)
+
+https://github.com/dashdogy/RTX40MFG-Unlock , commit
+`33b41835dc39c5d8ab1ef93efb2449be31139c09` (v1.3.3, MIT; source tree studied in
+the gitignored `third_party_local/community/RTX40MFG-Unlock`). Ported pieces:
+
+- the provider count/index validator patch from `source/native/ngx_mfg_gate.h`
+  (pattern `84 d2 0f 84 03 01 00 00 be 05 00 00 00`, near-jz head `0f 84` →
+  `eb 04`, whose entry condition gates the accepted generated-frame ceiling on
+  the runtime-detected architecture). This is the documented mechanism behind
+  upstream's v1.3.3 fix for "MFG getting stuck at 2x"; every count, index and
+  profile-limit check after the branch is retained;
+- the three-stage SHA-256 identity chain from `source/native/midpoint_fix.cpp`
+  legacy profile: source fatbin (98408 B) `5A8E0284…`, decompressed PTX
+  (99362 B) `46C05996…`, rebuilt fatbin (127200 B) `19FB3CD5…`, plus the
+  sm_120/sm_89 entry field checks (28024/28017/90490 and 30384/30379/99362).
+  Veyra reproduced the rebuilt-fatbin digest byte-for-byte from its own
+  `runtime_local/nvidia/nvngx_dlssg.dll` 310.7 before porting; the digest is now
+  a publication gate, so a build that does not reproduce the upstream-verified
+  byte stream is refused and fully rolled back.
+
+Veyra adaptations and additions: hard architecture gating (never applied on
+Blackwell, so RTX 50 keeps its native path); the count/index site must match
+uniquely, sit at an even address and branch to the audited `cmp r8d, 1` target
+before any write; all edits happen in the mapped image only (disk file is never
+touched, re-signed or renamed); read-back verification and full rollback when
+the session ends. The rollback path re-opens page protection before restoring
+bytes — negative testing during this port caught that the original Veyra
+rollback path wrote into read-only pages and would have crashed the process on
+a refused kernel fix. The upstream Streamline-side hardware flip-metering /
+pacing workaround and per-title `nvidia_mfg_policy` ceilings are **not
+applicable**: Veyra calls NGX directly and does not load Streamline, ReShade or
+any RenoDX add-on.
 
 Evidence on this machine (RTX 5070, structure and patch mechanics only):
-`logs/fsr/dlssg-unlock-scan.log`, `logs/fsr/dlssg-unlock-applytest.log`.
+`logs/fsr/dlssg-unlock-scan.log`, `logs/fsr/dlssg-unlock-applytest.log`;
+delivery gate `logs/delivery/d0a266a1e549402ca26c2c8ec8d27022/result.json`.
 Ada behaviour still has to be verified on RTX 40 hardware.
 
 ## dav1d (1.3.0 AV1 playback)

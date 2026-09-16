@@ -2,6 +2,10 @@
 
 #include "veyra/Log.h"
 
+#include <bcrypt.h>
+
+#include <algorithm>
+#include <array>
 #include <cstring>
 #include <filesystem>
 #include <mutex>
@@ -19,6 +23,19 @@ constexpr size_t kEntryNameOffset = 0x10;
 constexpr size_t kDescriptorNameOffset = 0x28;
 constexpr char kDescriptorName[] = "dlfg_kernel";
 constexpr char kEntryName[] = "main_kernel";
+// Audited fatbin layout of nvngx_dlssg.dll 310.7 (dashdogy legacy profile):
+// outer header (16) + sm_120 entry (hdr 104 + payload 28024 = 28128), then the
+// sm_89 PTX entry at offset 28144 whose payload is 30384 bytes (30379
+// compressed) and decompresses to the 99362-byte audited PTX.
+constexpr size_t kSm120EntryOffset = kOuterHeader;
+constexpr uint32_t kEntryHeaderBytes = 104;
+constexpr uint64_t kSm120PayloadBytes = 28024ull;
+constexpr uint32_t kSm120CompressedBytes = 28017u;
+constexpr uint64_t kSm120RawBytes = 90490ull;
+constexpr uint64_t kSm89PayloadBytes = 30384ull;
+constexpr uint32_t kSm89CompressedBytes = 30379u;
+constexpr uint64_t kCompressedFlags = 0x2041ull;
+constexpr size_t kSm89EntryOffset = kSm120EntryOffset + kEntryHeaderBytes + kSm120PayloadBytes;
 constexpr char kJoinLabel[] = "$L__BB0_3:";
 constexpr char kMidpointBits[] = "0f3F000000";
 constexpr char kMulPrefix[] = "mul.ftz.f32 ";
@@ -31,10 +48,56 @@ constexpr char kTemporalInput[] =
     "ld.param.f32 %f134, [main_kernel_param_0+32];\r\n"
     "mov.f32 %f135, 0f3F800000;\r\n"
     "sub.ftz.f32 %f136, %f135, %f134;\r\n";
+// dashdogy/RTX40MFG-Unlock v1.3.3 ngx_mfg_gate (MIT), byte-for-byte pattern of
+// the provider's count/index validator in the audited 310.7 build:
+//   test dl, dl ; jz <cmp r8d,1 path> ; mov esi, 5
+// Patching the near-jz head to "jmp +4" skips the remaining displacement bytes
+// and falls into mov esi,5 unconditionally, restoring on Ada the multi-frame
+// count ceiling the provider only applies on Blackwell. Every count, index and
+// profile-limit check after this branch is retained.
+constexpr uint8_t kMfgGatePattern[] = {
+    0x84, 0xd2, 0x0f, 0x84, 0x03, 0x01, 0x00, 0x00, 0xbe, 0x05, 0x00, 0x00, 0x00};
+constexpr size_t kMfgGatePatternSize = sizeof(kMfgGatePattern);
+constexpr size_t kMfgGateJumpOffset = 2;
+constexpr uint8_t kMfgGateOriginal[2] = {0x0f, 0x84};
+constexpr uint8_t kMfgGateReplacement[2] = {0xeb, 0x04};
+constexpr uint8_t kMfgGateTargetCheck[4] = {0x41, 0x83, 0xf8, 0x01};  // cmp r8d, 1
 
 uint16_t readU16(const uint8_t* p) { uint16_t v; std::memcpy(&v, p, 2); return v; }
 uint32_t readU32(const uint8_t* p) { uint32_t v; std::memcpy(&v, p, 4); return v; }
 uint64_t readU64(const uint8_t* p) { uint64_t v; std::memcpy(&v, p, 8); return v; }
+
+// Uppercase SHA-256 comparison via the platform BCrypt (no new dependency;
+// veyra_base already links bcrypt). Used for the three identity gates ported
+// from the upstream midpoint_fix profiles.
+bool sha256Equals(const uint8_t* bytes, size_t count, const char* expected) {
+    if (bytes == nullptr || count == 0 || count > ULONG_MAX || expected == nullptr ||
+        std::strlen(expected) != 64) {
+        return false;
+    }
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    std::array<uint8_t, 32> digest{};
+    NTSTATUS status = BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0);
+    if (status >= 0) {
+        status = BCryptHash(algorithm, nullptr, 0, const_cast<PUCHAR>(bytes),
+                            static_cast<ULONG>(count), digest.data(),
+                            static_cast<ULONG>(digest.size()));
+    }
+    if (algorithm != nullptr) {
+        BCryptCloseAlgorithmProvider(algorithm, 0);
+    }
+    if (status < 0) {
+        return false;
+    }
+    static constexpr char kDigits[] = "0123456789ABCDEF";
+    for (size_t index = 0; index < digest.size(); ++index) {
+        if (expected[index * 2] != kDigits[digest[index] >> 4] ||
+            expected[index * 2 + 1] != kDigits[digest[index] & 0x0F]) {
+            return false;
+        }
+    }
+    return true;
+}
 
 // Plain LZ4 block format, as emitted by the CUDA fatbin packer.
 bool lz4BlockDecompress(const uint8_t* src, size_t srcSize, uint8_t* dst, size_t dstSize) {
@@ -183,27 +246,56 @@ PtxFacts inspectPtx(const uint8_t* fat, size_t entry, std::vector<uint8_t>& ptx)
 // Rebuild the fatbin with the temporal fix applied. Returns false with a reason
 // whenever the structure is not exactly what the audited build has.
 bool buildTemporalFatbin(const uint8_t* fat, size_t fatSize, std::vector<uint8_t>& out, std::string& why) {
+    // Structural identity first: the audited 310.7 fatbin has a fixed layout
+    // and byte-exact hashes (mirrors the upstream TemporalProviderProfile).
+    if (fatSize != AdaMfgUnlock::kExpectedSourceFatbinBytes ||
+        readU32(fat) != kFatbinMagic || readU16(fat + 6) != kOuterHeader ||
+        readU64(fat + 8) + kOuterHeader != fatSize) {
+        why = "fatbin outer header does not match the audited layout";
+        return false;
+    }
+    const uint8_t* sm120 = fat + kSm120EntryOffset;
+    if (readU16(sm120) != kPtxKind || readU32(sm120 + 4) != kEntryHeaderBytes ||
+        readU64(sm120 + 8) != kSm120PayloadBytes ||
+        readU32(sm120 + 16) != kSm120CompressedBytes ||
+        readU32(sm120 + 28) != 120u || readU64(sm120 + 40) != kCompressedFlags ||
+        readU64(sm120 + 56) != kSm120RawBytes) {
+        why = "sm_120 entry does not match the audited fatbin layout";
+        return false;
+    }
     size_t entry = 0;
     if (!findSm89PtxEntry(fat, fatSize, entry)) {
         why = "no sm_89 PTX entry in the fatbin";
         return false;
     }
+    if (entry != kSm89EntryOffset) {
+        why = "sm_89 entry is at offset " + std::to_string(entry) + ", expected " +
+              std::to_string(kSm89EntryOffset);
+        return false;
+    }
     const uint32_t hdr = readU32(fat + entry + 4);
     const uint32_t compressed = readU32(fat + entry + 16);
     const uint64_t raw = readU64(fat + entry + 56);
-    if (compressed == 0 || raw == 0 || raw > (8u << 20)) {
-        why = "PTX entry is not compressed as expected";
+    if (readU16(fat + entry) != kPtxKind || hdr != kEntryHeaderBytes ||
+        readU64(fat + entry + 8) != kSm89PayloadBytes ||
+        compressed != kSm89CompressedBytes || readU32(fat + entry + 28) != kSm89Arch ||
+        readU64(fat + entry + 40) != kCompressedFlags ||
+        raw != AdaMfgUnlock::kExpectedPtxBytes) {
+        why = "sm_89 entry does not match the audited fatbin layout";
         return false;
     }
-    if (raw != AdaMfgUnlock::kExpectedPtxBytes) {
-        why = "PTX is " + std::to_string(raw) + " bytes, expected " +
-              std::to_string(AdaMfgUnlock::kExpectedPtxBytes);
+    if (!sha256Equals(fat, fatSize, AdaMfgUnlock::kExpectedSourceFatbinSha256)) {
+        why = "source fatbin SHA-256 does not match the audited runtime";
         return false;
     }
     // static_cast, not size_t(raw): "T x(U(y))" is a function declaration.
     std::vector<uint8_t> ptx(static_cast<size_t>(raw), uint8_t{0});
     if (!lz4BlockDecompress(fat + entry + hdr, compressed, ptx.data(), ptx.size())) {
         why = "LZ4 decompression failed";
+        return false;
+    }
+    if (!sha256Equals(ptx.data(), ptx.size(), AdaMfgUnlock::kExpectedSourcePtxSha256)) {
+        why = "decompressed PTX SHA-256 does not match the audited runtime";
         return false;
     }
     const char* begin = reinterpret_cast<const char*>(ptx.data());
@@ -273,6 +365,13 @@ bool buildTemporalFatbin(const uint8_t* fat, size_t fatSize, std::vector<uint8_t
     std::memcpy(out.data() + entry + 56, &zero64, 8);
     const uint64_t outer = finalSize - kOuterHeader;
     std::memcpy(out.data() + 8, &outer, 8);
+    // Publication gate: the rebuilt image must equal the upstream-verified
+    // byte stream exactly, or nothing is published and the caller rolls back.
+    if (out.size() != AdaMfgUnlock::kExpectedRebuiltFatbinBytes ||
+        !sha256Equals(out.data(), out.size(), AdaMfgUnlock::kExpectedRebuiltFatbinSha256)) {
+        why = "rebuilt fatbin does not match the upstream-verified byte stream";
+        return false;
+    }
     return true;
 }
 
@@ -282,12 +381,65 @@ struct GlobalState {
     bool installed = false;
     std::vector<std::pair<unsigned char*, unsigned char>> gateSites;
     std::vector<std::pair<uint64_t*, uint64_t>> descriptorSlots;
+    struct MfgGateRecord {
+        uint8_t* jump = nullptr;
+        std::array<uint8_t, 2> original{};
+    };
+    std::vector<MfgGateRecord> mfgGateWrites;
     void* kernelAllocation = nullptr;
 };
 
 GlobalState& global() {
     static GlobalState instance;
     return instance;
+}
+
+// Count/index validator site (see kMfgGatePattern). Ambiguity is a refusal.
+struct MfgGateSite {
+    uint8_t* match = nullptr;
+    uint8_t* jump = nullptr;
+};
+
+bool mfgGateMatches(const uint8_t* p) {
+    return std::memcmp(p, kMfgGatePattern, 2) == 0 &&
+           (std::memcmp(p + kMfgGateJumpOffset, kMfgGateOriginal, 2) == 0 ||
+            std::memcmp(p + kMfgGateJumpOffset, kMfgGateReplacement, 2) == 0) &&
+           std::memcmp(p + 4, kMfgGatePattern + 4, kMfgGatePatternSize - 4) == 0;
+}
+
+bool findMfgGateSite(uint8_t* base, const IMAGE_NT_HEADERS64* nt, MfgGateSite& site,
+                     size_t& matchCount) {
+    matchCount = 0;
+    uint8_t* found = nullptr;
+    const auto* section = IMAGE_FIRST_SECTION(nt);
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++section) {
+        if ((section->Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0) continue;
+        uint8_t* begin = base + section->VirtualAddress;
+        const size_t size = section->Misc.VirtualSize;
+        if (size < kMfgGatePatternSize) continue;
+        for (size_t off = 0; off + kMfgGatePatternSize <= size; ++off) {
+            if (!mfgGateMatches(begin + off)) continue;
+            ++matchCount;
+            found = begin + off;
+        }
+    }
+    if (matchCount != 1 || found == nullptr) return false;
+    // Upstream requires the patched pair at an even address (atomic publication
+    // precondition) and the branch target to be the audited "cmp r8d, 1" path.
+    if ((reinterpret_cast<uintptr_t>(found + kMfgGateJumpOffset) & 1u) != 0) return false;
+    int32_t displacement = 0;
+    std::memcpy(&displacement, found + 4, 4);
+    const auto imageStart = reinterpret_cast<uintptr_t>(base);
+    const size_t imageSize = nt->OptionalHeader.SizeOfImage;
+    const uintptr_t target = reinterpret_cast<uintptr_t>(found) + 8 + static_cast<intptr_t>(displacement);
+    if (target < imageStart || target + sizeof(kMfgGateTargetCheck) > imageStart + imageSize) return false;
+    if (std::memcmp(reinterpret_cast<const void*>(target), kMfgGateTargetCheck,
+                    sizeof(kMfgGateTargetCheck)) != 0) {
+        return false;
+    }
+    site.match = found;
+    site.jump = found + kMfgGateJumpOffset;
+    return true;
 }
 
 void patchGateSites(uint8_t* base, const IMAGE_NT_HEADERS64* nt,
@@ -361,6 +513,15 @@ AdaMfgUnlock::Scan AdaMfgUnlock::scan(HMODULE module) {
 
     const auto hits = findDescriptors(base, nt);
     result.descriptorSlots = hits.size();
+    {
+        std::vector<const uint8_t*> fatbins;
+        for (const auto& hit : hits) {
+            if (std::find(fatbins.begin(), fatbins.end(), hit.fatbin) == fatbins.end()) {
+                fatbins.push_back(hit.fatbin);
+            }
+        }
+        result.distinctFatbins = fatbins.size();
+    }
     if (!hits.empty()) {
         size_t entry = 0;
         if (findSm89PtxEntry(hits.front().fatbin, hits.front().fatbinSize, entry)) {
@@ -371,8 +532,13 @@ AdaMfgUnlock::Scan AdaMfgUnlock::scan(HMODULE module) {
             result.joinLabelUnique = facts.joinLabelCount == 1;
         }
     }
-    result.detail = "gates=" + std::to_string(result.archGateSites) + " slots=" +
-                    std::to_string(result.descriptorSlots) + " ptx=" + std::to_string(result.ptxBytes) +
+    MfgGateSite mfgGate{};
+    result.mfgGateValid = findMfgGateSite(base, nt, mfgGate, result.mfgGateSites);
+    result.detail = "gates=" + std::to_string(result.archGateSites) + " mfgGate=" +
+                    std::to_string(result.mfgGateSites) + " mfgGateValid=" +
+                    (result.mfgGateValid ? "1" : "0") + " slots=" +
+                    std::to_string(result.descriptorSlots) + " fatbins=" +
+                    std::to_string(result.distinctFatbins) + " ptx=" + std::to_string(result.ptxBytes) +
                     " midpoints=" + std::to_string(result.midpointCount) +
                     " joinLabelUnique=" + (result.joinLabelUnique ? "1" : "0");
     return result;
@@ -410,6 +576,26 @@ AdaMfgUnlock::State AdaMfgUnlock::apply(HMODULE module, bool includeKernelFix) {
     state.identityVerified = nt->OptionalHeader.SizeOfImage == kKnownSizeOfImage &&
                              nt->FileHeader.TimeDateStamp == kKnownTimeDateStamp;
 
+    auto rollbackGates = [&]() {
+        for (const auto& site : g.gateSites) {
+            DWORD oldProtect = 0;
+            if (VirtualProtect(site.first, 1, PAGE_EXECUTE_READWRITE, &oldProtect) == 0) continue;
+            *site.first = site.second;
+            DWORD ignored = 0;
+            VirtualProtect(site.first, 1, oldProtect, &ignored);
+        }
+        g.gateSites.clear();
+        for (const auto& write : g.mfgGateWrites) {
+            DWORD oldProtect = 0;
+            if (VirtualProtect(write.jump, 2, PAGE_EXECUTE_READWRITE, &oldProtect) == 0) continue;
+            std::memcpy(write.jump, write.original.data(), 2);
+            FlushInstructionCache(GetCurrentProcess(), write.jump, 2);
+            DWORD ignored = 0;
+            VirtualProtect(write.jump, 2, oldProtect, &ignored);
+        }
+        g.mfgGateWrites.clear();
+    };
+
     // Architecture gates first: without both of them the runtime advertises
     // multi-frame and then renders black.
     patchGateSites(base, nt, g.gateSites);
@@ -417,13 +603,52 @@ AdaMfgUnlock::State AdaMfgUnlock::apply(HMODULE module, bool includeKernelFix) {
     state.archGatesPatched = state.archGateSites >= kMinArchGateSites &&
                              state.archGateSites <= kMaxArchGateSites;
     if (!state.archGatesPatched) {
-        for (const auto& site : g.gateSites) *site.first = site.second;
-        g.gateSites.clear();
+        rollbackGates();
         state.detail = std::format(L"arch-gate site count {} outside the audited range {}-{}; runtime left untouched",
                                    state.archGateSites, kMinArchGateSites, kMaxArchGateSites);
         g.state = state;
         return state;
     }
+
+    // Provider count/index validator (dashdogy v1.3.3 ngx_mfg_gate): without
+    // this, Ada can advertise 6X and still refuse to generate beyond one frame.
+    MfgGateSite mfgGate{};
+    size_t mfgGateMatches = 0;
+    const bool mfgGateFound = findMfgGateSite(base, nt, mfgGate, mfgGateMatches);
+    state.mfgGateSites = mfgGateMatches;
+    if (!mfgGateFound || mfgGateMatches != kExpectedMfgGateSites) {
+        rollbackGates();
+        state.archGatesPatched = false;
+        state.detail = std::format(L"count/index validator: {} site(s) found, valid={}; exactly {} expected; runtime left untouched",
+                                   mfgGateMatches, mfgGateFound ? 1 : 0, kExpectedMfgGateSites);
+        g.state = state;
+        return state;
+    }
+    std::array<uint8_t, 2> mfgGateOriginal{};
+    std::memcpy(mfgGateOriginal.data(), mfgGate.jump, 2);
+    if (std::memcmp(mfgGateOriginal.data(), kMfgGateOriginal, 2) != 0) {
+        rollbackGates();
+        state.archGatesPatched = false;
+        state.detail = L"count/index validator carries foreign bytes; runtime left untouched";
+        g.state = state;
+        return state;
+    }
+    {
+        DWORD oldProtect = 0;
+        if (VirtualProtect(mfgGate.jump, 2, PAGE_EXECUTE_READWRITE, &oldProtect) == 0) {
+            rollbackGates();
+            state.archGatesPatched = false;
+            state.detail = L"count/index validator page is not writable; runtime left untouched";
+            g.state = state;
+            return state;
+        }
+        std::memcpy(mfgGate.jump, kMfgGateReplacement, 2);
+        FlushInstructionCache(GetCurrentProcess(), mfgGate.jump, 2);
+        DWORD ignored = 0;
+        VirtualProtect(mfgGate.jump, 2, oldProtect, &ignored);
+    }
+    g.mfgGateWrites.push_back({mfgGate.jump, mfgGateOriginal});
+    state.mfgGatePatched = true;
 
     if (includeKernelFix) {
         const auto hits = findDescriptors(base, nt);
@@ -431,9 +656,9 @@ AdaMfgUnlock::State AdaMfgUnlock::apply(HMODULE module, bool includeKernelFix) {
         std::vector<uint8_t> rebuilt;
         std::string why;
         if (hits.empty() || !buildTemporalFatbin(hits.front().fatbin, hits.front().fatbinSize, rebuilt, why)) {
-            for (const auto& site : g.gateSites) *site.first = site.second;
-            g.gateSites.clear();
+            rollbackGates();
             state.archGatesPatched = false;
+            state.mfgGatePatched = false;
             state.detail = std::format(L"kernel fix refused: {}; arch gates rolled back, runtime left untouched",
                                        std::wstring(why.begin(), why.end()));
             g.state = state;
@@ -441,9 +666,9 @@ AdaMfgUnlock::State AdaMfgUnlock::apply(HMODULE module, bool includeKernelFix) {
         }
         void* mem = VirtualAlloc(nullptr, rebuilt.size(), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         if (mem == nullptr) {
-            for (const auto& site : g.gateSites) *site.first = site.second;
-            g.gateSites.clear();
+            rollbackGates();
             state.archGatesPatched = false;
+            state.mfgGatePatched = false;
             state.detail = L"kernel allocation failed; arch gates rolled back";
             g.state = state;
             return state;
@@ -459,9 +684,9 @@ AdaMfgUnlock::State AdaMfgUnlock::apply(HMODULE module, bool includeKernelFix) {
         }
         if (g.descriptorSlots.empty()) {
             VirtualFree(mem, 0, MEM_RELEASE);
-            for (const auto& site : g.gateSites) *site.first = site.second;
-            g.gateSites.clear();
+            rollbackGates();
             state.archGatesPatched = false;
+            state.mfgGatePatched = false;
             state.detail = L"no dlfg_kernel descriptor slot was writable; arch gates rolled back";
             g.state = state;
             return state;
@@ -471,13 +696,15 @@ AdaMfgUnlock::State AdaMfgUnlock::apply(HMODULE module, bool includeKernelFix) {
     }
 
     g.installed = true;
-    state.applied = state.archGatesPatched && state.kernelPatched;
-    state.detail = std::format(L"gates={} descriptors={} kernel={} (in-memory only)",
-                               state.archGateSites, state.descriptorSlots,
+    state.applied = state.archGatesPatched && state.mfgGatePatched && state.kernelPatched;
+    state.detail = std::format(L"gates={} mfgGate={} descriptors={} kernel={} (in-memory only)",
+                               state.archGateSites, state.mfgGatePatched ? 1 : 0,
+                               state.descriptorSlots,
                                state.kernelPatched ? L"temporal-fixed" : L"untouched");
     g.state = state;
-    veyra::log::info("ada-mfg", std::format("Ada multi-frame unlock: {} gate(s), {} descriptor slot(s), kernel={}, identityVerified={}",
-                                            state.archGateSites, state.descriptorSlots,
+    veyra::log::info("ada-mfg", std::format("Ada multi-frame unlock: {} gate(s), count/index gate={}, {} descriptor slot(s), kernel={}, identityVerified={}",
+                                            state.archGateSites, state.mfgGatePatched ? 1 : 0,
+                                            state.descriptorSlots,
                                             state.kernelPatched ? 1 : 0, state.identityVerified ? 1 : 0));
     return state;
 }
@@ -485,7 +712,9 @@ AdaMfgUnlock::State AdaMfgUnlock::apply(HMODULE module, bool includeKernelFix) {
 void AdaMfgUnlock::release() {
     auto& g = global();
     std::lock_guard lock(g.mutex);
-    if (!g.installed && g.gateSites.empty() && g.descriptorSlots.empty()) return;
+    if (!g.installed && g.gateSites.empty() && g.descriptorSlots.empty() && g.mfgGateWrites.empty()) {
+        return;
+    }
     for (const auto& slot : g.descriptorSlots) {
         DWORD oldProtect = 0;
         if (VirtualProtect(slot.first, 8, PAGE_READWRITE, &oldProtect) == 0) continue;
@@ -506,6 +735,15 @@ void AdaMfgUnlock::release() {
         VirtualProtect(site.first, 1, oldProtect, &ignored);
     }
     g.gateSites.clear();
+    for (const auto& write : g.mfgGateWrites) {
+        DWORD oldProtect = 0;
+        if (VirtualProtect(write.jump, 2, PAGE_EXECUTE_READWRITE, &oldProtect) == 0) continue;
+        std::memcpy(write.jump, write.original.data(), 2);
+        FlushInstructionCache(GetCurrentProcess(), write.jump, 2);
+        DWORD ignored = 0;
+        VirtualProtect(write.jump, 2, oldProtect, &ignored);
+    }
+    g.mfgGateWrites.clear();
     g.installed = false;
     g.state = State{};
     veyra::log::info("ada-mfg", "Ada multi-frame unlock rolled back (runtime image restored)");

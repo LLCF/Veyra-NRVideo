@@ -422,7 +422,9 @@ void EnhanceGraph::applyAdaMfgUnlock()
     }
     const auto scan = ngx::AdaMfgUnlock::scan(module);
     if (!scan.moduleValid || scan.archGateSites < ngx::AdaMfgUnlock::kMinArchGateSites ||
-        scan.archGateSites > ngx::AdaMfgUnlock::kMaxArchGateSites || scan.descriptorSlots == 0 ||
+        scan.archGateSites > ngx::AdaMfgUnlock::kMaxArchGateSites ||
+        scan.mfgGateSites != ngx::AdaMfgUnlock::kExpectedMfgGateSites || !scan.mfgGateValid ||
+        scan.descriptorSlots == 0 ||
         scan.ptxBytes != ngx::AdaMfgUnlock::kExpectedPtxBytes ||
         scan.midpointCount != ngx::AdaMfgUnlock::kExpectedMidpoints || !scan.joinLabelUnique) {
         veyra::log::warn("ada-mfg", std::format("unlock refused: runtime build does not match the audited structure ({})",
@@ -430,9 +432,10 @@ void EnhanceGraph::applyAdaMfgUnlock()
         return;
     }
     const auto state = ngx::AdaMfgUnlock::apply(module, true);
-    veyra::log::info("ada-mfg", std::format("adapter deviceId=0x{:04X} unlock applied={} gates={} descriptors={} kernel={} ({})",
+    veyra::log::info("ada-mfg", std::format("adapter deviceId=0x{:04X} unlock applied={} gates={} mfgGate={} descriptors={} kernel={} ({})",
                                             adapter.deviceId, state.applied ? 1 : 0, state.archGateSites,
-                                            state.descriptorSlots, state.kernelPatched ? 1 : 0,
+                                            state.mfgGatePatched ? 1 : 0, state.descriptorSlots,
+                                            state.kernelPatched ? 1 : 0,
                                             std::string(state.detail.begin(), state.detail.end())));
 }
 

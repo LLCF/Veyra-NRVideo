@@ -13,6 +13,20 @@
 
 未完成（如实记录）：XeSS 节奏 hook（`XeFGPacing`）未移植、>2X 生成帧间距未测量；40 系 DLSS MFG 解锁（RenoDX 的架构比较 + PTX 中点修正 + flip metering）未实现；30 系原生 2X 未开始；AMD FSR（帧生成 4.0.x / 超分）未开始（SDK 2.3.0 未下载）；杜比直通/解码未实现。完整状态、验收清单与边界见 [隔离分支施工状态](FRAMEGEN_FSR_DOLBY_STATUS_2026-09-16.md)。未合并 main、未推送、未发布。
 
+### 2026-09-16 40 系 6X 完整移植（用户要求"能加一起加了"）
+
+用户指出上一轮对 40 系上游的审计过粗，要求重新研究并把 dashdogy 项目里能加的实现合并进产品。复核与施工记录：
+
+- **重新审计（逐仓库打开原文，不看 GitHub 侧栏）**：`sdli1995/dlssg_for_sm86` 实测**无任何 `.c/.cpp/.h` 源码、无 LICENSE 文件**（`git ls-files` 只有 18 个 DLL + ini + 文档；README 自述 GPLv3 但无许可证文本），本体是伪装系统 DLL 的代理加载器。真正含源码的 40 系上游是 `dashdogy/RTX40MFG-Unlock`（MIT，v1.3.3，commit `33b41835dc39c5d8ab1ef93efb2449be31139c09`，143 个源文件），我们此前的 C-2 只搬了其中一部分。
+- **缺口一：`ngx_mfg_gate` count/index validator 补丁**（`source/native/ngx_mfg_gate.h`）。pattern `84 d2 0f 84 03 01 00 00 be 05 00 00 00`（`test dl,dl / jz / mov esi,5`），近跳头 `0f 84` → `eb 04` 强制走 `mov esi,5`。这是上游 v1.3.3 changelog "Fixed MFG getting stuck at 2x and related freezing, flickering and black screens" 的直接机制之一。Veyra 的 310.7 构建里该 pattern **唯一匹配**（文件偏移 0x64b42 / RVA 0x65742），jz 目标 `41 83 f8 01` 校验通过，但此前完全没有打这个补丁。
+- **缺口二：三段 SHA-256 身份链 + 结构字段校验**（`source/native/midpoint_fix.cpp` legacy profile）。source fatbin（98408 B）`5A8E0284…`、解压 PTX（99362 B）`46C05996…`、重建 fatbin（127200 B）`19FB3CD5…`，外加 sm120/sm89 条目字段（28024/28017/90490、30384/30379/99362/0x2041）。我们此前的校验只有 PE 时间戳 + PTX 长度。
+- **哈希复现（决定性证据）**：用 `out/build/ptx_patch_digest.py` 从本地 `runtime_local/nvidia/nvngx_dlssg.dll` 复现重建流程，输出完整 fatbin SHA256 = `19FB3CD5500BFD1FC88F96C36B381E096D6AB1DFC7B1DB02A04D40A00849104B`，与上游 profile 记录**逐位一致**。上一轮报告"输出哈希不一致"是拿补丁后 PTX 的哈希（`44FEF743…`）去比全 fatbin 哈希（`19FB3CD5…`）——比错了对象，本次更正。
+- **实现**（`include/veyra/ngx/AdaMfgUnlock.h` / `src/ngx/AdaMfgUnlock.cpp`）：新增 mfg gate 补丁点（唯一匹配 + 偶地址 + 分支目标 `cmp r8d,1` 三重校验，VirtualProtect 写 + FlushInstructionCache，失败整体回滚）；三段 BCrypt SHA-256 闸（source fatbin → PTX → 重建 fatbin；**重建哈希作为发布闸，与上游字节流不一致即拒绝并回滚**）；sm120/sm89 字段校验；`distinctFatbins` 统计（本机=1，8 个 descriptor 指向同一 fatbin）。`scan/State` 字段、探针、`EnhanceGraph` 预检与日志同步更新；UI 侧保留现有 1/3/5 能力驱动逻辑（`nvidia_mfg_policy` 语义一致）。
+- **负向测试抓出一个既有崩溃 bug**：kernel fix 被拒绝时的回滚路径直接向只读页写回原字节（无 VirtualProtect），触发即 ACCESS_VIOLATION（0xC0000005）。修复为 VirtualProtect→写→恢复保护。该路径此前从未被执行过（原 probe 只测成功路径），修复后三场景全部干净。
+- **本机证据（RTX 5070，结构 + 补丁机制，非 40 系行为）**：原版 `--apply-test` → `applied=1 readBack=1 restored=1`，gates=2 / mfgGate=1(1) / descriptors=8；篡改 fatbin 1 字节 → `kernel fix refused: source fatbin SHA-256 does not match` + 完整回滚，无崩溃，exit 1；篡改 gate pattern → 预检拒绝 exit 1。delivery 短测 PASS（`logs/delivery/d0a266a1e549402ca26c2c8ec8d27022/result.json`）。
+- **30 系**：复查后维持搁置。dashdogy v1.3.3 有 30 系实验路径，但 `BUILD.md` 原文写明依赖**不在源码树的 validated SM86 kernel cache**（"A source checkout alone cannot reproduce the DLL without them"）；`sdli1995` 无源码不可搬。决策文档与 notices 已更新。
+- **未验证**：40 系实机行为（6X 真实插帧质量、Ada 缺硬件 flip metering 的冻结风险）仍需用户实机验收；XeSS/FSR/杜比各项边界与上一段一致。
+
 ## 2026-09-15 采集卡直播窗口标题修复（第三方工具“识别不到 Veyra”）
 
 用户反馈除 OBS 外各平台直播工具无法识别“正在采集中的 Veyra”，且顺序敏感：先抓到窗口再开采集卡正常，先开采集卡再抓就抓不到。实机取证确认根因是 Veyra 自己：采集卡来源 `capture:`/`capture2:` 连接串被当文件名写进主窗口标题，实测标题长 776 字符（`Veyra — capture2:<十六进制设备路径>:...`），空闲/播放文件时为正常短名；直播伴侣日志把该标题截断到 259 字符后参与来源命名，其包内前端以 `${exe} ${title}` 命名来源。同场会话的 mediasdk_server 日志显示“采集卡已运行再添加 game 来源”的 hook 通路实际成功（`Load Shared Texture Success, size: 842 x 494`、`OnAutoSwitchMode from Window to Game`、GameSource 连续 60 秒以上有数据），因此本轮不做换链/画面的猜测性改动。
