@@ -617,17 +617,19 @@ bool EnhanceGraph::initNgxFeatures()
     const bool fgAvailable = fgBackend_->queryCapability(*coreHost_, fgCaps, st);
     if (!fgAvailable) {
         if (ngx::AmpereMfgUnlock::applied()) {
-            // The provider's own report stays Ada/Blackwell-gated; the audited
-            // sm_86 unlock replaced every program and the audited build's
-            // compiled ceiling is five generated frames. Only a completely
-            // absent report is overridden; an explicit smaller value is kept.
-            if (fgCaps.multiFrameCountMax == 0) {
-                fgCaps.multiFrameCountMax = 5;
-            }
-            fgCaps.available = true;
-            veyra::log::warn("ampere-mfg", std::format(
-                "runtime reported FG unavailable; continuing on the audited sm_86 unlock (multiFrameMax={})",
+            // The unlock rewrites the provider's programs, but the runtime's own
+            // availability gate still refuses sm_86. A real RTX 3060 (field log
+            // 2026-09-17) showed that forcing the capability here only moves the
+            // failure to CreateFeature (0xBAD0000B UnableToInitializeFeature)
+            // and then tears the whole frame-generation stage down with a
+            // generic error. Fail closed with the actual reason instead. If a
+            // 30-series configuration is ever shown to work, the controlled
+            // retry belongs behind an explicit, verified capability path - not
+            // behind an assumption.
+            veyra::log::error("ampere-mfg", std::format(
+                "runtime reported FG unavailable (MultiFrameCountMax={}); the sm_86 unlock is applied but this driver/runtime combination does not enable frame generation - failing closed instead of forcing CreateFeature",
                 fgCaps.multiFrameCountMax));
+            return false;
         } else {
             veyra::log::error("graph", "FG unavailable; fail closed");
             return false;
