@@ -65,12 +65,10 @@ void EngineController::open(HWND video,const std::wstring& path,PlayerOptions op
     // Diagnostics-only PlayerOptions fields never enter EnhancementSettings;
     // keep them across the snapshot round-trip below.
     const bool captureCpuUnpack=opts.captureCpuUnpack;
-    const bool captureDirectIngress=opts.captureDirectIngress;
     {std::lock_guard lock(mutex_);snapshot_={};activeFlow_.reset();previewView_={};fgMultiFrameMaxCap_=0;xessMaxInterpolatedFramesCap_=0;fsrMaxGeneratedFramesCap_=0;snapshot_.sessionId=++sessionId_;snapshot_.transport=TransportState::Opening;savePath_.clear();desired_=opts.snapshot();desired_.revision=++nextRevision_;snapshot_.desired=desired_;opts=PlayerOptions::from(desired_);}
     opts.captureReplayForTest=captureReplay;
     opts.captureReplayDisableFgAdmissionForTest=disableAdmission;
     opts.captureCpuUnpack=captureCpuUnpack;
-    opts.captureDirectIngress=captureDirectIngress;
     post([this,video,path,opts]{paused_=false;seekSeconds_=-1;run(video,path,opts);});
 }
 #ifdef VEYRA_ENABLE_REMOTEPLAY
@@ -286,15 +284,6 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     auto failure=graph.failedBackend();
                     if(opened){
                         opened=presenter.open(ctx,window,graph,selected.settings.captureCompatible)&&graph.createViews();
-                        if(opened&&physicalCapture&&options.captureDirectIngress){
-                            source::CaptureCardSource::DirectIngressHooks hooks{};
-                            hooks.context=&graph;
-                            hooks.prepare=[](void* context,unsigned slot,void*& buffer,size_t& capacity,unsigned& pitch,unsigned& rowBytes){
-                                return static_cast<pipeline::EnhanceGraph*>(context)->tryPrepareIngressSlot(slot,buffer,capacity,pitch,rowBytes);};
-                            hooks.current=[](void* context,unsigned slot,void*& buffer){
-                                return static_cast<pipeline::EnhanceGraph*>(context)->ingressSlotBuffer(slot,buffer);};
-                            if(captureSource.attachDirectIngress(hooks))veyra::log::info("capture-direct","N2 direct capture ingress enabled");
-                        }
                         failure=FailedBackend::Infrastructure;
                         if(opened&&graph.xessEnabled()&&!presenter.xessActive()){opened=false;failure=FailedBackend::Fg;}
                         if(opened&&graph.fsrEnabled()&&!presenter.fsrActive()){opened=false;failure=FailedBackend::Fg;}
@@ -947,7 +936,6 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 wchar_t testWork[16]{};
                 if(!isImage&&GetEnvironmentVariableW(L"VEYRA_TEST_VIDEO_WORK_MS",testWork,16))std::this_thread::sleep_for(std::chrono::milliseconds(std::clamp(_wtoi(testWork),0,150)));
                 bool processed=false;{processWaitBase=ring.cpuWaitCount();processWaitMsBase=ring.cpuWaitMilliseconds();processSubmitBase=ring.submitCount();processed=!injectedReject&&graph.process(frame,pts,historyReset,out,pkt.sequence,&pkt.colorInfo,comparisonMode_!=0,admitFg);processSlotWaitMs=ring.cpuWaitMilliseconds()-processWaitMsBase;}
-                if(physicalCapture)captureSource.releaseDirectFrame();
                 previewSkipSinceProcess=false;
                 if(!processed){
                     const auto failedComponent=graph.failedBackend();

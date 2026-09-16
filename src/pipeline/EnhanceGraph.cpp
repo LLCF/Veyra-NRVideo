@@ -103,7 +103,6 @@ EnhanceGraph::~EnhanceGraph()
 bool EnhanceGraph::initialize(const EnhanceGraphDesc& desc)
 {
     failedBackend_=engine::FailedBackend::Infrastructure;
-    ingressDirectReady_.store(false);
     if(!desc.protection.validate().empty())return false;
     if(desc.srMotionProbe){
         const auto d=desc.srMotionProbe->GetDesc();ComPtr<ID3D12Device> device;
@@ -213,7 +212,6 @@ bool EnhanceGraph::createResources()
         for(unsigned i=0;i<2;++i){upRgb_[i]=makeUploadBuffer(context_.device(),rgbPitch_*srcH_);
             if(!upRgb_[i]||FAILED(upRgb_[i]->Map(0,nullptr,reinterpret_cast<void**>(&mappedRgb_[i]))))return false;
         }
-        ingressDirectReady_.store(true);
     }
     srcRgba_ = makeTexture(context_.device(), srcW_, srcH_, DXGI_FORMAT_R16G16B16A16_FLOAT, true);
     if(srEnabled_&&desc_.videoSrQuality&&desc_.videoSrQuality!=engine::kVideoSrFsr){videoSrInput_=makeTexture(context_.device(),srcW_,srcH_,DXGI_FORMAT_R8G8B8A8_UNORM,true);videoSrOutput_=makeTexture(context_.device(),workW_,workH_,DXGI_FORMAT_R8G8B8A8_UNORM,true);if(!videoSrInput_||!videoSrOutput_)return false;}
@@ -1067,7 +1065,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
         if(frame->width!=int(srcW_)||frame->height!=int(srcH_)||!frame->data[0]||std::abs(int64_t(frame->linesize[0]))<int64_t(ingressRowBytes))return false;
         for(uint32_t y=0;y<srcH_;++y){
             auto* dst=mappedRgb_[parity]+y*rgbPitch_;const auto* src=frame->data[0]+ptrdiff_t(y)*frame->linesize[0];
-            if(packed||desc_.yuy2Input||frame->format==AV_PIX_FMT_RGBA){if(dst!=src)std::memcpy(dst,src,size_t(ingressRowBytes));}
+            if(packed||desc_.yuy2Input||frame->format==AV_PIX_FMT_RGBA)std::memcpy(dst,src,size_t(ingressRowBytes));
             else for(uint32_t x=0;x<srcW_;++x){
                 const bool bgr=frame->format==AV_PIX_FMT_BGRA||frame->format==AV_PIX_FMT_BGR0;
                 dst[x*4]=src[x*4+(bgr?2:0)];dst[x*4+1]=src[x*4+1];dst[x*4+2]=src[x*4+(bgr?0:2)];
@@ -1577,14 +1575,6 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
     failedBackend_=engine::FailedBackend::None;
     if(runFg)fgHistorySkipped_=false;
     uploadFences_[parity]=ring_.lastSignaledValue();
-    // N2 direct ingress: the producer wrote straight into one of the mapped
-    // buffers, so record this submission's fence under that buffer's own slot
-    // too; the source waits it before overwriting the buffer (its slot and the
-    // graph parity can drift apart once a frame is dropped).
-    if(frame&&frame->data[0]){
-        if(frame->data[0]==mappedRgb_[0])uploadFences_[0]=ring_.lastSignaledValue();
-        else if(frame->data[0]==mappedRgb_[1])uploadFences_[1]=ring_.lastSignaledValue();
-    }
 
     prevPtsMs_ = ptsMs;
     prevValid_ = true;
@@ -1692,29 +1682,8 @@ ID3D12Resource* EnhanceGraph::generatedFrameResource(uint32_t slot) const
 // The NVOF out-fence drain must ALREADY have happened (caller), while the
 // ring and fences were alive.
 // ---------------------------------------------------------------------------
-bool EnhanceGraph::tryPrepareIngressSlot(unsigned slot,void*& buffer,size_t& capacity,unsigned& pitch,unsigned& rowBytes){
-    buffer=nullptr;capacity=0;pitch=0;rowBytes=0;
-    if(slot>1||!ingressDirectReady_.load()||!upRgb_[slot]||!mappedRgb_[slot]||!rgbPitch_||!srcW_||!srcH_)return false;
-    if(uploadFences_[slot]&&context_.fenceCompletedValue()<uploadFences_[slot])return false;
-    buffer=mappedRgb_[slot];capacity=size_t(rgbPitch_)*srcH_;pitch=unsigned(rgbPitch_);
-    rowBytes=desc_.packedInput?packedIngressRowBytes(desc_.packedInput,srcW_):desc_.yuy2Input?srcW_*2:srcW_*4;
-    return true;
-}
-bool EnhanceGraph::prepareIngressSlot(unsigned slot,void*& buffer,size_t& capacity,unsigned& pitch,unsigned& rowBytes){
-    if(tryPrepareIngressSlot(slot,buffer,capacity,pitch,rowBytes))return true;
-    if(slot>1||!ingressDirectReady_.load()||!upRgb_[slot]||!mappedRgb_[slot]||!rgbPitch_||!srcW_||!srcH_)return false;
-    if(uploadFences_[slot]&&!context_.waitForFenceValue(uploadFences_[slot]))return false;
-    return tryPrepareIngressSlot(slot,buffer,capacity,pitch,rowBytes);
-}
-bool EnhanceGraph::ingressSlotBuffer(unsigned slot,void*& buffer) const{
-    buffer=nullptr;
-    if(slot>1||!ingressDirectReady_.load()||!upRgb_[slot]||!mappedRgb_[slot])return false;
-    buffer=mappedRgb_[slot];
-    return true;
-}
 void EnhanceGraph::shutdown()
 {
-    ingressDirectReady_.store(false);
     if (!initialized_ && !nrAdapter_ && !nvof_ && !srcRgba_) return;
     (void)ring_.drainQueue();(void)ring_.discardRecording();
     for(auto& input:hardwareInputFrames_)input.reset();

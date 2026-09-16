@@ -1,16 +1,16 @@
 # 2026-09-11 继续修复目标模式执行中
 
-## 2026-09-16 采集链路 N2 第一版：直接写入图上传缓冲（真机验证失败，默认关闭）
+## 2026-09-16 采集链路 N2：两次拷贝合并（直接写入图上传缓冲）——实测负收益，整体回退
 
-按方案 §8 N2 实现"两次拷贝合并成一次"的第一版：`EnhanceGraph::prepareIngressSlot/tryPrepareIngressSlot` 暴露映射上传缓冲（写入前检查该 slot 的 upload fence，非阻塞版供采集回调使用）；`CaptureCardSource` 增加 `DirectIngressHooks`（attach/detach/releaseDirectFrame、双槽握手、inUse/latest 原子、图重建时丢弃陈旧缓冲并回退信箱）；`EnhanceGraph::process` 在帧指针等于映射缓冲时跳过 CPU 拷贝；引擎在建图后 attach、process 后 release；CLI `--capture-direct-ingress` 开启（默认关）。
+按方案 §8 N2 实现并反复调试后，功能上已攻破（真机 1080p60 / 4K18：直接提交 100%、0 丢帧、1 次历史重置），但**性能净亏**，按用户指示整体回退：
 
-**真机验证（¥30 UVC 卡 1080p60 YUY2，10 秒）失败**：开启后 `processedFps=10.00`、`captureDropped≈465`、`mailboxOverwritten≈460`、`historyResets=101`（每帧一次重置）、`callbackToPresentReturnP95Ms=169ms`、`firstValidObserveMs=84.5ms`；两次修正（回调改用非阻塞 fence 检查、读取时校验缓冲指针是否已随图重建失效）后数值不变。默认（信箱路径）同卡复测正常：577 帧、60fps、0 丢帧、callback→Present P95 2.673ms；delivery 门禁 PASS（`logs/delivery/fa725fe8b5e844fd910600211ce35c9f/result.json`）。
+- 1080p60 YUY2：直接写入 P95 **3.536ms** / processCpu 1.494ms vs 信箱 **2.629ms** / 0.429ms（**+0.91ms**）
+- 4K18 YUY2：直接写入 P95 **4.102ms** / processCpu 1.885ms vs 信箱 **3.265ms** / 1.013ms（**+0.84ms**）
+- 原因：合并后写入目标是 D3D12 upload heap（write-combined 内存），CPU 写 WC 的成本加"跨线程写完、GPU 读取前的 flush/可见性等待"，超过省掉的那次 RAM→上传缓冲 memcpy。
 
-**处置**：`PlayerOptions::captureDirectIngress` 默认 **false**，保留 `--capture-direct-ingress` 供继续排查；信箱路径与所有既有行为不变。**未完成（如实）**：N2 未达标，需定位直接写入路径导致引擎每帧 reset/10fps 的根因（怀疑方向：Drop 标志自激、图 parity 与源槽位错位、upload fence 覆盖范围过大），修复并重新真机验证前不得计入收益。压缩解码链路仍未开工。
+调试过程存档（避免重复踩坑）：① 上传 fence 索引错位（图按 parity 记录、源按槽位写入，丢帧后错位）；② `EngineController::open()` 用 `PlayerOptions::from` 重建时把诊断字段丢光；③ 直接视图帧 `buf[0]==nullptr` 导致呈现/调度停摆——挂上 `av_buffer_create` 的真实 AVBufferRef 后消失（这三条都不是最终选择它的理由）。
 
-**同日后续（根因修复 + 新的阻塞点）**：定位到最可能的根因——**上传 fence 索引错位**：图按自己的 parity 记录提交 fence，但直接模式下缓冲槽位由源决定，丢帧后两者错位，源会在 GPU 仍在读取该缓冲时覆盖它（表现为 GPU-ready 84ms、每帧 reset、10fps 自激）。已修：直接帧的提交 fence 同时记录到其缓冲槽位（`uploadFences_[slot]`），并加了回调侧直接提交/回退计数（每 120 帧一条日志）。重跑时又发现 **`--capture-direct-ingress` 没有真正触发 attach**（日志无 `[capture-direct]`）：根因是 `options()` 从引擎快照重建 `PlayerOptions` 时丢弃了 CLI-only 字段；已修（`options()` 现在携带 `captureCpuUnpack`/`captureDirectIngress`）。截至本轮结束，**带 attach 的直接路径尚未完成真机复测**：默认（信箱）路径健康、门禁 PASS（`logs/delivery/5b494cdb690d4254a670d1d14ccfe54e/result.json`），直接路径继续默认关闭。下一步：用 `--capture-direct-ingress` 复测确认 attach→直接提交计数→4K18 A/B，再决定是否转默认。
-
-**同日第三次修正（CLI 管道修好后的实测，14:29/14:31）**：`EngineController::open()` 还会用 `PlayerOptions::from(desired_)` 重建 options——这是字段丢失的真正位置（只显式保留了 captureReplay 两字段）。已修并复测：**attach 成功**（`[capture-direct] graph direct ingress attached`），回调计数证实直接路径全程在用：`commits=479 fallbacks=1 drops=0`（每 120 帧一条）。读取侧也不再因 fence 未完成而误丢帧（新增 `ingressSlotBuffer` 无 fence 的"当前缓冲"校验，仅比对缓冲指针；回调写入前仍用带 fence 的 `tryPrepareIngressSlot`）。**但引擎仍退化**：`processed=102/565`、`displaySubmits=1`、`firstValidObserveMs=89.3ms`、每帧一次 history reset、P95 177ms——**说明卡点已不在"回调→图缓冲"的交接层，而在呈现/实时调度路径**（直接视图帧作为图输入后，呈现只提交了 1 次；信箱路径同条件 displaySubmits≈processed）。N2 继续默认关闭，下一步聚焦：直接帧与信箱帧的 `pkt`/frame 字段逐项对比（pts/arrival、frame 指针身份、view 的 buf[0]=null 对 live scheduler/presenter 的影响），定位为何呈现停摆。
+**处置**：N2 相关代码全部 `git revert`，软件内不再保留直接写入路径与 `--capture-direct-ingress` 开关；方案 §8 N2 状态改为"尝试后回退（负收益）"。N1 的 `--capture-cpu-unpack` 诊断字段管道（被回退误伤）已单独恢复。
 
 ## 2026-09-16 采集链路 N1：逐像素转换从 CPU 挪到 GPU
 
