@@ -31,6 +31,38 @@ experimental"*、可能完全不工作。这些 kernel cache 是构建输入的�
 同类里许可证明确的是 `Nukem9/dlssg-to-fsr3`（GPL-3.0）。如果将来要做"代理式"方案，
 应当以它为上游（GPL-3.0 与 Veyra 兼容），而不是用无源码的 sm86 包。
 
+## 2026-09-16 二次评估：sm_86 指令集可行性实测（不依赖 30 系硬件）
+
+用户追问 30 系后补做了实验，结论先行：**30 系跑 DLSS-G 的障碍不是硬件能力，是供应商
+没有为 sm_86 发布任何目标**。证据（可复现，脚本 `scripts/diagnostics/sm86-ptx-feasibility.py`）：
+
+1. 结构事实：审计版 `nvngx_dlssg.dll` 310.7 含 69 个 fatbin；sm_89 PTX 69 个
+   （解压后共 1,250,185 字节）+ sm_120 PTX 31 个 + sm_89 cubin 31 个。
+   **sm_86 目标：0 个**（既无 PTX 也无 cubin）。
+2. 兼容性实验：把全部 69 个 sm_89 PTX 的 `.target sm_89` 改写为 `.target sm_86`，
+   逐个交给 NVIDIA 驱动 JIT（本机 RTX 5070 / 驱动 32.0.16.1656，JIT 在强制 sm_86
+   特性集下编译）：**69/69 通过，0 失败**。说明这批 kernel 没有使用任何 Ada 专有
+   指令（如 FP8 转换），指令集层面 sm_86 完全可承载。
+3. dashdogy 的 30 系方案拆解：他的 `ampere_backend`（MIT，源码全公开）就是
+   "自产 SM86 程序 + 在进程内替换 provider 的 kernel 加载"。他的 `BUILD.md` 里
+   不发布的是**编译并验证过的 SM86 kernel 数据**（native-cache/*.fatbin + manifest）；
+   而 `ampere_native_cache` 本身支持 ePtx 模式（PTX 直载）——本实验证明我们能自产
+   这批数据，不需要索取他的未公开材料。
+4. 边界（必须如实）：JIT 通过只证明指令集合法性，**不证明 sm_86 硬件上的数值行为、
+   性能与稳定性**；那需要 30 系实机。dashdogy 自己标注该路径 "very early and
+   experimental. It may not work in some games or configurations"。
+
+### 30 系的三条路（供决策）
+
+| 路线 | 内容 | 状态 |
+| --- | --- | --- |
+| A 原生 DLSS-G | 移植 dashdogy ampere 框架（`ampere_backend` 133KB + `ampere_gpu` 76KB + 契约系统，MIT）+ 自产 SM86 程序 + 30 系实机验证 | 技术可行性已证实，未开工；工程量最大（天级），且需 30 系实机配合 |
+| B FSR 补帧 | Veyra 自带 AMD FidelityFX 帧生成（E 工作流，已实现）。AMD 官方 FSR3 FG 支持 RTX 30 系及以上 | **已完成代码**，待 30 系实机验证（`veyra.exe --fg-fsr --smoke-seconds 10 <视频>`） |
+| C 代理式 | `Nukem9/dlssg-to-fsr3`（GPL-3.0）代理 | 不推荐：它会替换磁盘 DLL 语义，与"进程内修改"路线冲突 |
+
+建议：先用 B 在 30 系实机拿到第一份可用补帧（成本 5 分钟）；是否投入 A 的完整移植
+按用户对"30 系原生 6X"价值/成本的判断另行授权。
+
 ## 30 系用户现在的 2X 路径
 
 Veyra 已经落地了 AMD FSR 帧生成（E 工作流，本机 RTX 5070 实测 2X 可用）：
