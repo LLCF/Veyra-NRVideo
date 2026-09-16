@@ -29,6 +29,10 @@ bool sameAudio(const AM_MEDIA_TYPE& a,const AM_MEDIA_TYPE& b){
     return audioType(a)&&audioType(b)&&a.subtype==b.subtype&&
         a.cbFormat==b.cbFormat&&std::memcmp(a.pbFormat,b.pbFormat,a.cbFormat)==0;
 }
+bool sameCompressed(const AM_MEDIA_TYPE& a,const AM_MEDIA_TYPE& b){
+    return a.majortype==b.majortype&&a.subtype==b.subtype&&a.formattype==b.formattype&&a.cbFormat==b.cbFormat&&
+        (a.cbFormat==0||(a.pbFormat&&b.pbFormat&&std::memcmp(a.pbFormat,b.pbFormat,a.cbFormat)==0));
+}
 class PinEnum final:public IEnumPins {
     std::atomic<ULONG> refs_{1};ComPtr<IPin> pin_;bool used_=false;
 public:
@@ -60,11 +64,16 @@ class NativeSink final:public IBaseFilter,public IPin,public IMemInputPin {
     IFilterGraph* graph_=nullptr;std::wstring name_=L"Native capture mailbox";
     std::function<HRESULT(IMediaSample*)> callback_;
     bool audio_=false;
+    bool compressed_=false;
 public:
-    NativeSink(const AM_MEDIA_TYPE& type,std::function<HRESULT(IMediaSample*)> cb):callback_(std::move(cb)){
-        audio_=audioType(type);
-        if((!audio_&&!captureMediaLayout(type,layout_))||FAILED(copyType(desired_,type)))throw std::bad_alloc();
-        if(audio_)layout_.sampleBytes=reinterpret_cast<const WAVEFORMATEX*>(type.pbFormat)->nBlockAlign;
+    NativeSink(const AM_MEDIA_TYPE& type,std::function<HRESULT(IMediaSample*)> cb,bool compressed=false):callback_(std::move(cb)){
+        compressed_=compressed;audio_=audioType(type);
+        if(compressed_){
+            if(type.majortype!=MEDIATYPE_Video||FAILED(copyType(desired_,type)))throw std::bad_alloc();
+        }else{
+            if((!audio_&&!captureMediaLayout(type,layout_))||FAILED(copyType(desired_,type)))throw std::bad_alloc();
+            if(audio_)layout_.sampleBytes=reinterpret_cast<const WAVEFORMATEX*>(type.pbFormat)->nBlockAlign;
+        }
     }
     ~NativeSink(){clearType(desired_);clearType(connected_);}
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id,void** p)override{
@@ -121,7 +130,7 @@ public:
     }
     HRESULT STDMETHODCALLTYPE GetAllocatorRequirements(ALLOCATOR_PROPERTIES* p)override{
         if(!p)return E_POINTER;std::lock_guard lock(mutex_);
-        *p={3,audio_?audioBlockBytes(*reinterpret_cast<const WAVEFORMATEX*>(desired_.pbFormat)):LONG(layout_.sampleBytes),1,0};return S_OK;
+        *p={compressed_?4:3,compressed_?LONG(512*1024):audio_?audioBlockBytes(*reinterpret_cast<const WAVEFORMATEX*>(desired_.pbFormat)):LONG(layout_.sampleBytes),1,0};return S_OK;
     }
     HRESULT STDMETHODCALLTYPE Receive(IMediaSample* sample)override{
         if(!sample)return E_POINTER;std::lock_guard lock(mutex_);if(flushing_)return S_FALSE;if(state_==State_Stopped)return VFW_E_WRONG_STATE;
@@ -130,10 +139,11 @@ public:
         AM_MEDIA_TYPE* changed=nullptr;const auto typeHr=sample->GetMediaType(&changed);
         if(FAILED(typeHr)){if(changed){clearType(*changed);CoTaskMemFree(changed);}log::error("capture",std::format("sample GetMediaType hr=0x{:08X}",uint32_t(typeHr)));return typeHr;}
         if(typeHr==S_OK&&changed){
-            const bool same=audio_?sameAudio(*changed,connected_):equivalentCaptureTypes(*changed,connected_);
+            const bool same=audio_?sameAudio(*changed,connected_):compressed_?sameCompressed(*changed,connected_):equivalentCaptureTypes(*changed,connected_);
             clearType(*changed);CoTaskMemFree(changed);if(!same){log::error("capture",std::format("dynamic capture contract changed; reopen required hr=0x{:08X}",uint32_t(VFW_E_INVALIDMEDIATYPE)));return VFW_E_INVALIDMEDIATYPE;}
         }
-        if(audio_){const auto block=reinterpret_cast<const WAVEFORMATEX*>(connected_.pbFormat)->nBlockAlign;if(sample->GetActualDataLength()<0||sample->GetActualDataLength()%block)return VFW_E_BUFFER_UNDERFLOW;}
+        if(compressed_){if(sample->GetActualDataLength()<=0)return VFW_E_BUFFER_UNDERFLOW;}
+        else if(audio_){const auto block=reinterpret_cast<const WAVEFORMATEX*>(connected_.pbFormat)->nBlockAlign;if(sample->GetActualDataLength()<0||sample->GetActualDataLength()%block)return VFW_E_BUFFER_UNDERFLOW;}
         else if(sample->GetActualDataLength()<LONG(layout_.sampleBytes))return VFW_E_BUFFER_UNDERFLOW;
         try{return callback_(sample);}catch(...){return E_FAIL;}
     }
@@ -182,6 +192,10 @@ HRESULT queryCaptureAllocatorProperties(IPin* pin,ALLOCATOR_PROPERTIES& out){
     hr=input->GetAllocator(&allocator);
     if(FAILED(hr))return hr;
     return allocator->GetProperties(&out);
+}
+HRESULT createCompressedCaptureSink(const AM_MEDIA_TYPE& type,std::function<HRESULT(IMediaSample*)> callback,ComPtr<IBaseFilter>& filter,ComPtr<IPin>& pin){
+    filter.Reset();pin.Reset();if(type.majortype!=MEDIATYPE_Video)return VFW_E_INVALIDMEDIATYPE;
+    try{filter.Attach(new NativeSink(type,std::move(callback),true));return filter.As(&pin);}catch(...){return E_OUTOFMEMORY;}
 }
 HRESULT createNativeCaptureSink(const AM_MEDIA_TYPE& type,std::function<HRESULT(IMediaSample*)> callback,ComPtr<IBaseFilter>& filter,ComPtr<IPin>& pin){
     filter.Reset();pin.Reset();CaptureMediaLayout layout;if(!captureMediaLayout(type,layout))return VFW_E_INVALIDMEDIATYPE;
