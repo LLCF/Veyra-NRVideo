@@ -318,6 +318,18 @@ int wmain(int argc, wchar_t** argv) {
     adapter->GetDesc1(&adapterDesc);
     std::wprintf(L"[fsr-probe] adapter=%s vendor=0x%04X\n", adapterDesc.Description, adapterDesc.VendorId);
 
+    // Local-memory accounting: this probe exists to show what the provider
+    // keeps resident after its contexts are destroyed.
+    ComPtr<IDXGIAdapter3> adapter3;
+    adapter.As(&adapter3);
+    const auto localUsageMiB = [&adapter3]() -> double {
+        if (adapter3 == nullptr) return -1.0;
+        DXGI_QUERY_VIDEO_MEMORY_INFO info{};
+        if (FAILED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info))) return -1.0;
+        return double(info.CurrentUsage) / (1024.0 * 1024.0);
+    };
+    std::printf("[fsr-probe] localUsageMiB before-create=%.1f\n", localUsageMiB());
+
     ComPtr<ID3D12Device> device;
     if (FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device)))) {
         std::printf("[fsr-probe] D3D12CreateDevice failed\n");
@@ -396,6 +408,7 @@ int wmain(int argc, wchar_t** argv) {
     DXGI_SWAP_CHAIN_DESC1 actual{};
     std::printf("[fsr-probe] proxy swapchain GetDesc1=%s format=%d buffers=%u\n",
                 SUCCEEDED(swapchain->GetDesc1(&actual)) ? "OK" : "FAILED", int(actual.Format), actual.BufferCount);
+    std::printf("[fsr-probe] localUsageMiB after-swapchain-context=%.1f\n", localUsageMiB());
 
     // Stage 2: frame-generation context. The version desc asks for the newest
     // API surface the header knows; when a provider rejects that the probe
@@ -446,6 +459,7 @@ int wmain(int argc, wchar_t** argv) {
         DestroyWindow(hwnd);
         return 11;
     }
+    std::printf("[fsr-probe] localUsageMiB after-framegen-context=%.1f\n", localUsageMiB());
 
     ComPtr<ID3D12CommandAllocator> allocator;
     ComPtr<ID3D12GraphicsCommandList> list;
@@ -789,6 +803,7 @@ int wmain(int argc, wchar_t** argv) {
     const auto destroyFg = functions.DestroyContext(&fgContext, nullptr);
     const auto destroySwapchain = functions.DestroyContext(&swapchainContext, nullptr);
     std::printf("[fsr-probe] DestroyContext framegen=%s swapchain=%s\n", resultName(destroyFg), resultName(destroySwapchain));
+    std::printf("[fsr-probe] localUsageMiB after-destroy=%.1f (this is what stays resident)\n", localUsageMiB());
 
     // Settings changes in the player destroy the AMD swapchain and create a new
     // one for the same HWND; DXGI allows a single swapchain per HWND, so this
@@ -807,6 +822,7 @@ int wmain(int argc, wchar_t** argv) {
         const auto recreate = functions.CreateContext(&secondContext, &again.header, nullptr);
         std::printf("[fsr-probe] re-create after teardown result=%s swapchain=%p\n", resultName(recreate),
                     static_cast<void*>(second));
+        std::printf("[fsr-probe] localUsageMiB after-recreate-attempt=%.1f\n", localUsageMiB());
         if (secondContext != nullptr) functions.DestroyContext(&secondContext, nullptr);
     }
     DestroyWindow(hwnd);
