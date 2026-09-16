@@ -45,6 +45,23 @@
 这不是一次改动，是一个需要实机迭代的逆向项目。30 系用户在可用之前应继续使用 AMD FSR 补帧
 （3060 日志实测 `real=3600 generated=910` 工作正常）。
 
+**5. 补充：dlssg 架构查询路径已定位（NVAPI）**
+`nvngx_dlssg.dll` 的静态导入只有 VERSION/ADVAPI32/USER32/KERNEL32 —— 它**不静态链接** CUDA/NVAPI。
+它的字符串给出了真实路径：
+`SetGPUArch:: NvAPI_EnumPhysicalGPUs / NvAPI_GPU_GetLogicalGpuInfo / NvAPI_GPU_GetArchInfo failed with error: %d`、
+`error: SetGPUArch failed - nvapi status %d`、`error: CreateFeatureImpl() failed - nvapi status %d`。
+即 **dlssg 通过 NVAPI 的 `NvAPI_GPU_GetArchInfo` 读取真实架构**，再在内部比较。官方 nvapi.h 的架构 ID：
+`GA100=0x170`（Ampere，与我们的 `kAmpereArchId` 完全一致）、`AD100=0x190`（Ada）、`GB200=0x1B0`（Blackwell，
+正是我们 patch 的那两个常量之一）。最彻底的绕过 = 在进程内 hook NVAPI 让 `GetArchInfo` 报告 Ada/Blackwell，
+这样无论 dlssg 内部有多少处架构比较都会通过；`NvAPI_GPU_GetArchInfo` 的 QueryInterface ID 未公开（官方头
+只给声明），需要逆向或从 hook 记录中获得。
+
+**6. 补充：后端可加载性验证**
+在一次性进程里加载 `sm86_backend.dll` 并调用其无参导出：`DlssgMod_SupportedRouteFlags()` 返回
+`0x2FFF3FFF`（有效标志集），`DlssgMod_GetInfo` / `SM86Bridge_GetStats` / `SM86Bridge_ProbeRequirements`
+返回 `0xFFFFFFFF`（缺少必需参数）。**DLL 可加载、导出可调用，但 Install 的参数结构未文档化**，
+直接集成需要逆向；可选项是与上游作者沟通 ABI（GPLv3 项目）。
+
 ## 2026-09-17 采集链路整体排查（用户要求，干净环境下全量实机）
 
 用户要求"整体排查一遍，别 YUY2 没事了其他又有问题"。在设备空闲（无 OBS、无其他占用）时完成，全部为本机真机结果：
