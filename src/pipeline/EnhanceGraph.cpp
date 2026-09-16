@@ -22,6 +22,7 @@
 #include "veyra/gfx/D3D12DeviceContext.h"
 #include "veyra/ngx/DlssFgBackend.h"
 #include "veyra/ngx/AdaMfgUnlock.h"
+#include "veyra/ngx/AmpereMfgUnlock.h"
 #include "veyra/gfx/FsrSrBackend.h"
 #include "veyra/ngx/DlssNrParameters.h"
 #include "veyra/ngx/DlssNrRuntimeAdapter.h"
@@ -439,6 +440,55 @@ void EnhanceGraph::applyAdaMfgUnlock()
                                             std::string(state.detail.begin(), state.detail.end())));
 }
 
+void EnhanceGraph::applyAmpereMfgUnlock()
+{
+    const auto& adapter = context_.adapter();
+    // Hard architecture gate: only RTX 30 (Ampere GA10x) takes this path. Ada
+    // keeps its own unlock and Blackwell keeps its native multi-frame path.
+    if (!ngx::AmpereMfgUnlock::adapterIsAmpere(adapter.vendorId, adapter.deviceId)) {
+        return;
+    }
+    wchar_t disabled[2]{};
+    if (GetEnvironmentVariableW(L"VEYRA_DISABLE_AMPERE_MFG_UNLOCK", disabled, 2) > 0) {
+        veyra::log::warn("ampere-mfg", "RTX 30 sm_86 unlock disabled by VEYRA_DISABLE_AMPERE_MFG_UNLOCK");
+        return;
+    }
+    const auto modulePath = std::filesystem::path(desc_.runtimeAbsPath) / L"nvngx_dlssg.dll";
+    HMODULE module = GetModuleHandleW(L"nvngx_dlssg.dll");
+    if (module == nullptr) {
+        module = LoadLibraryExW(modulePath.c_str(), nullptr,
+                                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    }
+    if (module == nullptr) {
+        veyra::log::warn("ampere-mfg", std::format("DLSS-G runtime could not be opened for the RTX 30 unlock (path={} win32={})",
+                                                   modulePath.string(), GetLastError()));
+        return;
+    }
+    const auto scan = ngx::AmpereMfgUnlock::scan(module);
+    if (!scan.moduleValid || !scan.identityMatched ||
+        scan.slotRuns != ngx::AmpereMfgUnlock::kExpectedSlotRuns ||
+        scan.slotPointers != ngx::AmpereMfgUnlock::kExpectedSlotRuns *
+                                 ngx::AmpereMfgUnlock::kExpectedSlotsPerRun ||
+        scan.programFatbins != ngx::AmpereMfgUnlock::kExpectedProgramFatbins ||
+        scan.networkFatbins != ngx::AmpereMfgUnlock::kExpectedRdataNetworkFatbins ||
+        scan.auxFatbins != ngx::AmpereMfgUnlock::kExpectedAuxFatbins ||
+        scan.leaSites != ngx::AmpereMfgUnlock::kExpectedLeaSites ||
+        scan.archGateSites < ngx::AmpereMfgUnlock::kMinArchGateSites ||
+        scan.archGateSites > ngx::AmpereMfgUnlock::kMaxArchGateSites ||
+        !scan.temporalSlotUnique) {
+        veyra::log::warn("ampere-mfg", std::format("unlock refused: runtime build does not match the audited structure ({})",
+                                                   scan.detail));
+        return;
+    }
+    const auto state = ngx::AmpereMfgUnlock::apply(module);
+    veyra::log::info("ampere-mfg", std::format("adapter deviceId=0x{:04X} unlock applied={} runs={} slots={} fatbins={} lea={} gates={} ({})",
+                                               adapter.deviceId, state.applied ? 1 : 0, state.slotRuns,
+                                               state.slotPointers,
+                                               state.programFatbins + state.networkFatbins + state.auxFatbins,
+                                               state.leaSites, state.archGateSites,
+                                               std::string(state.detail.begin(), state.detail.end())));
+}
+
 bool EnhanceGraph::initFsrSr()
 {
     if (!fsrSrRequested()) return true;
@@ -523,12 +573,29 @@ bool EnhanceGraph::initNgxFeatures()
     // DLSS-G runtime first so the capability query below sees multi-frame. On
     // every other architecture this is a no-op.
     applyAdaMfgUnlock();
+    // RTX 30 has no sm_86 program in the provider at all; the Ampere unlock
+    // rebuilds every fatbin and re-targets the arch gates before the query.
+    applyAmpereMfgUnlock();
     fgBackend_ = std::make_unique<ngx::DlssFgBackend>();
     ngx::DlssFgBackend::Capability fgCaps{};
     const bool fgAvailable = fgBackend_->queryCapability(*coreHost_, fgCaps, st);
     if (!fgAvailable) {
-        veyra::log::error("graph", "FG unavailable; fail closed");
-        return false;
+        if (ngx::AmpereMfgUnlock::applied()) {
+            // The provider's own report stays Ada/Blackwell-gated; the audited
+            // sm_86 unlock replaced every program and the audited build's
+            // compiled ceiling is five generated frames. Only a completely
+            // absent report is overridden; an explicit smaller value is kept.
+            if (fgCaps.multiFrameCountMax == 0) {
+                fgCaps.multiFrameCountMax = 5;
+            }
+            fgCaps.available = true;
+            veyra::log::warn("ampere-mfg", std::format(
+                "runtime reported FG unavailable; continuing on the audited sm_86 unlock (multiFrameMax={})",
+                fgCaps.multiFrameCountMax));
+        } else {
+            veyra::log::error("graph", "FG unavailable; fail closed");
+            return false;
+        }
     }
         // Publish the capability before validating the request so a rejected
         // multiplier still teaches the caller what this GPU supports.
@@ -1626,6 +1693,7 @@ void EnhanceGraph::shutdown()
     // Restore the DLSS-G runtime image only after the NGX core released the
     // feature (the unlock is process memory only; the file on disk is untouched).
     ngx::AdaMfgUnlock::release();
+    ngx::AmpereMfgUnlock::release();
 
     // Staged explicit release (scope-end destructors then have nothing left).
     decPass_ = ComputePass{};

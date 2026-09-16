@@ -551,6 +551,69 @@ void* allocateReachable(size_t bytes, const uint8_t* moduleBase) {
     return VirtualAlloc(nullptr, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 }
 
+// CUDA driver preflight (the intent of dashdogy's ampere_cuda_program
+// validation): in a private context on the active GPU, the driver must accept
+// every rebuilt fatbin before any pointer is published. On an RTX 30 host this
+// compiles the sm_86 programs on the real Ampere device; on other hosts it at
+// least proves the PTX/JIT path is legal.
+bool preflightPrograms(const std::vector<std::pair<const uint8_t*, size_t>>& programs,
+                       std::string& why, size_t& loaded) {
+    loaded = 0;
+    HMODULE cuda = LoadLibraryExW(L"nvcuda.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (cuda == nullptr) {
+        why = "nvcuda.dll is not available";
+        return false;
+    }
+    // nvcuda.dll is intentionally never unloaded: the CUDA driver does not
+    // support being freed while the process lives.
+    const auto init = reinterpret_cast<int (*)(unsigned)>(
+        reinterpret_cast<void*>(GetProcAddress(cuda, "cuInit")));
+    const auto deviceGet = reinterpret_cast<int (*)(int*, int)>(
+        reinterpret_cast<void*>(GetProcAddress(cuda, "cuDeviceGet")));
+    const auto ctxCreate = reinterpret_cast<int (*)(void**, unsigned, int)>(
+        reinterpret_cast<void*>(GetProcAddress(cuda, "cuCtxCreate_v2")));
+    const auto ctxDestroy = reinterpret_cast<int (*)(void*)>(
+        reinterpret_cast<void*>(GetProcAddress(cuda, "cuCtxDestroy_v2")));
+    const auto moduleLoad = reinterpret_cast<int (*)(void**, const void*, unsigned, void*, void*)>(
+        reinterpret_cast<void*>(GetProcAddress(cuda, "cuModuleLoadDataEx")));
+    const auto moduleUnload = reinterpret_cast<int (*)(void*)>(
+        reinterpret_cast<void*>(GetProcAddress(cuda, "cuModuleUnload")));
+    if (init == nullptr || deviceGet == nullptr || ctxCreate == nullptr ||
+        ctxDestroy == nullptr || moduleLoad == nullptr || moduleUnload == nullptr) {
+        why = "nvcuda.dll does not export the required driver API";
+        return false;
+    }
+    if (init(0) != 0) {
+        why = "cuInit failed";
+        return false;
+    }
+    int device = 0;
+    if (deviceGet(&device, 0) != 0) {
+        why = "cuDeviceGet failed";
+        return false;
+    }
+    void* context = nullptr;
+    if (ctxCreate(&context, 0, device) != 0) {
+        why = "cuCtxCreate failed";
+        return false;
+    }
+    bool ok = true;
+    for (size_t index = 0; index < programs.size(); ++index) {
+        void* module = nullptr;
+        const int result = moduleLoad(&module, programs[index].first, 0, nullptr, nullptr);
+        if (result != 0) {
+            why = std::format("the CUDA driver rejected rebuilt program {} (cuModuleLoadDataEx={})",
+                              index, result);
+            ok = false;
+            break;
+        }
+        if (module != nullptr) moduleUnload(module);
+        ++loaded;
+    }
+    ctxDestroy(context);
+    return ok;
+}
+
 } // namespace
 
 AmpereMfgUnlock::Scan AmpereMfgUnlock::scan(HMODULE module) {
@@ -881,6 +944,24 @@ AmpereMfgUnlock::State AmpereMfgUnlock::apply(HMODULE module) {
         replacements.push_back({fb.address, std::move(data)});
     }
 
+    // The driver must accept the whole rebuilt program set before anything is
+    // published; a rejected program is a refusal, never a half-installed set.
+    size_t preflightLoaded = 0;
+    {
+        std::vector<std::pair<const uint8_t*, size_t>> programData;
+        programData.reserve(replacements.size());
+        for (const auto& replacement : replacements) {
+            programData.push_back({replacement.data.data(), replacement.data.size()});
+        }
+        std::string preflightWhy;
+        if (!preflightPrograms(programData, preflightWhy, preflightLoaded)) {
+            state.detail = std::format(L"CUDA preflight refused the rebuilt program set: {}",
+                                       std::wstring(preflightWhy.begin(), preflightWhy.end()));
+            g.state = state;
+            return state;
+        }
+    }
+
     size_t total = 0;
     std::vector<size_t> offsets;
     offsets.reserve(replacements.size());
@@ -1020,8 +1101,9 @@ AmpereMfgUnlock::State AmpereMfgUnlock::apply(HMODULE module) {
     state.fatbinsRedirected = true;
     state.applied = state.archGatesPatched && state.fatbinsRedirected;
     state.detail = std::format(
-        L"runs={} slots={} fatbins={} lea={} gates={} (in-memory only)",
-        slotRuns, hits.size(), replacements.size(), g.leaWrites.size(), state.archGateSites);
+        L"runs={} slots={} fatbins={} lea={} gates={} preflight={}/{} (in-memory only)",
+        slotRuns, hits.size(), replacements.size(), g.leaWrites.size(), state.archGateSites,
+        preflightLoaded, replacements.size());
     g.state = state;
     veyra::log::info("ampere-mfg",
                      std::format("RTX 30 sm_86 unlock: {} runs / {} slot pointers, {} fatbins redirected, "
