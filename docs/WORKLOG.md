@@ -1,5 +1,40 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-17 RTX 3060 DLSS 补帧报错排查（用户日志，不修复）
+
+用户提供粉丝日志 `3060 dlss 错误.log`（3992 行，2026-09-16 13:55–14:01，跑的是 1.3.1beta 便携包，
+路径 `C:\Users\suibian\Downloads\Veyra-1.3.1beta-win64-portable\`）。结论：**30 系 DLSS 补帧解锁
+在这台机器上不可用，属我方实现不完整；另有一个独立的 XeSS 失败原因**。未改任何代码。
+
+- **机器身份**：`adapter[0] desc=NVIDIA GeForce RTX 5060` 但 `deviceId=0x2504` + `dedicatedVideoMiB=12113`
+  → 实际是 **RTX 3060 12GB**，显卡描述被改成 5060（不是我们的软件改的）。`[capture]` 等行为与描述无关；
+  我们的架构判定按 deviceId（0x2200–0x2680）走 Ampere 路径，正确。
+- **DLSS FG 失败链条**（每次尝试都一样）：
+  `[ampere-mfg] unlock applied=1 runs=8 slots=200 fatbins=69 lea=44 gates=2 preflight=69/69` →
+  `[ngx] FG.Available value=false | MultiFrameCountMax=0 (0xFFFFFFFFBAD00010)` →
+  `[ampere-mfg] runtime reported FG unavailable; continuing on the audited sm_86 unlock (multiFrameMax=5)` →
+  `[ngx] Create DLSSG 2560x1440 result=0xFFFFFFFFBAD0000B` → `[graph] FG create failed` →
+  `[backend-recovery] ... multiplier=1`（FG 被整体关闭）。
+  错误码：`0xBAD0000B`=UnableToInitializeFeature（NGX fail|11），`0xBAD00010`=UnsupportedParameter（fail|16）。
+- **根因**：解锁结构层面应用成功（含 69/69 CUDA preflight），但 **dlssg 310.7 运行时的 FG 可用性判定
+  仍为 false**，我们的补丁没有覆盖那一层；而 `AmpereMfgUnlock` 之后的代码在"运行时报不可用"时
+  **强行假设可用**（`fgCaps.available=true; multiFrameCountMax=5`），于是 Create 必然失败。
+- **上游对照**：本次实现的来源 `dashdogy/RTX40MFG-Unlock` 的 ampere 路径包含我们**未移植**的组件——
+  `ampere_mask_transform.h`（特定 slot-14 fatbin 的 mask 变换）、`ampere_native_cache.h`/`ampere_cuda_program.h`
+  （内核缓存）、`ampere_wrapper_capacity.h` + `ampere_policy.h` 的 **NGX 调用层 wrapper**（把一个
+  Evaluate 扩成多帧 Batch）、按运行库版本选择 temporal profile；其 README 也写明 30 系支持
+  "very early and experimental, may not work in some games or configurations"。专门做 30 系的
+  `sdli1995/dlssg_for_sm86` 则是**代理 DLL + 内嵌原厂运行库**路线，并明确说明 **native 模式（自建 NGX host，
+  即我们的路线）有难以修复的兼容问题**所以才回退代理；其实测驱动为 591.86 / 610.74（R580+），
+  **本机用户驱动是 566.92，低于其实测范围**。
+- **独立问题（XeSS FG）**：`[xess-fg] Init result=-17` 之前 present 明确写着
+  `using the retained AMD proxy swapchain (frame generation off)`，随后 `CreateSwapChainForHwnd failed`
+  ——是"先开过 AMD FSR → 代理交换链占用窗口 → 切 XeSS 需重启软件"的已知边界，不是 XeSS 本身故障。
+  用户最后切回 AMD FSR 补帧，日志显示 `real=3600 generated=910 presented=4510`，工作正常。
+- **建议（待用户决定，未施工）**：①把"解锁后运行时报不可用"改成明确失败 + 清晰提示，不再白试一次 Create；
+  ②真正的 30 系支持需要按上游补齐（mask transform / wrapper / 代理路线），并且**必须在真 30 系上验证**；
+  ③可让粉丝先把显卡描述改回 3060、并把驱动升到 R580+ 再复测一次（低成本验证）。
+
 ## 2026-09-16 MPEG/压缩链路收工：解码 worker + D3D12VA 后端 + 帧池契约（2 分钟真机复测）
 
 用户要求"一次性修完，不要停"，本轮把压缩（MJPEG/H.264/HEVC/AV1/VP9）族从"系统解码器 + RGB32 兼容路径"
