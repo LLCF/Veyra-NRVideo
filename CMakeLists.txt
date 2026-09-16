@@ -514,7 +514,9 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
   target_include_directories(veyra_live_timing_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
   add_executable(veyra_repair_contract_tests tests/unit/RepairContractTests.cpp)
-  target_link_libraries(veyra_repair_contract_tests PRIVATE veyra_base)
+  # veyra_engine is linked for the subtitle engine (SRT/ASS/VTT parsing +
+  # indexed cue lookup); FFmpeg import libraries come from its public surface.
+  target_link_libraries(veyra_repair_contract_tests PRIVATE veyra_base veyra_engine ${FFMPEG_LIBRARIES})
   target_compile_features(veyra_repair_contract_tests PRIVATE cxx_std_20)
   target_compile_definitions(veyra_repair_contract_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   target_include_directories(veyra_repair_contract_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)

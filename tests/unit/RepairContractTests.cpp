@@ -30,6 +30,7 @@ int thunkReplacementFunction(int value) { ++thunkHookCalls; return thunkOriginal
 #include "veyra/sink/CaptureSyncTarget.h"
 #include "veyra/source/DolbyVision.h"
 #include "veyra/source/AudioInputRecovery.h"
+#include "veyra/engine/Subtitles.h"
 int main(){
     using namespace veyra;int failures=0,checks=0;
     auto check=[&](bool ok,const char* name){++checks;if(!ok)++failures;std::cout<<(ok?"PASS ":"FAIL ")<<name<<'\n';};
@@ -382,6 +383,42 @@ int main(){
         check(tail.tailAccepts(51247,854.133,51249)&&tail.tailAccepts(51248,854.15,51249),"tail snap covers the real end of stream");
         check(!tail.tailAccepts(51247,854.133,60000)&&!tail.tailAccepts(100,std::round(100*1000.0/60)/1000+.1,60000),"tail snap never covers a mid-stream gap");
         check(!tail.tailAccepts(51247,854.9,51249)&&!tail.tailAccepts(51247,854.133,0),"tail snap rejects larger deviations and unknown streams");
+    }
+    {
+        // Subtitle engine: external SRT/ASS/WebVTT parsing, style mapping and
+        // indexed lookup (the renderer and the embedded-track extraction share
+        // this code).
+        const auto folder=std::filesystem::temp_directory_path()/std::format("veyra-subtitle-{}",GetCurrentProcessId());
+        std::filesystem::create_directories(folder);
+        const auto assPath=(folder/L"styled.ass").wstring();
+        {std::ofstream out(assPath);out<<
+            "[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\n\n"
+            "[V4+ Styles]\n"
+            "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+            "Style: Default,SimHei,64,&H0000FFFF,&H000000FF,&H00FF0000,&H80000000,1,0,0,0,100,100,0,0,1,3,1,8,40,40,60,1\n\n"
+            "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+            "Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,{\\an2}第一行\\N第二行\n"
+            "Dialogue: 0,0:00:05.00,0:00:08.00,Default,,0,0,0,,{\\pos(960,200)}定位行\n";}
+        const auto ass=engine::loadSubtitleFile(assPath);
+        check(ass.usable()&&ass.cues.size()==2&&ass.styles.size()==2,"ASS loads cues and styles");
+        check(ass.scriptWidth==1920&&ass.scriptHeight==1080,"ASS PlayRes is parsed for pos scaling");
+        check(ass.styles[1].font==L"SimHei"&&ass.styles[1].bold&&ass.styles[1].alignment==8,"ASS style fields map onto the render style");
+        check(ass.styles[1].primary==0xFF00FFFFu&&ass.styles[1].outline==0xFFFF0000u,"ASS BGR colours convert to ARGB with 00 = opaque");
+        check(ass.cues[0].text==L"第一行\n第二行"&&ass.cues[0].alignOverride==2,"override tags are stripped and N-breaks become line breaks");
+        check(ass.cues[1].posX==960&&ass.cues[1].posY==200,"pos survives for positioning");
+        check(engine::cuesAt(ass,2.0).size()==1&&engine::textAt(ass,2.0)==L"第一行\n第二行","indexed lookup returns the overlapping cue");
+        check(engine::textAt(ass,4.5).empty()&&engine::textAt(ass,6.0)==L"定位行","indexed lookup respects cue windows");
+        const auto srtPath=(folder/L"plain.srt").wstring();
+        {std::ofstream out(srtPath);out<<"1\n00:00:00,500 --> 00:00:02,000\n简单字幕\n\n2\n00:00:09,000 --> 00:00:10,000\n晚一点\n";}
+        const auto plain=engine::loadSubtitleFile(srtPath);
+        check(plain.usable()&&plain.cues.size()==2&&engine::textAt(plain,1.0)==L"简单字幕"&&engine::textAt(plain,5.0).empty(),"SRT windows behave");
+        const auto vttPath=(folder/L"web.vtt").wstring();
+        {std::ofstream out(vttPath);out<<"WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nVTT 字幕\n";}
+        const auto vtt=engine::loadSubtitleFile(vttPath);
+        check(vtt.usable()&&vtt.cues.size()==1&&engine::textAt(vtt,2.0)==L"VTT 字幕","WebVTT windows behave");
+        check(engine::isTextSubtitleCodec(L"subrip")&&engine::isTextSubtitleCodec(L"ass")&&!engine::isTextSubtitleCodec(L"hdmv_pgs_subtitle"),"text and image subtitle codecs are distinguished");
+        std::error_code cleanup;
+        std::filesystem::remove_all(folder,cleanup);
     }
     using Reason=pipeline::ResetReason;
     check(diagnostics::resetCause(0,Reason::PauseResume,Reason::SceneCut)==Reason::PauseResume&&

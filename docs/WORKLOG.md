@@ -69,6 +69,17 @@
 - 证据：本机 30 秒 FSR 运行 `real=839/generated=838/presented=1677`、`presentSubmitFps=30.00`、`gpuFgBatchP95Ms=0.197`；delivery 短测 PASS `logs/delivery/442f41e29b684e7e87174bc075d4e282/result.json`。
 - **边界（如实）**：FgBatch 为**应用侧**计时（提供方内部的插值工作不经过我们的队列，无法打点）；用户机器上"SDK提交=0"的原始触发未能在本机复现（本机 r3 正常），累计对齐是针对该症状的根治性修法，需要用户在 r4 包上复测确认。
 
+### 2026-09-16 字幕系统重做：多格式 / 内嵌轨 / 双语 / 样式 / 延时 / 自动对齐
+
+用户："字幕你列出来的功能全部都加上吧……先修字幕，其他不动"。实现、证据与未做项见 [字幕系统](SUBTITLE_ENGINE_2026-09-16.md)；**未触碰 4K HEVC 解码、播放/导出链路**。
+
+- **引擎**：`Subtitles.*` 重写为"轨道"模型——外挂 SRT/ASS/SSA/WebVTT（扩展名 + 内容嗅探，UTF-8/UTF-16LE，16MB 上限）；ASS 解析 Script Info(PlayRes)/Styles(字体/字号/颜色 BGR→ARGB/Bold/Italic/Outline/Shadow/Alignment/Margin)/Events(`\N` 换行、覆盖块剥离、`\an`/`\pos`)；`rebuildIndex()` + 二分 `cuesAt()` 取代每帧线性扫描；`loadEmbeddedSubtitleTracks()` 用 FFmpeg 逐轨解码内嵌文本字幕（实测 Matroska 给的是 `Layer,0,Style,...,Effect,Text` 形态，两种前缀都能正确剥离且不吃正文逗号），PGS/DVB 无解码器时列出并标注；`alignSubtitleToAudio()`（实验）用 8kHz 包络 + 全局 F1 + 50% 重叠门限做 ±30s 常数偏移对齐。
+- **渲染**：`SubtitleOverlay` 重写为带样式多行渲染（字体/字号/颜色/描边/阴影/背景条/对齐/边距/`\pos`），主字幕在下副字幕在上；修掉旧代码函数级 static GDI+ 对象在 `GdiplusShutdown` 后析构导致的 0xC0000005 退出崩溃（本轮实测踩到）。
+- **播放器**：打开文件自动加载同名外挂字幕 + 枚举内嵌轨（主字幕优先中文轨）；菜单分区提供开关/载入/重扫/主轨选择/副轨选择/延时(±1s,±50ms)/自动对齐/字号/描边/背景条/位置/字体切换；快捷键 `B`(开关) `Z`/`X`(延时∓50ms，Shift 为∓1s) `T`/`Y`(主/副轨循环)；`ui-preferences` 升到 v3（旧版可读）；新增测试用 CLI：`--subtitle-primary/-secondary/-offset-ms/-font-size/-no-outline/-background/-auto-align`。
+- **实测**：MKV 内嵌 SRT/ASS 正确出字（`a16-subs.mkv`）；外挂同名 ASS 自动加载（`\an8` 顶部 + 多行）；双语同帧输出两轨文本；`Z,Z,X,B` 按键延时 -50/-100/0ms 与关闭字幕；自动对齐在真值 -3000ms 的合成素材上给出 `shift=-3000ms score=0.949`。
+- **回归**：修复合同 180 项 0 失败（新增 10 项字幕检查，`veyra_repair_contract_tests` 因此链接 `veyra_engine` + FFmpeg 头）、预设往返 PASS、UI 合同 PASS、delivery 短测 PASS `logs/delivery/48d9555716234d7ca3e1ad254c78c37c/result.json`。
+- **未做（如实）**：OpenSubtitles 在线搜索/下载（需要 API key 与联网/隐私决定）；libass 级 ASS 特效（`\move`/`\t`/`\clip`/`\k` 等，需引入 libass 依赖链）；PGS/DVB 图形字幕（FFmpeg 未编解码器）；音轨选择（属音频管线，按"其他不动"未做）。
+
 ### 2026-09-16 格式矩阵测试 + MKV 跳转排查（只测只查，未改产品代码）
 
 用户："各种视频格式的导入导出都测试一下确保没问题……有用户反馈 MKV 跳转要卡半分钟……这轮只做导入导出测试和问题排查，不要开始自顾自修复"。完整矩阵、命令与原始数据见 [格式矩阵与跳转排查](FORMAT_MATRIX_AND_SEEK_FINDINGS_2026-09-16.md)，素材在 `out/format-matrix/`（含驱动脚本 `run-seek.ps1`）。
