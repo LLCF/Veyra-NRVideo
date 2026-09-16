@@ -481,7 +481,12 @@ void EnhanceGraph::applyAmpereMfgUnlock()
     const auto& adapter = context_.adapter();
     // Hard architecture gate: only RTX 30 (Ampere GA10x) takes this path. Ada
     // keeps its own unlock and Blackwell keeps its native multi-frame path.
-    if (!ngx::AmpereMfgUnlock::adapterIsAmpere(adapter.vendorId, adapter.deviceId)) {
+    // VEYRA_TEST_FORCE_AMPERE_UNLOCK exists so the patch itself can be checked
+    // on a non-Ampere host (does rewriting all 69 fatbins leave the runtime
+    // functional?); it never run in a product session.
+    wchar_t forced[2]{};
+    const bool forceOnAnyAdapter=GetEnvironmentVariableW(L"VEYRA_TEST_FORCE_AMPERE_UNLOCK",forced,2)>0;
+    if (!forceOnAnyAdapter&&!ngx::AmpereMfgUnlock::adapterIsAmpere(adapter.vendorId, adapter.deviceId)) {
         return;
     }
     wchar_t disabled[2]{};

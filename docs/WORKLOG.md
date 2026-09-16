@@ -1,5 +1,50 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-17 3060 DLSS FG 深挖：patch 正确性实机级验证 + 上游方案拆解
+
+用户要求"修到可以用"，不是加错误报告。本轮把所有能确认的都钉死了：
+
+**1. 我们自己的 patch 是正确的（本机决定性实验）**
+新增 `VEYRA_TEST_FORCE_AMPERE_UNLOCK=1`（仅测试）：在 RTX 5070 上强制应用 AmpereMfgUnlock
+（同一套 69 fatbin → sm_86 PTX 重编译、200 slot 重定向、2 arch gate、preflight 69/69）。
+结果：`FG capability available=true multiFrameMax=5`、`Create DLSSG result=0x1 Success`、
+252 真实帧 / 250 生成帧。**patch 重写全部内核后运行库仍然完好** —— 3060 上的失败不是 patch 破坏了
+运行库，而是 dlssg 内部另有一层我们没触到的判定。该开关永不用于产品会话。
+
+**2. sdli1995/dlssg_for_sm86 的完整机制（从它的二进制里提取）**
+仓库没有源码，只有编译好的 `version.dll`(29,676,832) + 文档。扫描其内嵌 PE 得到两个组件：
+
+- `nvngx_dlssg.dll` **310.9.1**（7,450,624 字节，SHA256 `DA310F91…`，**≠ 上游文档记的原版
+  `ff6e90eb…`，即已被修改**，50 个标准 NGX 导出齐全）；
+- **`sm86_backend.dll`**（21,743,104 字节，12 个导出：`DlssgMod_Install/GetInfo/ConfigurePlugin/
+  ConfigureCapture/ConfigureProbe/PluginModule/SupportedRouteFlags/TuringHost`、
+  `SM86Bridge_Install/GetStats/ProbeRequirements`）。
+
+后端字符串直接暴露了它的做法：`hooks_installed`、**`NVSDK_NGX_D3D12_GetCapabilityParameters`**、
+**`NVSDK_NGX_D3D12_GetFeatureRequirements`**、`fg_gate_capability`、`fg_gate_requirements`、
+`capability_queries`、`features_requirements`、`cuDeviceComputeCapability`、
+`DLSSG_FAKE_TURING_HOST`、`hook installer is a Detours transaction`、
+`KernelImage=Original installs the architecture and Evaluate hooks but replaces no kernel image`。
+
+**即：上游方案 = 内核替换（SM86 镜像）+ 用 Detours 在进程内 hook NGX 的能力/需求查询**，
+再由它的后端把"支持"的答案交给运行库。文档确认 `KernelImage`/`Router`/`SpoofArchToGame` 等
+进阶键存在但未公开 ABI。
+
+**3. 直接换用它运行库的实验（本机 5070）**
+把提取的 310.9.1 放进 `runtime_local/nvidia/nvngx_dlssg.dll` 跑 `--fg`：启动正常、
+`generated=0`、无 `FG capability` 日志 —— **单独替换运行库无效果**，它依赖 `sm86_backend.dll`
+的安装调用，而 Install 的调用约定未公开（12 个导出的签名都没有文档/源码）。
+实验后已把 310.7 原文件还原（校验 7,519,856 字节）。
+
+**4. 结论与缺口**
+让 3060 真正能开 DLSS 补帧，需要复刻上游那套"内核替换 + 查询层钩子 + 架构伪装"，具体缺口：
+① NGX `GetCapabilityParameters`/`GetFeatureRequirements` 的进程内钩子（我们没有）；
+② dlssg 内部对 CUDA/NVAPI 硬件能力查询的绕过（上游有 `cuDeviceComputeCapability` 路径）；
+③ `SM86Bridge_Install` 的 ABI（只能逆向，仓库无源码）；
+④ **每一轮都必须有 3060 实机验证**（本机 5070 只能证明 patch 本身无害）。
+这不是一次改动，是一个需要实机迭代的逆向项目。30 系用户在可用之前应继续使用 AMD FSR 补帧
+（3060 日志实测 `real=3600 generated=910` 工作正常）。
+
 ## 2026-09-17 采集链路整体排查（用户要求，干净环境下全量实机）
 
 用户要求"整体排查一遍，别 YUY2 没事了其他又有问题"。在设备空闲（无 OBS、无其他占用）时完成，全部为本机真机结果：
