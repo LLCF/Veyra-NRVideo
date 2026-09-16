@@ -5,6 +5,7 @@
 #include "veyra/source/NativeCaptureSink.h"
 #include "veyra/source/CaptureBuffer.h"
 #include "veyra/source/CaptureFormatRank.h"
+#include "veyra/source/CaptureCodec.h"
 #include "veyra/pipeline/ColorMetadata.h"
 #include "veyra/Log.h"
 #include "veyra/sink/AudioFormat.h"
@@ -16,6 +17,10 @@
 #include <ks.h>
 #include <ksmedia.h>
 #include <wrl/client.h>
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libswscale/swscale.h>
+}
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -148,6 +153,12 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
     unsigned bufferMode=0;
     // N1 diagnostic: legacy per-pixel CPU unpack instead of GPU unpack.
     bool cpuUnpack=false;
+    // MPEG chain stage 2: MJPEG direct-connect + our own FFmpeg decode backend.
+    // Decoding happens on the DirectShow callback thread for now (one decoder);
+    // a bounded parallel decode queue is a later refinement.
+    bool compressedPath=false;CaptureCodec codec=CaptureCodec::None;
+    AVCodecContext* decoder=nullptr;SwsContext* sws=nullptr;AVFrame* decoded=nullptr;
+    uint64_t compressedDecoded=0,compressedErrors=0;
     // Manual capture flip; read by the DirectShow callback thread.
     std::atomic<bool> verticalFlip{false};
     std::unique_ptr<WasapiAudioInput> wasapi;
@@ -156,19 +167,54 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
     SourceInfo info;CaptureMediaLayout layout;Clock::time_point lastFrame;
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id,void** pp)override{if(!pp)return E_POINTER;*pp=nullptr;if(id==IID_IUnknown||id==__uuidof(ISampleGrabberCB)){*pp=static_cast<ISampleGrabberCB*>(this);AddRef();return S_OK;}return E_NOINTERFACE;}
     ULONG STDMETHODCALLTYPE AddRef()override{return ++refs;}ULONG STDMETHODCALLTYPE Release()override{return --refs;}
+    // Decode one MJPEG payload into the NV12 mailbox frame. Called with the
+    // source mutex held from the DirectShow callback thread.
+    bool decodeCompressed(const uint8_t* data,size_t bytes){
+        AVPacket* packet=av_packet_alloc();if(!packet)return false;
+        if(av_new_packet(packet,int(bytes))<0){av_packet_free(&packet);return false;}
+        std::memcpy(packet->data,data,bytes);
+        const int send=avcodec_send_packet(decoder,packet);av_packet_free(&packet);
+        if(send<0){++compressedErrors;return false;}
+        const int recv=avcodec_receive_frame(decoder,decoded);
+        if(recv<0){++compressedErrors;return false;}
+        // MJPEG decodes to the deprecated full-range YUVJ formats; map them to
+        // the standard formats and pin the range explicitly instead of letting
+        // swscale guess (and spam a deprecation warning every frame).
+        AVPixelFormat srcFormat=AVPixelFormat(decoded->format);
+        if(srcFormat==AV_PIX_FMT_YUVJ422P)srcFormat=AV_PIX_FMT_YUV422P;
+        else if(srcFormat==AV_PIX_FMT_YUVJ420P)srcFormat=AV_PIX_FMT_YUV420P;
+        else if(srcFormat==AV_PIX_FMT_YUVJ444P)srcFormat=AV_PIX_FMT_YUV444P;
+        sws=sws_getCachedContext(sws,decoded->width,decoded->height,srcFormat,
+            int(layout.width),int(layout.height),AV_PIX_FMT_NV12,SWS_BILINEAR,nullptr,nullptr,nullptr);
+        if(!sws){av_frame_unref(decoded);++compressedErrors;return false;}
+        // Keep full-range NV12 so the declared color contract (range=Full) is
+        // truthful for the graph's YUV ingress.
+        const int* coefficients=sws_getCoefficients(decoded->colorspace==AVCOL_SPC_BT709?SWS_CS_ITU709:SWS_CS_ITU601);
+        sws_setColorspaceDetails(sws,coefficients,1,coefficients,1,0,1<<16,1<<16);
+        uint8_t* dst[4]={pendingFrame->data[0],pendingFrame->data[1],nullptr,nullptr};
+        const int dstStride[4]={pendingFrame->linesize[0],pendingFrame->linesize[1],0,0};
+        sws_scale(sws,decoded->data,decoded->linesize,0,decoded->height,dst,dstStride);
+        av_frame_unref(decoded);
+        ++compressedDecoded;
+        if((compressedDecoded%600)==0)log::info("capture-decode",std::format("decoded={} errors={} (direct callback decode)",compressedDecoded,compressedErrors));
+        return true;
+    }
     HRESULT STDMETHODCALLTYPE SampleCB(double time,IMediaSample* sample)override{
         const auto arrival=Clock::now();BYTE* data=nullptr;
         REFERENCE_TIME sampleStart=0,sampleEnd=0;
         const bool sampleTime=sample&&sample->GetTime(&sampleStart,&sampleEnd)==S_OK;
         const bool valid=sample&&std::isfinite(time)&&SUCCEEDED(sample->GetPointer(&data))&&data&&
-            sample->GetActualDataLength()>=LONG(layout.sampleBytes);
+            (compressedPath?sample->GetActualDataLength()>0:sample->GetActualDataLength()>=LONG(layout.sampleBytes));
         {
             std::lock_guard lock(mutex);
             if(!valid||!pendingFrame){callbackError=true;}
             else {
                 // Copy directly into our bounded mailbox; read() swaps frames
                 // under this lock, so the frame consumed by the GPU is untouched.
-                if(!copyCaptureSample(layout,data,size_t(sample->GetActualDataLength()),*pendingFrame,verticalFlip.load())){callbackError=true;wake.notify_one();return S_OK;}
+                // Compressed MJPEG payloads are decoded into the same NV12
+                // mailbox frame instead of being expanded by the system graph.
+                const bool copied=compressedPath?decodeCompressed(data,size_t(sample->GetActualDataLength())):copyCaptureSample(layout,data,size_t(sample->GetActualDataLength()),*pendingFrame,verticalFlip.load());
+                if(!copied){callbackError=true;wake.notify_one();return S_OK;}
                 if(pending)++dropped;
                 // Inspect consecutive callbacks, not consecutive mailbox reads.
                 // Preserve a driver/clock break when its sample is overwritten.
@@ -315,8 +361,39 @@ bool CaptureCardSource::configure(const SourceOpenDesc& desc){close();p_->lastAu
         }
     }
     const bool direct=nativeSupported&&!desc.legacyCaptureRgbForDiagnostic;
+    const CaptureCodec codec=captureCodecOf(native->subtype);
+    unsigned compressedWidth=0,compressedHeight=0;int64_t compressedDuration=0;
+    bool compressedPath=false;
+    if(!direct&&!nativeSupported&&codec==CaptureCodec::Mjpeg&&!desc.legacyCaptureRgbForDiagnostic){
+        // MPEG chain stage 2: MJPEG bypasses the system decoder stack entirely;
+        // our own decoder turns each payload into an NV12 mailbox frame. Any
+        // failure below falls back to the RGB32 compatibility path.
+        const AVCodec* avcodec=avcodec_find_decoder(AV_CODEC_ID_MJPEG);
+        p.decoder=avcodec?avcodec_alloc_context3(avcodec):nullptr;
+        p.decoded=av_frame_alloc();
+        if(p.decoder&&p.decoded&&avcodec_open2(p.decoder,avcodec,nullptr)>=0){compressedPath=true;p.compressedPath=true;p.codec=codec;}
+        else{
+            if(p.decoded)av_frame_free(&p.decoded);if(p.decoder)avcodec_free_context(&p.decoder);
+            log::warn("capture-decode","MJPEG decoder unavailable; keeping the RGB32 compatibility path");
+        }
+    }
     AM_MEDIA_TYPE connected{};
-    if(direct){
+    if(compressedPath){
+        ComPtr<IPin> input,output;
+        hr=createCompressedCaptureSink(*native,[&p](IMediaSample* sample){REFERENCE_TIME a=0,b=0;const auto timeHr=sample->GetTime(&a,&b);if(FAILED(timeHr))return timeHr;return p.SampleCB(double(a)/1e7,sample);},p.grabFilter,input);
+        if(SUCCEEDED(hr))hr=p.graph->AddFilter(p.grabFilter.Get(),L"Compressed frame mailbox");
+        if(SUCCEEDED(hr))hr=p.builder->FindPin(p.device.Get(),PINDIR_OUTPUT,&PIN_CATEGORY_CAPTURE,&MEDIATYPE_Video,FALSE,0,&output);
+        if(SUCCEEDED(hr))suggestCaptureVideoBuffering(output.Get(),4,512*1024);
+        if(SUCCEEDED(hr))hr=p.graph->ConnectDirect(output.Get(),input.Get(),native);
+        if(SUCCEEDED(hr))hr=input->ConnectionMediaType(&connected);
+        if(SUCCEEDED(hr)){
+            if(connected.formattype==FORMAT_VideoInfo2&&connected.cbFormat>=sizeof(VIDEOINFOHEADER2)){const auto& v=*reinterpret_cast<const VIDEOINFOHEADER2*>(connected.pbFormat);compressedWidth=unsigned(v.bmiHeader.biWidth);compressedHeight=unsigned(std::abs(int64_t(v.bmiHeader.biHeight)));compressedDuration=int64_t(v.AvgTimePerFrame);}
+            else if(connected.formattype==FORMAT_VideoInfo&&connected.cbFormat>=sizeof(VIDEOINFOHEADER)){const auto& v=*reinterpret_cast<const VIDEOINFOHEADER*>(connected.pbFormat);compressedWidth=unsigned(v.bmiHeader.biWidth);compressedHeight=unsigned(std::abs(int64_t(v.bmiHeader.biHeight)));compressedDuration=int64_t(v.AvgTimePerFrame);}
+            if(!compressedWidth||!compressedHeight||compressedWidth%2||compressedHeight%2){log::warn("capture-decode","compressed dimensions unusable; falling back to the RGB32 compatibility path");hr=VFW_E_INVALIDMEDIATYPE;}
+        }
+        log::info("capture-decode",std::format("compressed ConnectDirect codec={} subtype=0x{:08X} size={}x{} hr=0x{:08X}",captureCodecKey(codec),native->subtype.Data1,compressedWidth,compressedHeight,uint32_t(hr)));
+        if(FAILED(hr)){log::warn("capture-decode","compressed direct connect failed; retrying the RGB32 compatibility path");SourceOpenDesc retry=desc;retry.legacyCaptureRgbForDiagnostic=true;return configure(retry);}
+    }else if(direct){
         // N4: suggest the video-pin allocator size before ConnectDirect. The
         // suggestion is advisory; a refusal keeps the driver's defaults and is
         // reported after the connect instead of failing the device.
@@ -349,12 +426,31 @@ bool CaptureCardSource::configure(const SourceOpenDesc& desc){close();p_->lastAu
         if(SUCCEEDED(hr))hr=p.builder->RenderStream(&PIN_CATEGORY_CAPTURE,&MEDIATYPE_Video,p.device.Get(),p.grabFilter.Get(),p.nullFilter.Get());
         if(SUCCEEDED(hr))hr=p.grab->GetConnectedMediaType(&connected);
     }
-    freeType(native);const bool layoutValid=SUCCEEDED(hr)&&captureMediaLayout(connected,p.layout);freeType(&connected,false);
+    bool layoutValid=false;
+    if(compressedPath){
+        freeType(native);freeType(&connected,false);
+        p.layout={};
+        p.layout.width=compressedWidth;p.layout.height=compressedHeight;
+        p.layout.planes=2;p.layout.format=AV_PIX_FMT_NV12;
+        p.layout.rowBytes=p.layout.width;p.layout.stride=p.layout.rowBytes;p.layout.chromaStride=p.layout.stride;p.layout.chromaRowBytes=p.layout.rowBytes;
+        p.layout.chromaOffset=size_t(p.layout.stride)*p.layout.height;
+        p.layout.sampleBytes=p.layout.chromaOffset+size_t(p.layout.chromaStride)*(p.layout.height/2);
+        p.layout.duration=compressedDuration;
+        AVFrame probe{};probe.format=AV_PIX_FMT_NV12;probe.width=int(p.layout.width);probe.height=int(p.layout.height);
+        p.layout.color=pipeline::resolveFrameColor(probe);
+        p.layout.color.range=pipeline::ColorRange::Full;
+        p.layout.color.transfer=pipeline::TransferFunction::SRGB;
+        p.layout.color.preserveSdrCodeValues=true;
+        p.layout.color.rangeAssumed=p.layout.color.matrixAssumed=p.layout.color.transferAssumed=true;
+        layoutValid=true;
+    }else{
+        freeType(native);layoutValid=SUCCEEDED(hr)&&captureMediaLayout(connected,p.layout);freeType(&connected,false);
+    }
     if(!layoutValid){log::error("capture",std::format("unsupported negotiated layout/connect failure hr=0x{:08X}",uint32_t(hr)));return false;}
     if(p.cpuUnpack&&captureLegacyCpuLayout(p.layout))log::warn("capture-unpack",std::format("legacy CPU unpack path active packing={} format={} (per-pixel conversion stays on the callback thread)",int(p.layout.packing),int(p.layout.format)));
     const unsigned colorOverride=selection.colorOverride;
     if(colorOverride>2)return false;
-    if(colorOverride){
+    if(colorOverride&&!compressedPath){
         if(p.layout.format!=AV_PIX_FMT_P010&&p.layout.format!=AV_PIX_FMT_P016){log::error("capture-color","Explicit HDR requires P010/P016; select a 10/16-bit capture format");return false;}
         p.layout.color.transfer=colorOverride==1?pipeline::TransferFunction::PQ:pipeline::TransferFunction::HLG;
         p.layout.color.matrix=pipeline::YuvMatrix::BT2020NCL;p.layout.color.primaries=pipeline::ColorPrimaries::BT2020;
@@ -712,7 +808,10 @@ void CaptureCardSource::close()noexcept{
     if(p.audioSession)p.audioSession->stop();p.audioError.clear();
     if(p.audioPassthrough)p.audioPassthrough->close();
     p.events.Reset();p.control.Reset();p.grab.Reset();p.nullFilter.Reset();p.grabFilter.Reset();p.audioSink.Reset();p.audioFilter.Reset();p.config.Reset();p.device.Reset();p.builder.Reset();p.graph.Reset();p.referenceClock.Reset();p.audioSession.reset();p.audioPassthrough.reset();
-    av_frame_free(&p.frame);av_frame_free(&p.pendingFrame);p.info={};
+    av_frame_free(&p.frame);av_frame_free(&p.pendingFrame);
+    if(p.decoded)av_frame_free(&p.decoded);if(p.decoder)avcodec_free_context(&p.decoder);if(p.sws)sws_freeContext(p.sws);
+    p.sws=nullptr;p.compressedPath=false;p.codec=CaptureCodec::None;p.compressedDecoded=p.compressedErrors=0;
+    p.info={};
     p.sequence=p.received=p.dropped=p.lastDrop=0;p.pending=p.callbackError=p.configured=p.forceDiscontinuity=false;p.lastPts=p.readAgeMs=0;
 }
 }

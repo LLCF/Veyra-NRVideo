@@ -100,7 +100,7 @@ public:
         if(!peer||!type)return E_POINTER;std::lock_guard lock(mutex_);if(state_!=State_Stopped)return VFW_E_NOT_STOPPED;if(peer_)return VFW_E_ALREADY_CONNECTED;
         PIN_DIRECTION direction;if(FAILED(peer->QueryDirection(&direction))||direction!=PINDIR_OUTPUT)return VFW_E_INVALID_DIRECTION;
         if(QueryAccept(type)!=S_OK)return VFW_E_TYPE_NOT_ACCEPTED;
-        const auto hr=copyType(connected_,*type);if(FAILED(hr))return hr;peer_=peer;if(!audio_)captureMediaLayout(*type,layout_);return S_OK;
+        const auto hr=copyType(connected_,*type);if(FAILED(hr))return hr;peer_=peer;if(!audio_&&!compressed_)captureMediaLayout(*type,layout_);return S_OK;
     }
     HRESULT STDMETHODCALLTYPE Disconnect()override{std::lock_guard lock(mutex_);if(state_!=State_Stopped)return VFW_E_NOT_STOPPED;const bool connected=bool(peer_);peer_.Reset();allocator_.Reset();clearType(connected_);return connected?S_OK:S_FALSE;}
     HRESULT STDMETHODCALLTYPE ConnectedTo(IPin** p)override{if(!p)return E_POINTER;std::lock_guard lock(mutex_);*p=nullptr;return peer_?peer_.CopyTo(p):VFW_E_NOT_CONNECTED;}
@@ -109,7 +109,7 @@ public:
     HRESULT STDMETHODCALLTYPE QueryDirection(PIN_DIRECTION* p)override{if(!p)return E_POINTER;*p=PINDIR_INPUT;return S_OK;}
     HRESULT STDMETHODCALLTYPE QueryId(LPWSTR* p)override{if(!p)return E_POINTER;*p=static_cast<LPWSTR>(CoTaskMemAlloc(sizeof(L"Input")));if(!*p)return E_OUTOFMEMORY;memcpy(*p,L"Input",sizeof(L"Input"));return S_OK;}
     HRESULT STDMETHODCALLTYPE QueryAccept(const AM_MEDIA_TYPE* p)override{
-        if(!p)return E_POINTER;std::lock_guard lock(mutex_);if(audio_)return sameAudio(*p,peer_?connected_:desired_)?S_OK:S_FALSE;if(peer_)return equivalentCaptureTypes(*p,connected_)?S_OK:S_FALSE;CaptureMediaLayout candidate;
+        if(!p)return E_POINTER;std::lock_guard lock(mutex_);if(compressed_)return sameCompressed(*p,peer_?connected_:desired_)?S_OK:S_FALSE;if(audio_)return sameAudio(*p,peer_?connected_:desired_)?S_OK:S_FALSE;if(peer_)return equivalentCaptureTypes(*p,connected_)?S_OK:S_FALSE;CaptureMediaLayout candidate;
         return captureMediaLayout(*p,candidate)&&p->subtype==desired_.subtype&&candidate.width==layout_.width&&candidate.height==layout_.height?S_OK:S_FALSE;
     }
     HRESULT STDMETHODCALLTYPE EnumMediaTypes(IEnumMediaTypes** p)override{if(!p)return E_POINTER;try{*p=new TypeEnum(desired_);return S_OK;}catch(...){*p=nullptr;return E_OUTOFMEMORY;}}
