@@ -15,7 +15,7 @@ std::future<Query> pending;bool busy=false,refreshAfterQuery=false;int queriedDe
 std::vector<source::CaptureFormat> formats;
 std::vector<source::CaptureDevice> videoDevices,audioDevices;
 CapturePreferences remembered;
-std::function<bool()> readSdr;std::function<bool(bool)> setSdr;
+std::function<bool()> readSdr;std::function<bool(bool)> setSdr;std::function<int()> readAudioIngress;std::function<bool(int)> setAudioIngress;
 void rebuildAudioList(HWND h,int device){
     SendDlgItemMessageW(h,3,CB_RESETCONTENT,0,0);SendDlgItemMessageW(h,3,CB_ADDSTRING,0,LPARAM(L"不监听音频"));
     const bool videoSelected=device>=0&&size_t(device)<videoDevices.size();
@@ -42,7 +42,7 @@ void query(int device){if(busy)return;busy=true;queriedDevice=device;queryStarte
     const std::wstring videoPath=device>=0&&size_t(device)<videoDevices.size()?videoDevices[size_t(device)].path:L"";
     pending=std::async(std::launch::async,[device,videoPath]{CoInitializeEx(nullptr,COINIT_MULTITHREADED);Query result;result.device=device;try{if(device<0){result.video=source::CaptureCardSource::deviceDetails();result.audio=source::CaptureCardSource::deviceDetails(true);}else result.formats=videoPath.empty()?source::CaptureCardSource::formats(unsigned(device)):source::CaptureCardSource::formatsByPath(videoPath);}catch(...){}CoUninitialize();return result;});
 }
-void arrange(){RECT r{};GetClientRect(window,&r);const int width=MulDiv(r.right,96,veyra::ui::layoutDpi(window));const int ys[]={0,44,114,184,412,412,14,84,344,154,254,224,294};for(int id=1;id<=12;++id){int x=id==5?width-152:16;int w=id==4?width-184:id==5?136:width-32;MoveWindow(GetDlgItem(window,id),dip(window,x),dip(window,ys[id]),dip(window,w),dip(window,(id<=3||id==10)?180:id==8?56:id==4||id==5?36:24),TRUE);}}
+void arrange(){RECT r{};GetClientRect(window,&r);const int width=MulDiv(r.right,96,veyra::ui::layoutDpi(window));const int ys[]={0,44,114,184,412,412,14,84,344,154,254,224,294,478,448};for(int id=1;id<=14;++id){int x=id==5?width-152:16;int w=id==4?width-184:id==5?136:width-32;MoveWindow(GetDlgItem(window,id),dip(window,x),dip(window,ys[id]),dip(window,w),dip(window,(id<=3||id==10||id==13)?180:id==8?56:id==4||id==5?36:24),TRUE);}}
 LRESULT CALLBACK proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){switch(msg){
 case WM_CREATE:{window=h;font=makeFont(h);titleTheme(h);auto add=[&](const wchar_t* cls,const wchar_t* label,int id,DWORD style){auto c=CreateWindowExW(0,cls,label,WS_CHILD|WS_VISIBLE|style,0,0,1,1,h,HMENU(INT_PTR(id)),GetModuleHandleW(nullptr),nullptr);SendMessageW(c,WM_SETFONT,WPARAM(font),TRUE);themeControl(c);};
     remembered=CapturePreferenceStore(runtime::localDataDirectory()).load();
@@ -51,9 +51,12 @@ case WM_CREATE:{window=h;font=makeFont(h);titleTheme(h);auto add=[&](const wchar
     add(L"COMBOBOX",L"",10,CBS_DROPDOWNLIST|WS_VSCROLL|WS_TABSTOP);add(L"STATIC",L"输入颜色（变更需重连）",11,0);
     for(auto name:{L"自动识别 SDR / HDR · 设备元数据",L"手动 HDR10 / PQ · BT.2020",L"手动 HLG · BT.2020 / 1000nit参考"})SendDlgItemMessageW(h,10,CB_ADDSTRING,0,LPARAM(name));SendDlgItemMessageW(h,10,CB_SETCURSEL,0,0);
     add(L"BUTTON",L"转为 SDR 显示（所有预览，立即生效）",12,BS_AUTOCHECKBOX|WS_TABSTOP);SendDlgItemMessageW(h,12,BM_SETCHECK,readSdr()?BST_CHECKED:BST_UNCHECKED,0);
+    add(L"COMBOBOX",L"",13,CBS_DROPDOWNLIST|WS_VSCROLL|WS_TABSTOP);add(L"STATIC",L"采集音频（变更需重连）",14,0);
+    for(auto name:{L"自动：优先线性 PCM，必要时 Dolby/DTS 位流解码",L"强制线性 PCM（不接受 Dolby/DTS 位流）",L"位流优先：Dolby/DTS 直通并解码为 PCM"})SendDlgItemMessageW(h,13,CB_ADDSTRING,0,LPARAM(name));
+    SendDlgItemMessageW(h,13,CB_SETCURSEL,WPARAM(std::clamp(readAudioIngress?readAudioIngress():0,0,2)),0);
     add(L"BUTTON",L"连接并开始观看",4,BS_PUSHBUTTON|WS_TABSTOP);marked(GetDlgItem(h,4));add(L"BUTTON",L"刷新设备",5,BS_PUSHBUTTON|WS_TABSTOP);
     add(L"STATIC",L"视频输入设备",6,0);add(L"STATIC",L"设备实际支持的格式",7,0);add(L"STATIC",L"",8,0);add(L"STATIC",L"音频监听（仅采集所选输入，默认关闭）",9,0);
-    installDialogHelp(h,{{12,L"收到HDR也转成SDR显示，不用改PS5或Windows。增强照常用；只改预览，视频导出不受影响。切换会短暂停顿，截图跟随当前画面。关闭后跟随显示器。"},{10,L"设备没报HDR信息时手动指定，需选P010/P016。P010也可能装SDR，别给普通画面强戴HDR帽子。"},{1,L"选采集卡的视频设备。别把摄像头误请来直播PS5。"},{2,L"选设备真实提供的分辨率、帧率和像素格式。清晰度、带宽和延迟都受它影响。"},{3,L"如果设备自带 HDMI 音频，会显示“使用视频设备内置音频”；否则选择独立音频设备，也可不采声音。"},{4,L"按当前格式连接采集卡，并应用当前增强设置。"},{5,L"重新扫描设备和格式。设备被其他软件占用时，刷新不一定能抢回来。"}});
+    installDialogHelp(h,{{13,L"采集卡把 Dolby Atmos / Dolby Audio / DTS 以位流送来时，这里决定用哪条路。设备本身的音频格式不受影响；改这个要重新连接采集卡。自动优先 PCM，PCM 不可用时才走位流解码；位流优先则反过来，适合 PS5 已设成 Dolby 输出、但设备同时提供 PCM 的情况。"},{12,L"收到HDR也转成SDR显示，不用改PS5或Windows。增强照常用；只改预览，视频导出不受影响。切换会短暂停顿，截图跟随当前画面。关闭后跟随显示器。"},{10,L"设备没报HDR信息时手动指定，需选P010/P016。P010也可能装SDR，别给普通画面强戴HDR帽子。"},{1,L"选采集卡的视频设备。别把摄像头误请来直播PS5。"},{2,L"选设备真实提供的分辨率、帧率和像素格式。清晰度、带宽和延迟都受它影响。"},{3,L"如果设备自带 HDMI 音频，会显示“使用视频设备内置音频”；否则选择独立音频设备，也可不采声音。"},{4,L"按当前格式连接采集卡，并应用当前增强设置。"},{5,L"重新扫描设备和格式。设备被其他软件占用时，刷新不一定能抢回来。"}});
     EnableWindow(GetDlgItem(h,4),FALSE);arrange();SetTimer(h,1,100,nullptr);if(!busy)query(-1);return 0;}
 case WM_TIMER:
     SendDlgItemMessageW(h,12,BM_SETCHECK,readSdr()?BST_CHECKED:BST_UNCHECKED,0);
@@ -93,6 +96,10 @@ case WM_COMMAND:
         const bool enabled=SendDlgItemMessageW(h,12,BM_GETCHECK,0,0)==BST_CHECKED;
         if(!setSdr(enabled))SetDlgItemTextW(h,8,L"当前正在切换增强，请稍后再试。");
         SendDlgItemMessageW(h,12,BM_SETCHECK,readSdr()?BST_CHECKED:BST_UNCHECKED,0);
+    }else if(LOWORD(wp)==13&&HIWORD(wp)==CBN_SELCHANGE){
+        const int mode=int(SendDlgItemMessageW(h,13,CB_GETCURSEL,0,0));
+        if(mode>=0&&setAudioIngress&&!setAudioIngress(mode))SetDlgItemTextW(h,8,L"当前正在切换增强或采集；请稍后再试。");
+        if(readAudioIngress)SendDlgItemMessageW(h,13,CB_SETCURSEL,WPARAM(std::clamp(readAudioIngress(),0,2)),0);
     }else if(LOWORD(wp)==1&&HIWORD(wp)==CBN_SELCHANGE){
         const int device=int(SendDlgItemMessageW(h,1,CB_GETCURSEL,0,0));rebuildAudioList(h,device);query(device);
     }else if((LOWORD(wp)==2||LOWORD(wp)==3)&&HIWORD(wp)==CBN_SELCHANGE){
@@ -123,5 +130,5 @@ case WM_CLOSE:DestroyWindow(h);return 0;
 case WM_DESTROY:KillTimer(h,1);DeleteObject(font);window=nullptr;return 0;
 }return DefWindowProcW(h,msg,wp,lp);}
 }
-void showCapturePanel(HWND parent,std::function<void(const std::wstring&)> callback,std::function<bool()> read,std::function<bool(bool)> write){start=std::move(callback);readSdr=std::move(read);setSdr=std::move(write);if(window){SetForegroundWindow(window);return;}WNDCLASSW wc{};wc.lpfnWndProc=proc;wc.hInstance=GetModuleHandleW(nullptr);wc.lpszClassName=L"VeyraCaptureSetup";wc.hbrBackground=panelBrush();wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);RegisterClassW(&wc);CreateWindowExW(WS_EX_TOOLWINDOW,wc.lpszClassName,L"采集卡 · 连接设置",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_VISIBLE,CW_USEDEFAULT,CW_USEDEFAULT,dip(parent,560),dip(parent,514),parent,nullptr,wc.hInstance,nullptr);}
+void showCapturePanel(HWND parent,std::function<void(const std::wstring&)> callback,std::function<bool()> read,std::function<bool(bool)> write,std::function<int()> readIngress,std::function<bool(int)> writeIngress){start=std::move(callback);readSdr=std::move(read);setSdr=std::move(write);readAudioIngress=std::move(readIngress);setAudioIngress=std::move(writeIngress);if(window){SetForegroundWindow(window);return;}WNDCLASSW wc{};wc.lpfnWndProc=proc;wc.hInstance=GetModuleHandleW(nullptr);wc.lpszClassName=L"VeyraCaptureSetup";wc.hbrBackground=panelBrush();wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);RegisterClassW(&wc);CreateWindowExW(WS_EX_TOOLWINDOW,wc.lpszClassName,L"采集卡 · 连接设置",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_VISIBLE,CW_USEDEFAULT,CW_USEDEFAULT,dip(parent,560),dip(parent,562),parent,nullptr,wc.hInstance,nullptr);}
 }

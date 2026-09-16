@@ -202,6 +202,16 @@ int main(){
         settings.videoSrQuality=0;
         check(settings.validate().empty(),"DLSS SR quality remains valid");
     }
+    {
+        engine::EnhancementSettings settings;
+        check(settings.captureAudio==engine::CaptureAudioIngress::Auto,"capture audio ingress defaults to automatic");
+        for(auto mode:{engine::CaptureAudioIngress::Auto,engine::CaptureAudioIngress::PcmOnly,engine::CaptureAudioIngress::BitstreamPreferred}){
+            settings.captureAudio=mode;
+            check(settings.validate().empty(),"capture audio ingress modes validate");
+        }
+        settings.captureAudio=static_cast<engine::CaptureAudioIngress>(3);
+        check(!settings.validate().empty(),"capture audio ingress outside the enum is rejected");
+    }
     check(engine::opticalFlowBackendName(engine::OpticalFlowBackend::Nvidia)=="NVIDIA_NVOF"&&engine::opticalFlowBackendName(engine::OpticalFlowBackend::AmdFidelityFx)=="AMD_FIDELITYFX_OF","optical-flow backend names identify every backend");
     s.model.intensity=std::numeric_limits<float>::quiet_NaN();check(!s.validate().empty(),"reject NaN transaction");
     s={};s.multiplier=5;check(s.validate().empty(),"5X multiplier accepted by the API guard (6X ceiling)");

@@ -19,6 +19,19 @@ inline constexpr size_t kFgMultiplierChoiceCount=sizeof(kFgMultiplierChoices)/si
 // videoSrQuality values: 0 = DLSS SR, 1..4 = RTX video SR quality steps,
 // 5 = AMD FSR upscaling (vendor neutral; verified on an NVIDIA adapter).
 inline constexpr uint32_t kVideoSrFsr=5;
+// Capture audio ingress policy. Automatic is what the pipeline did before the
+// manual selector existed; the other two exist because Dolby/DTS passthrough
+// negotiation depends on the device and the console, and users reported that
+// "let the capture card decide" is not reliable in practice.
+enum class CaptureAudioIngress { Auto, PcmOnly, BitstreamPreferred };
+constexpr std::wstring_view captureAudioIngressName(CaptureAudioIngress mode) {
+    switch(mode) {
+    case CaptureAudioIngress::PcmOnly: return L"强制线性 PCM";
+    case CaptureAudioIngress::BitstreamPreferred: return L"位流优先（Dolby/DTS 直通解码）";
+    case CaptureAudioIngress::Auto: break;
+    }
+    return L"自动（优先 PCM，必要时位流解码）";
+}
 enum class NrRuntime { Original, Community, Ampere };
 constexpr std::string_view nrRuntimeName(NrRuntime runtime) {
     switch(runtime) {
@@ -83,6 +96,9 @@ struct EnhancementSettings {
     bool lowLatency=false; // preview only: NR before SR, opt-in
     NrRuntime nrRuntime=NrRuntime::Original;
     bool captureCompatible=false;
+    // Capture audio ingress; requires a reconnect to take effect (the media type
+    // is negotiated when the graph is built).
+    CaptureAudioIngress captureAudio=CaptureAudioIngress::Auto;
     bool forceSdrPreview=false; // display only; retain actual HDR source metadata
     bool useHdrPreview(bool hdrInput,bool hdrDisplayActive)const{return hdrInput&&hdrDisplayActive&&!forceSdrPreview;}
     pipeline::SrTarget srTarget=pipeline::SrTarget::Uhd4K;
@@ -117,6 +133,7 @@ struct EnhancementSettings {
         if(auto error=protection.validate();!error.empty())return error;
         if(!revision)return "settingsRevision must be nonzero";
         if(nrRuntime!=NrRuntime::Original&&nrRuntime!=NrRuntime::Community&&nrRuntime!=NrRuntime::Ampere)return "invalid NR runtime";
+        if(captureAudio<CaptureAudioIngress::Auto||captureAudio>CaptureAudioIngress::BitstreamPreferred)return "invalid capture audio ingress mode";
         if(audioSync<AudioSyncMode::Automatic||audioSync>AudioSyncMode::Off||audioOffsetMs<-250||audioOffsetMs>250)return "invalid audio sync setting";
         if(!range(model.intensity,1)||!range(model.tone,1)||!range(model.structure,1))return "model parameter out of range";
         if(model.skin!=-1&&!range(model.skin,2))return "skin parameter out of range";

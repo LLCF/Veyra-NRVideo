@@ -2347,6 +2347,27 @@ DLSSG 能力门控没有排除 FSR，导致 FSR 会话下任何就地设置变�
 
 ### 2026-09-16 杜比/DTS 位流解码兜底（G-2）实现 + 本地解码验证
 
+### 2026-09-16 采集音频改为可手动指定（用户反馈自动识别不好用）
+
+用户反馈"自动识别并不好用"，要求在采集面板里像 HDR 那样手动选。已加：
+
+- 采集面板新增下拉框「采集音频（变更需重连）」：**自动**（优先线性 PCM，PCM 不可用时位流解码）、
+  **强制线性 PCM**（不接受 Dolby/DTS 位流）、**位流优先**（Dolby/DTS 直通解码为 PCM，
+  适合 PS5 已设成 Dolby 输出但设备同时提供 PCM 的情况），并带与 HDR 那两项同风格的说明文本。
+- 设置持久化：`EnhancementSettings::captureAudio`（`engine::CaptureAudioIngress`），
+  预设 schema 升到 **v14**（旧版本读入默认"自动"），UI 走 `applySettings` 与 HDR 选项同一条路。
+- 采集端按模式执行：`CaptureCardSource::setAudioIngress` + `configureAudio()` 里
+  `位流优先` 先试压缩类型、失败再回退 PCM；`强制 PCM` 完全忽略位流类型并写日志说明。
+  命令行测试开关 `--capture-audio 0|1|2`。
+- **修掉一个真 bug**：`setAudioIngress` 原先在采集源 `configure()` 之后才调用，
+  第一次连接不会生效；现在移到配置之前（日志顺序 `capture-audio-ingress` →
+  `device bitstream types` → `selected media type` 即为证）。
+- 本机参考采集卡三种模式实测（本身无位流类型）：mode0/1/2 均 exit 0、330–335 帧、60fps、
+  选中 48kHz/2ch PCM（`logs/fsr/capture-audio-mode{0,1,2}.log`）。**位流优先的"真的优先"分支
+  只能靠有 Dolby 输出的设备验收**，本机无法触发。
+- 回归：契约测试 165 项 0 失败；预设 66 组迁移 + 全字段往返（含新模式）通过；
+  delivery 短测 PASS（`logs/delivery/72b1dec41e0540f7ae5fa6856f8a18b7/result.json`）。
+
 新增 `include/veyra/sink/BitstreamAudio.h` + `src/sink/BitstreamAudio.cpp`（FFmpeg libavcodec/libswresample）：
 按 KSDATAFORMAT/WAVE subtype 分类 AC-3 / E-AC-3(含 DD+ Atmos 载体) / TrueHD-MLP / DTS / DTS-HD/DTS:X，
 S/PDIF 的 IEC 61937 突发自动解框，解码为交错 float PCM 并给出真实声道数与采样率。

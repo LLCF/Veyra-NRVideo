@@ -132,6 +132,9 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
     std::shared_ptr<sink::BitstreamDecoder> audioBitstream;
     bool audioSessionDeferred=false;
     std::wstring audioBitstreamKind;
+    // 0 automatic, 1 PCM only, 2 bitstream preferred (see
+    // engine::CaptureAudioIngress). Read when the audio graph is built.
+    unsigned audioIngressMode=0;
     std::unique_ptr<WasapiAudioInput> wasapi;
     std::wstring audioError;
     AudioInputRecovery audioRecovery;
@@ -214,6 +217,14 @@ std::vector<CaptureFormat> enumerateFormats(IAMStreamConfig* config){
 std::vector<CaptureFormat> CaptureCardSource::formats(unsigned device){ComPtr<IGraphBuilder> g;ComPtr<ICaptureGraphBuilder2>b;ComPtr<IBaseFilter>f;ComPtr<IAMStreamConfig>c;if(!configuration(device,g,b,f,c))return {};return enumerateFormats(c.Get());}
 std::vector<CaptureFormat> CaptureCardSource::formatsByPath(std::wstring_view devicePath){ComPtr<IGraphBuilder> g;ComPtr<ICaptureGraphBuilder2>b;ComPtr<IBaseFilter>f;ComPtr<IAMStreamConfig>c;if(!configuration(devicePath,g,b,f,c))return {};return enumerateFormats(c.Get());}
 const SourceInfo& CaptureCardSource::info()const{return p_->info;}
+void CaptureCardSource::setAudioIngress(unsigned mode){
+    auto& p=*p_;
+    const unsigned clamped=mode>2?0:mode;
+    if(p.audioIngressMode==clamped)return;
+    p.audioIngressMode=clamped;
+    log::info("capture-audio-ingress",std::format("mode={} ({}) takes effect on the next connect",clamped,
+        clamped==1?"PCM only":clamped==2?"bitstream preferred":"automatic"));
+}
 bool CaptureCardSource::setAudioGain(float gain){
     if(p_->wasapi){p_->wasapi->setGain(gain);return p_->wasapi->snapshot().available;}
     auto& p=*p_;if(p.audioSession){p.audioSession->setGain(gain);return p.audioSession->snapshot().available;}if(!p.graph||!p.audioFilter)return false;
@@ -375,13 +386,19 @@ if(name){
         else if(bitstreamName(type->subtype))bitstreamTypes.push_back(std::move(owned));
     }
 log::info("capture-audio-bitstream",std::format("device bitstream types={} [{}] pcmTypes={}",bitstreamTypeCount,bitstreamSummary.empty()?"none":bitstreamSummary,audioTypes.size()));
-if(audioTypes.empty()){log::warn("capture-audio","audio pin has no supported PCM media type");return false;}
+const bool wantBitstreamFirst=p.audioIngressMode==2;
+const bool allowBitstream=p.audioIngressMode!=1;
+if(p.audioIngressMode==1&&bitstreamTypeCount>0)log::info("capture-audio-ingress","manual PCM-only selected: bitstream types are ignored even though the device offers them");
+if(audioTypes.empty()&&(!allowBitstream||bitstreamTypes.empty())){log::warn("capture-audio","audio pin has no usable media type for the selected ingress mode");return false;}
     std::stable_sort(audioTypes.begin(),audioTypes.end(),[](const auto& a,const auto& b){
         sink::WavePcmFormat lhs{},rhs{};
         if(!sink::parseWavePcm(a->pbFormat,a->cbFormat,lhs)||!sink::parseWavePcm(b->pbFormat,b->cbFormat,rhs))return false;
         return sink::preferCaptureAudioFormat(lhs,rhs);
     });
     bool connectedAudio=false;
+    // PCM attempt as a lambda so the bitstream-preferred mode can try it after
+    // the compressed types instead of before them.
+    auto connectPcm=[&]()->bool{
     for(const auto& owned:audioTypes){
         auto* type=owned.get();
         auto session=std::make_unique<sink::CaptureAudioSession>();ComPtr<IBaseFilter> candidate;ComPtr<IPin> terminal;
@@ -403,12 +420,15 @@ if(audioTypes.empty()){log::warn("capture-audio","audio pin has no supported PCM
             else if(candidate)p.graph->RemoveFilter(candidate.Get());
             log::info("capture-audio",std::format("PCM ConnectDirect hr=0x{:X}",unsigned(hr)));
         }
-        if(connectedAudio)break;
+        if(connectedAudio)return true;
     }
+    return false;
+    };
+    if(!wantBitstreamFirst)connectedAudio=connectPcm();
     // Dolby/DTS passthrough fallback: no PCM type connected, so take the best
     // compressed type the device offers and decode it back to PCM. This is the
     // path a PS5 feeding Dolby Atmos / Dolby Audio / DTS needs.
-    if(!connectedAudio&&!bitstreamTypes.empty()){
+    if(!connectedAudio&&allowBitstream&&!bitstreamTypes.empty()){
         std::stable_sort(bitstreamTypes.begin(),bitstreamTypes.end(),[](const auto& a,const auto& b){
             return sink::bitstreamPreferenceOrder(sink::classifyBitstreamSubtype(a->subtype.Data1))>
                    sink::bitstreamPreferenceOrder(sink::classifyBitstreamSubtype(b->subtype.Data1));
@@ -470,6 +490,7 @@ if(audioTypes.empty()){log::warn("capture-audio","audio pin has no supported PCM
             if(connectedAudio)break;
         }
     }
+    if(!connectedAudio&&wantBitstreamFirst)connectedAudio=connectPcm();
     return connectedAudio;
 }
 bool CaptureCardSource::start(){

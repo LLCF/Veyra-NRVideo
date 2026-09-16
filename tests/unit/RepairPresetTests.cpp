@@ -7,7 +7,7 @@ namespace {
 bool legacyBackends(const std::filesystem::path& path) {
  using namespace veyra::engine;
  unsigned checks=0;
- for(int version=4;version<=13;++version)for(int backend=0;backend<=2;++backend)for(int multiplier:{2,4}){
+ for(int version=4;version<=14;++version)for(int backend=0;backend<=2;++backend)for(int multiplier:{2,4}){
   std::ostringstream fixture;
   fixture<<"VEYRA_PRESETS "<<version<<"\n\"legacy\" 1\n\"legacy\" 1 1 1 -1 0 0 0 1 1 1 1 1 1 0 "<<multiplier<<" 0 1 0";
   fixture<<" 0 0";
@@ -20,6 +20,7 @@ bool legacyBackends(const std::filesystem::path& path) {
   if(version>=10)fixture<<" 1";
   if(version>=11)fixture<<" 0";
   if(version>=12)fixture<<" 0";
+  if(version>=14)fixture<<" 0";
   fixture<<'\n';
   {std::ofstream file(path);file<<fixture.str();}
   const bool xess=version<8?backend==2:backend==1;
@@ -41,7 +42,7 @@ bool legacyBackends(const std::filesystem::path& path) {
    if(version>=7&&(value.audioSync!=AudioSyncMode::Manual||value.audioOffsetMs!=137))return false;
    if(!store.put(L"legacy",value,true))return false;
    std::ifstream file(path);std::string magic;int savedVersion=0;file>>magic>>savedVersion;
-   if(magic!="VEYRA_PRESETS"||savedVersion!=13)return false;
+   if(magic!="VEYRA_PRESETS"||savedVersion!=14)return false;
    PresetStore reloaded(path);
    if(!reloaded.load()||reloaded.defaultSettings()!=value)return false;
   }else{
@@ -93,6 +94,13 @@ ok=ok&&a.put(L"test",s)&&a.setDefault(0)&&!a.put(L"test",s);PresetStore b(p);ok=
  auto badSr=s;badSr.videoSrQuality=veyra::engine::kVideoSrFsr+1;ok=ok&&!b.put(L"invalid video SR",badSr);
  auto invalid=s;invalid.model.tone=9;ok=ok&&!b.put(L"bad",invalid)&&b.entries().size()==1&&b.erase(0)&&b.entries().empty();
  auto badRegion=s;badRegion.protection.regions[0].left=2;ok=ok&&!b.put(L"invalid region",badRegion);
+ // Capture audio ingress: the manual Dolby/DTS selector round-trips and an
+ // out-of-range value is refused.
+ // The store is empty here (the invalid-settings block erased the last entry),
+ // so the round-tripped preset lands at index 0.
+ auto ingress=s;ingress.captureAudio=CaptureAudioIngress::BitstreamPreferred;ok=ok&&b.put(L"audio bitstream",ingress);
+ PresetStore ingressReload(p);ok=ok&&ingressReload.load()&&ingressReload.entries().size()==1&&ingressReload.entries().back().settings.captureAudio==CaptureAudioIngress::BitstreamPreferred&&b.erase(0);
+ auto badIngress=s;badIngress.captureAudio=static_cast<CaptureAudioIngress>(3);ok=ok&&!b.put(L"invalid ingress",badIngress);
  {std::ofstream legacy(p);legacy<<"VEYRA_PRESETS 1\n\"legacy\" 1\n\"legacy\" 1 1 1 -1 0 0 0 1 1 1 1 1 1 0 1 0 1 0\n";}
  PresetStore old(p);ok=ok&&old.load()&&!old.defaultSettings().protection.enabled&&old.defaultSettings().srTarget==veyra::pipeline::SrTarget::Uhd4K&&old.put(L"v2",s);
  PresetStore upgraded(p);ok=ok&&upgraded.load()&&upgraded.entries().size()==2&&upgraded.entries()[1].settings==s;
