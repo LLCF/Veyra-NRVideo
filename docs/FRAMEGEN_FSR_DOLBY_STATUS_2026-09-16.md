@@ -82,12 +82,12 @@ $env:VEYRA_TEST_FG_FORCE_MULTIPLIER='1'
 
 | 项 | 状态 | 说明 / 下一步 |
 | --- | --- | --- |
-| XeSS 节奏 hook（A-2） | **未移植** | 上游 `XeFGPacing.h` 需要重定向运行库内部 Present/Scheduler/Deadline 三处入口；我们目前没有 detour 基础设施，且 >2X 的生成帧间距是否成串**未测量**。这是 XeSS 4X 画质/节奏的关键未验证项，不能当作已完成 |
-| 40 系 DLSS MFG 解锁（C-2） | **未实现（本轮改为调研完成）** | 上游已定位并克隆：`ImDreamt/MFGAdaUnlock-RenoDx`（MIT，`third_party_local/community/`，gitignore）。机制=两处架构比较（0x1b0）+ **PTX 中点修正**（104 处 0.5 + fatbin 截断逼 JIT）+ 关闭硬件 flip metering（Streamline 专属，Veyra 走 NGX 不适用）。**没有实施的理由**：本机只有 5070，PTX 改写会改动一条已经正常的路径，无法区分"补丁生效"与"破坏原生 MFG"；上游也明确单改门控=黑帧。下一步按带身份校验/模式校验/回滚的进程内补丁实现，并需真实 40 系验收 |
-| 30 系原生 2X（D） | **未开始** | 需要 `dlssg_for_sm86` 代理方案与另一份 DLSSG 运行库身份，属发布范围变更 |
+| XeSS 节奏 hook（A-2） | **未移植（移植计划已细化）** | 上游 `XeFGPacing.h` RVA/算法逐项核实完毕，见 [XeSS 节奏移植计划](XESS_PACING_PORT_PLAN_2026-09-16.md)：只移植核心调度调用（present thunk `0x25C0` + 调度器 `0x21EE30`），先不移植时间戳/截止时间层。>2X 的生成帧间距仍标注**未验证** |
+| 40 系 DLSS MFG 解锁（C-2） | **已实现并提交（`9179449`）** | 移植 `ImDreamt/MFGAdaUnlock-RenoDx`（MIT）：两处 `0x1b0` 架构比较改写、PTX 中点修正（注入 temporal 参数 + 104 处 0.5 替换 + fatbin 截断逼 JIT）、8 个 `dlfg_kernel` 槽位重定向，全程进程内、可回滚。本机结构扫描与 `--apply-test` 全部通过（gates=2/descriptors=8/ptx=99362/midpoints=104；`applied=1 readBack=1 restored=1`），50 系 6X 完全不受影响。**行为未验证**：3X/4X 是否真出运动帧、Ada 缺硬件 flip metering 是否冻结，需要 40 系实机 |
+| 30 系原生 2X（D） | **决策：不移植无许可证的上游，改用 FSR 补帧** | `dlssg_for_sm86` 无许可证 → 项目规则禁止复制；它本质是把 DLSSG 代理成 FSR3 补帧，而 Veyra 自己的 FSR 帧生成（E）已经能提供同样的 2X 且厂商无关。详见 [30 系补帧决策](DLSSG_30SERIES_DECISION_2026-09-16.md)。**未验证**：FSR 补帧在 RTX 30 实机上能否运行 |
 | FSR 帧生成（E） | **已完成并实测（2X）** | 见上文 §一.5 与 [接入记录](FSR_FRAMEGEN_INTEGRATION_2026-09-16.md)；4.0.1 ML 需 AMD 卡复测 |
 | FSR 超分（F） | **已接入并实测（3.1.x）** | 图内 SR 阶段新分支 + `videoSrQuality=5` 档位；播放器 205–226 次 dispatch 0 失败，AMD 光流形状 exit 0，同帧对照平均绝对差 0.31/255；**相对画质略软（梯度能量比 0.888）如实记录**；4.x ML 需 AMD 实机。见 [FSR 超分接入记录](FSR_UPSCALING_PLAN_2026-09-16.md) |
-| 杜比直通 / 解码（G-2） | **未开始** | 依赖支持位流的采集设备；当前设备已证实不提供 |
+| 杜比直通 / 解码（G-2） | **解码兜底已实现并本地验证（`56bb0f6`）** | FFmpeg 解码 AC-3/E-AC-3(含 DD+ Atmos 载体)/DTS/DTS-HD，IEC 61937 解框；采集端在无 PCM 可用时按优先级走位流直通并解码进既有 5.1 管线。本地用真实 AC-3/E-AC-3 位流验证了 6 声道与幅度映射。**未验证**：真实位流采集卡协商（本机设备不提供位流）、TrueHD/DTS-HD 无真实素材 |
 
 ### A-2 节奏 hook：已完成的准备与勘察结论
 
