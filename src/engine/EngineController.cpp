@@ -309,6 +309,13 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     veyra::log::warn("backend-recovery",std::format("initialization failed component={} attempt={} revision={} -> nr={} sr={} multiplier={}; original SDK error above",unsigned(failure),attempt+1,reduced.revision,reduced.nr,reduced.sr,reduced.multiplier));
                     if(!backendRecoveryWarning.empty())backendRecoveryWarning+=L"；";
                     backendRecoveryWarning+=std::wstring(backendFailureName(failure))+L"初始化失败，已关闭依赖效果（错误码见日志）";
+                    if(failure==FailedBackend::Fg&&reduced.frameGenerationBackend==FrameGenerationBackend::XeSS&&presenter.fsrActive()){
+                        // The FidelityFX proxy owns the window's only flip-model
+                        // swapchain slot; it cannot be released without leaving
+                        // the window unable to host any later swapchain (verified
+                        // locally), so switching FSR -> XeSS needs a restart.
+                        backendRecoveryWarning+=L"；AMD FSR 的代理交换链仍占用窗口，切到 XeSS 需要重启软件";
+                    }
                     if(!ring.drainQueue()||!ring.discardRecording())return false;
                     presenter.close();graph.shutdown();selected=PlayerOptions::from(reduced);
                     const auto plan=pipeline::ResolutionPlan::make({width,height},selected.sr,reduced.nrPolicy,isImage,reduced.revision,reduced.srTarget,reduced.lowLatency&&selected.nr);

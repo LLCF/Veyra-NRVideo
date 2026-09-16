@@ -35,6 +35,7 @@ struct XessPresenter::Impl {
     XESS_PROC(xefgSwapChainD3D12GetProperties);
     XESS_PROC(xefgSwapChainGetProperties);
     XESS_PROC(xefgSwapChainSetNumInterpolatedFrames);
+    XESS_PROC(xefgSwapChainD3D12InitFromSwapChain);
     XESS_PROC(xefgSwapChainD3D12InitFromSwapChainDesc);
     XESS_PROC(xefgSwapChainD3D12GetSwapChainPtr);
     XESS_PROC(xefgSwapChainD3D12TagFrameResource);
@@ -85,6 +86,7 @@ bool XessPresenter::initialize(ID3D12Device* device,ID3D12CommandQueue* queue,ID
     LOAD(fgDll,xefgSwapChainD3D12GetProperties)
     LOAD(fgDll,xefgSwapChainGetProperties)
     LOAD(fgDll,xefgSwapChainSetNumInterpolatedFrames)
+    LOAD(fgDll,xefgSwapChainD3D12InitFromSwapChain)
     LOAD(fgDll,xefgSwapChainD3D12InitFromSwapChainDesc)
     LOAD(fgDll,xefgSwapChainD3D12GetSwapChainPtr)
     LOAD(fgDll,xefgSwapChainD3D12TagFrameResource)
@@ -145,9 +147,24 @@ bool XessPresenter::initialize(ID3D12Device* device,ID3D12CommandQueue* queue,ID
     }
     xefg_swapchain_d3d12_init_params_t init{};init.maxInterpolatedFrames=p.requestedGenerated>0?p.requestedGenerated:1;init.uiMode=XEFG_SWAPCHAIN_UI_MODE_AUTO;
     xefg_swapchain_properties_t properties{};
+    // If the present sink already owns a window swapchain (the retained AMD
+    // proxy after an FSR session), wrap it instead of creating a second one.
+    // DXGI refuses a second flip-model swapchain on an occupied HWND, which is
+    // exactly why switching FSR -> XeSS used to fail with Init=-17. The
+    // wrapper becomes the swapchain the sink presents through.
+    DXGI_SWAP_CHAIN_DESC1 existingDesc{};
+    IDXGISwapChain3* existing=swapchain!=nullptr?*swapchain:nullptr;
+    const bool wrapExisting=existing!=nullptr&&SUCCEEDED(existing->GetDesc1(&existingDesc));
+    if(wrapExisting){
+        init.pApplicationSwapChain=existing;
+        if(!p.check(p.xefgSwapChainD3D12GetPropertiesFn(p.fg,&init,existingDesc.Width,existingDesc.Height,existingDesc.Format,&properties),"Properties(wrap)",true)||properties.maxSupportedInterpolations<1)return false;
+        log::info("xess-fg",std::format("wrapping retained swapchain {}x{} fmt={} maxInterpolations={} bufferHeap={} textureHeap={}",existingDesc.Width,existingDesc.Height,int(existingDesc.Format),properties.maxSupportedInterpolations,properties.tempBufferHeapSize,properties.tempTextureHeapSize));
+        if(!p.check(p.xefgSwapChainD3D12InitFromSwapChainFn(p.fg,queue,&init),"Init(wrap)",true))return false;
+    }else{
     if(!p.check(p.xefgSwapChainD3D12GetPropertiesFn(p.fg,&init,desc.Width,desc.Height,desc.Format,&properties),"Properties",true)||properties.maxSupportedInterpolations<1)return false;
     log::info("xess-fg",std::format("swapchain={}x{} maxInterpolations={} bufferHeap={} textureHeap={} estimated-motion constant-depth experimental",desc.Width,desc.Height,properties.maxSupportedInterpolations,properties.tempBufferHeapSize,properties.tempTextureHeapSize));
     if(!p.check(p.xefgSwapChainD3D12InitFromSwapChainDescFn(p.fg,window,&desc,nullptr,queue,factory,&init),"Init",true))return false;
+    }
     if(p.requestedGenerated>0&&!p.check(p.xefgSwapChainSetNumInterpolatedFramesFn(p.fg,p.requestedGenerated),"SetNumInterpolatedFrames",true))return false;
     return p.check(p.xefgSwapChainD3D12GetSwapChainPtrFn(p.fg,__uuidof(IDXGISwapChain3),reinterpret_cast<void**>(swapchain)),"GetSwapChain",true);
 #else

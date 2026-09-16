@@ -176,7 +176,7 @@ const char* returnName(ffxReturnCode_t code) {
 
 FsrFgPresenter::FsrFgPresenter() : p_(std::make_unique<Impl>()) {}
 
-FsrFgPresenter::~FsrFgPresenter() {
+void FsrFgPresenter::shutdown() {
 #ifdef VEYRA_HAS_FSR
     auto& p = *p_;
     // The provider requires generation to be switched off before the context
@@ -184,6 +184,17 @@ FsrFgPresenter::~FsrFgPresenter() {
     // after which the context can release the proxy swapchain (and with it the
     // real DXGI swapchain, which is what lets another swapchain be created for
     // the same HWND later).
+    if (p.swapchainContext != nullptr) {
+        // Drain the provider's own presentation queue first: its pacing state
+        // still holds the last submitted frame id, and destroying the
+        // contexts with a present in flight crashed inside the provider
+        // (WER 0xC0000005 in amd_fidelityfx_framegeneration_dx12.dll).
+        ffxDispatchDescFrameGenerationSwapChainWaitForPresentsDX12 wait{};
+        wait.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_WAIT_FOR_PRESENTS_DX12;
+        (void)p.functions.Dispatch(&p.swapchainContext, &wait.header);
+        log::info("fsr-fg", "shutdown: presentation queue drained");
+        veyra::Logger::instance().flush();
+    }
     if (p.fgContext != nullptr && p.swapchain != nullptr) {
         ffxConfigureDescFrameGeneration disable{};
         disable.header.type = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION;
@@ -195,19 +206,37 @@ FsrFgPresenter::~FsrFgPresenter() {
         disable.frameID = p.frameId;
         const auto result = p.functions.Configure(&p.fgContext, &disable.header);
         log::info("fsr-fg", std::format("shutdown disable result={} frameId={}", returnName(result), p.frameId));
+        veyra::Logger::instance().flush();
     }
     // The context owns one reference to the proxy swapchain and releases it
     // here; the sink drops its own reference before this object is destroyed.
     if (p.fgContext != nullptr) {
         const auto result = p.functions.DestroyContext(&p.fgContext, nullptr);
         log::info("fsr-fg", std::format("framegen context destroyed result={}", returnName(result)));
+        p.fgContext = nullptr;
+        veyra::Logger::instance().flush();
     }
     if (p.swapchainContext != nullptr) {
         const auto result = p.functions.DestroyContext(&p.swapchainContext, nullptr);
         log::info("fsr-fg", std::format("swapchain context destroyed result={}", returnName(result)));
+        p.swapchainContext = nullptr;
+        veyra::Logger::instance().flush();
     }
     p.swapchain = nullptr;
-    if (p.loader != nullptr) FreeLibrary(p.loader);
+    p.available = false;
+#endif
+}
+
+FsrFgPresenter::~FsrFgPresenter() {
+#ifdef VEYRA_HAS_FSR
+    shutdown();
+    // The loader is intentionally never unloaded. Unloading it right after
+    // DestroyContext crashed with an access violation inside
+    // amd_fidelityfx_framegeneration_dx12.dll (Application Error 0xC0000005 at
+    // 0x10b9a9): the provider keeps internal presentation threads and state
+    // that do not survive module unload. Keeping the module resident for the
+    // process lifetime is the safe contract, and a later session can create a
+    // fresh context from it.
 #endif
 }
 

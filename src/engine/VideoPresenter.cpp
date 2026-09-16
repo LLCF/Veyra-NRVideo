@@ -63,14 +63,29 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
         if(veyra::log::verboseFrameLogs())veyra::log::info("comparison",std::format("real-frame source={} epoch={} revision={} reference={} mode={} split={} (same leased frame)",identity.sourceFrameId,identity.epoch,identity.settingsRevision,baseReference?"base":"input",comparison,split));
     }
     for(auto& b:barriers)std::swap(b.Transition.StateBefore,b.Transition.StateAfter);list->ResourceBarrier(2,barriers);
+    // Interpolation region for the present-sink FG backends (XeSS-FG, FSR-FG).
+    // It must follow the PresentBlit view mapping (contain * zoom, view
+    // center) rather than assuming the default centered view: the previous
+    // exact `view == PreviewView{}` guard disabled generation forever after
+    // any wheel zoom or drag, even when the user zoomed back out. The rect is
+    // clipped to the window and aligned to even coordinates for the providers.
+    const float winW=float(sink_.bufferWidth()),winH=float(sink_.bufferHeight());
+    const float imgW=float(graph.workWidth()),imgH=float(graph.workHeight());
+    const float viewZoom=view.zoom>0.0f?view.zoom:1.0f;
+    const float viewFit=std::min(winW/imgW,winH/imgH)*viewZoom;
+    const float imageLeft=winW*0.5f-view.centerX*imgW*viewFit;
+    const float imageTop=winH*0.5f-view.centerY*imgH*viewFit;
+    LONG fgLeft=std::max(0L,LONG(imageLeft))&~1L;
+    LONG fgTop=std::max(0L,LONG(imageTop))&~1L;
+    LONG fgRight=std::min(LONG(winW+0.5f),LONG(imageLeft+imgW*viewFit+0.5f))&~1L;
+    LONG fgBottom=std::min(LONG(winH+0.5f),LONG(imageTop+imgH*viewFit+0.5f))&~1L;
+    fgRight=std::max(fgLeft+2L,fgRight);fgBottom=std::max(fgTop+2L,fgBottom);
+    const RECT fgRect{fgLeft,fgTop,fgRight,fgBottom};
     if(auto* xess=sink_.xess()){
         if(GetEnvironmentVariableW(L"VEYRA_TEST_XESS_PRESENT_FAILURE",nullptr,0)>0){
             veyra::log::warn("backend-test","Injected XeSS tagging failure with recorded commands");xessFailed_=true;return false;
         }
-        const float fit=std::min(float(sink_.bufferWidth())/graph.workWidth(),float(sink_.bufferHeight())/graph.workHeight());
-        const LONG w=std::max(1L,LONG(std::lround(graph.workWidth()*fit))),h=std::max(1L,LONG(std::lround(graph.workHeight()*fit)));
-        const LONG left=(LONG(sink_.bufferWidth())-w)/2,top=(LONG(sink_.bufferHeight())-h)/2;
-        const bool enabled=!generated&&!comparison&&view==PreviewView{}&&graph.presentMotionValid(slot)&&identity.sourceFrameId!=lastXessIdentity_.sourceFrameId&&!xessGenerationSuppressed_;
+        const bool enabled=!generated&&!comparison&&graph.presentMotionValid(slot)&&identity.sourceFrameId!=lastXessIdentity_.sourceFrameId&&!xessGenerationSuppressed_;
         const bool reset=!xessWasEnabled_||identity.epoch!=lastXessIdentity_.epoch||identity.settingsRevision!=lastXessIdentity_.settingsRevision||graph.motionPreviousSource(slot)!=lastXessIdentity_.sourceFrameId;
         const float elapsed=lastXessFrame_==std::chrono::steady_clock::time_point{}?0.0f:float(std::chrono::duration<double,std::milli>(now-lastXessFrame_).count());
         auto* motion=graph.presentMotion(slot);
@@ -88,23 +103,20 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
                 toCopy[i].Transition.StateAfter=D3D12_RESOURCE_STATE_COPY_SOURCE;
             }
             list->ResourceBarrier(3,toCopy);
-            if(!xess->tag(list,bb,motion,depth,{left,top,left+w,top+h},true,reset,elapsed)){xessFailed_=true;return false;}
+            if(!xess->tag(list,bb,motion,depth,fgRect,true,reset,elapsed)){xessFailed_=true;return false;}
             for(auto& barrier:toCopy)std::swap(barrier.Transition.StateBefore,barrier.Transition.StateAfter);
             list->ResourceBarrier(3,toCopy);
-        }else if(!xess->tag(list,bb,motion,depth,{left,top,left+w,top+h},false,reset,elapsed)){xessFailed_=true;return false;}
+        }else if(!xess->tag(list,bb,motion,depth,fgRect,false,reset,elapsed)){xessFailed_=true;return false;}
         lastXessFrame_=now;lastXessIdentity_=identity;xessWasEnabled_=enabled;
     }
     if(auto* fsr=sink_.fsr()){
-        const float fit=std::min(float(sink_.bufferWidth())/graph.workWidth(),float(sink_.bufferHeight())/graph.workHeight());
-        const LONG w=std::max(1L,LONG(std::lround(graph.workWidth()*fit))),h=std::max(1L,LONG(std::lround(graph.workHeight()*fit)));
-        const LONG left=(LONG(sink_.bufferWidth())-w)/2,top=(LONG(sink_.bufferHeight())-h)/2;
-        const bool enabled=!generated&&!comparison&&view==PreviewView{}&&graph.presentMotionValid(slot)&&identity.sourceFrameId!=lastFsrIdentity_.sourceFrameId;
+        const bool enabled=!generated&&!comparison&&graph.presentMotionValid(slot)&&identity.sourceFrameId!=lastFsrIdentity_.sourceFrameId;
         const bool reset=!fsrWasEnabled_||identity.epoch!=lastFsrIdentity_.epoch||identity.settingsRevision!=lastFsrIdentity_.settingsRevision||graph.motionPreviousSource(slot)!=lastFsrIdentity_.sourceFrameId;
         const float elapsed=lastFsrFrame_==std::chrono::steady_clock::time_point{}?0.0f:float(std::chrono::duration<double,std::milli>(now-lastFsrFrame_).count());
         // The AMD presenter degrades inside the provider (generation off, plain
         // presentation continues) instead of failing the frame: tearing the
         // swapchain down would only cost the session a restart.
-        if(!fsr->tag(list,bb,graph.presentMotion(slot),graph.presentDepth(),{left,top,left+w,top+h},enabled,reset,elapsed))fsrFailed_=true;
+        if(!fsr->tag(list,bb,graph.presentMotion(slot),graph.presentDepth(),fgRect,enabled,reset,elapsed))fsrFailed_=true;
         if(sink_.fsr()->failed())fsrFailed_=true;
         lastFsrFrame_=now;lastFsrIdentity_=identity;fsrWasEnabled_=enabled;
     }

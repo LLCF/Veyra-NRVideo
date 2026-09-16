@@ -62,6 +62,12 @@ public:
     // cannot be created for the same HWND in this process.
     void disableGeneration();
 
+    // Tears the provider contexts down and releases the proxy swapchain so a
+    // later session can create a new swapchain for the same window (the
+    // window's flip-model slot is only freed once every reference, including
+    // the provider's, is gone). Idempotent; the destructor reuses it.
+    void shutdown();
+
     // Implementation state; public because the provider's presentation
     // callback (a free function in the translation unit) must reach it.
     struct Impl;
