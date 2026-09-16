@@ -69,6 +69,17 @@
 - 证据：本机 30 秒 FSR 运行 `real=839/generated=838/presented=1677`、`presentSubmitFps=30.00`、`gpuFgBatchP95Ms=0.197`；delivery 短测 PASS `logs/delivery/442f41e29b684e7e87174bc075d4e282/result.json`。
 - **边界（如实）**：FgBatch 为**应用侧**计时（提供方内部的插值工作不经过我们的队列，无法打点）；用户机器上"SDK提交=0"的原始触发未能在本机复现（本机 r3 正常），累计对齐是针对该症状的根治性修法，需要用户在 r4 包上复测确认。
 
+### 2026-09-16 导出失败两例修复 + XeSS/FSR 补帧导出（用户："修，并且看看是不是用XeSS补帧没办法导出，也一起修了"）
+
+两位粉丝群用户的导出失败日志逐条定位到根因，并按"必须能出文件"的目标修掉；完整复现素材、命令与证据见 [导出修复与补帧导出](EXPORT_REPAIR_AND_FG_EXPORT_2026-09-16.md)。
+
+- **案例一（5 个 worker 全部 0 帧失败）**：`[nvenc] OpenD3D12Session status=15`（`NV_ENC_ERR_INVALID_VERSION`）。同一日志里设备/NVOF/NGX/DLSS-G 全部正常，只有 NVENC 会话按版本号被拒（RTX 5060 / 驱动 32.0.15.8157，重装驱动后用户侧消失）。`NvencD3D12Encoder` 改为首次失败后按 13.0→12.0→11.0 降级重试并记录实际接受的版本；H.264/HEVC+D3D12+低延迟在 11.0 起都覆盖。本机复现不出陈旧 DLL，用仅测试钩子 `VEYRA_TEST_NVENC_FIRST_OPEN_FAILS=1` 验证阶梯能跑通并恢复（300 帧导出 exit 0、逐帧验证通过）。
+- **案例二（99% 处整体失败，两份 12MB 日志同点）**：`CFR rejected source=51247 pts=854.133 expected=854.1166666666667`。60fps MKV（1ms 量化，854.15s）**最后一帧时间戳整整晚一个帧间隔**，被逐帧收紧的相位窗拒绝，25 分钟导出死在最后 1 帧。新增 `CfrTimeline::tailAccepts()`：只对"容器时长×帧率"估算出的最后 3 帧放行 ≤1.5 帧间隔偏差（估不出总帧数则不放行），编码器本来就按帧序写 CFR 网格，因此尾部对齐只改最后一帧显示时长、不动已写帧、不影响音画；中间跳变仍硬失败；成功/失败文案分别写明"尾部 N 帧已按恒定帧率对齐"与"第 N 帧偏移 X 毫秒…保留 partial"。
+- **XeSS/FSR 补帧导出**：结论是取不到纹理，不是没接线 —— XeSS-FG 3.0.2 只有 `xefg_swapchain*` 头与 `xefgSwapChain*` 导出（无任何输出到应用纹理的入口），FSR 交换链上下文由 provider 自己持有代理链，生成帧直接进显示链路。旧实现直接拒绝整个导出；新行为是改用图内 DLSS 补帧（导出本就要求 NVENC），DLSS 被拒则降 2X、整体不可用则只出原始帧，三种结果都写进提示/日志/完成消息，不静默。
+- **本机证据**：自造复现素材 `out/tail-jump.mkv`（300 帧 1080p30，尾帧 10.000s 而非 9.967s）：无补帧 300 帧 @30fps、`--fg-xess 4X` 1200 帧 @120fps（backend=DLSS 替换）、`--fg-fsr 2X` 600 帧 @60fps、`VEYRA_TEST_FG_MULTIFRAME_MAX=1` 降级 2X 600 帧、`=0` 补帧关闭 300 帧 —— 全部 exit 0 且逐帧解码验证通过；修复合同测试新增 4 项尾帧规则后 169 项 0 失败；delivery 短测 PASS `logs/delivery/95a4effb615949cbaedd502d87272cb1/result.json`（46.9s）。
+- **顺带修**：`--fg-xess/--fg-fsr/--fg-dlss` 在第一遍参数解析里未识别会落进 `autoInput`（`clip.mp4 --fg-xess` 会去打开名为 `--fg-xess` 的文件），已改为位置无关；设置页补帧方式与帮助文案同步更新。
+- **未做（如实）**：FFX SDK 2.3.0 的非交换链 FG（`ffxDispatchDescFrameGeneration{outputs[4]}`）理论上能做真正的 FSR 补帧导出，本轮未实现；XeSS 无此入口，只能替换/关闭；案例一的陈旧 DLL 现场本机无法复现，需原用户用新包复测。
+
 ## 2026-09-15 采集卡直播窗口标题修复（第三方工具“识别不到 Veyra”）
 
 用户反馈除 OBS 外各平台直播工具无法识别“正在采集中的 Veyra”，且顺序敏感：先抓到窗口再开采集卡正常，先开采集卡再抓就抓不到。实机取证确认根因是 Veyra 自己：采集卡来源 `capture:`/`capture2:` 连接串被当文件名写进主窗口标题，实测标题长 776 字符（`Veyra — capture2:<十六进制设备路径>:...`），空闲/播放文件时为正常短名；直播伴侣日志把该标题截断到 259 字符后参与来源命名，其包内前端以 `${exe} ${title}` 命名来源。同场会话的 mediasdk_server 日志显示“采集卡已运行再添加 game 来源”的 hook 通路实际成功（`Load Shared Texture Success, size: 842 x 494`、`OnAutoSwitchMode from Window to Game`、GameSource 连续 60 秒以上有数据），因此本轮不做换链/画面的猜测性改动。

@@ -371,6 +371,18 @@ int main(){
     engine::CfrTimeline ticks(60,1,1.0/60,0);bool exactTicks=true;for(unsigned i=0;i<120;++i)exactTicks &= ticks.accepts(i,i/60.0);check(exactTicks&&!ticks.accepts(120,121.0/60),"one-tick CFR accepted but missing frame rejected");
     std::vector<double> mkv;for(unsigned i=0;i<24;++i)mkv.push_back(std::round(i*1000.0/60)/1000);
     check(engine::CfrTimeline::select(29990,499,.001,mkv)==std::pair<int,int>{60,1},"misdeclared MKV rate selects consistent standard CFR candidate");
+    {
+        // User report 2026-09-16: a 854.15s / 60fps MKV whose final frame sits
+        // exactly one frame interval late aborted a 25 minute export at 99%.
+        // The grid write is index based, so only that last frame's duration may
+        // move - and only when the stream really ends there.
+        engine::CfrTimeline tail(60,1,.001,0);bool seated=true;
+        for(unsigned i=0;i<51247;++i)seated &= tail.accepts(i,std::round(i*1000.0/60)/1000);
+        check(seated&&!tail.accepts(51247,854.133),"a one-frame tail jump still breaks the strict CFR phase test");
+        check(tail.tailAccepts(51247,854.133,51249)&&tail.tailAccepts(51248,854.15,51249),"tail snap covers the real end of stream");
+        check(!tail.tailAccepts(51247,854.133,60000)&&!tail.tailAccepts(100,std::round(100*1000.0/60)/1000+.1,60000),"tail snap never covers a mid-stream gap");
+        check(!tail.tailAccepts(51247,854.9,51249)&&!tail.tailAccepts(51247,854.133,0),"tail snap rejects larger deviations and unknown streams");
+    }
     using Reason=pipeline::ResetReason;
     check(diagnostics::resetCause(0,Reason::PauseResume,Reason::SceneCut)==Reason::PauseResume&&
         diagnostics::resetCause(0,Reason::Seek,Reason::None)==Reason::Seek&&

@@ -564,6 +564,22 @@ int argc=0;auto argv=CommandLineToArgvW(GetCommandLineW(),&argc);for(int i=1;i<a
 // 6X (and 2X/3X/4X) can be exercised from the command line for diagnostics and
 // smoke tests; the interactive UI uses the capability-driven list instead.
 {int fgArgc=0;auto fgArgv=CommandLineToArgvW(GetCommandLineW(),&fgArgc);for(int i=1;i<fgArgc;++i){if(!_wcsicmp(fgArgv[i],L"--fg-multiplier")&&i+1<fgArgc){const int value=_wtoi(fgArgv[i+1]);if(value>=2&&value<=6){initialOptions.fgMultiplier=uint32_t(value);initialOptions.fg=true;}else if(value==1){initialOptions.fg=false;initialOptions.fgMultiplier=2;}}else if(!_wcsicmp(fgArgv[i],L"--fg-xess")){initialOptions.settings.frameGenerationBackend=veyra::engine::FrameGenerationBackend::XeSS;if(initialOptions.fgMultiplier<2)initialOptions.fgMultiplier=2;initialOptions.fg=true;}else if(!_wcsicmp(fgArgv[i],L"--fg-fsr")){initialOptions.settings.frameGenerationBackend=veyra::engine::FrameGenerationBackend::Fsr;if(initialOptions.fgMultiplier<2)initialOptions.fgMultiplier=2;initialOptions.fg=true;}else if(!_wcsicmp(fgArgv[i],L"--fg-dlss")){initialOptions.settings.frameGenerationBackend=veyra::engine::FrameGenerationBackend::Dlss;}}if(fgArgv)LocalFree(fgArgv);}
+// Backend flags must not be mistaken for the input path: the pass above leaves
+// the last unrecognised token in autoInput, so "clip --fg-xess --fg-multiplier 4"
+// tried to open a file named "--fg-xess". Re-derive the positional argument with
+// every value-taking flag known, so --fg-xess / --fg-fsr / --fg-dlss work
+// anywhere on the command line instead of only at the end.
+{
+    int positionalArgc=0;auto positionalArgv=CommandLineToArgvW(GetCommandLineW(),&positionalArgc);std::wstring positional;
+    const wchar_t* valueFlags[]={L"--export-worker",L"--smoke-view",L"--smoke-dual-export",L"--smoke-seconds",L"--export-out",L"--max-frames",L"--cancel-after-ms",L"--smoke-save",L"--fg-multiplier",L"--capture-audio",L"--video-sr"};
+    for(int i=1;i<positionalArgc;++i){const std::wstring a=positionalArgv[i];
+        bool takesValue=false;for(const wchar_t* flag:valueFlags)if(a==flag){takesValue=true;break;}
+        if(takesValue){++i;continue;}
+        if(a.starts_with(L"--"))continue;
+        positional=a;}
+    if(!positional.empty())autoInput=positional;
+    if(positionalArgv)LocalFree(positionalArgv);
+}
 if(workerMapping){const int code=veyra::engine::runExportWorker(workerMapping);CoUninitialize();return code;}
 if(smokeSeconds<=0&&exportOutput.empty()){uiPreferences=preferences.load();initialOptions=veyra::engine::PlayerOptions::from(preferences.startup(initialOptions.snapshot()));engine.setVolume(uiPreferences.volume,uiPreferences.muted);uiState.subtitles=uiPreferences.subtitles;subtitlePixels=uiPreferences.subtitleSize;}
 engine.requestSettings(initialOptions.snapshot());

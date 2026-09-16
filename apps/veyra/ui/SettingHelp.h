@@ -35,7 +35,7 @@ inline const wchar_t* settingHelp(int id){
     case 205:return L"选择内容节奏。采集60→30适合60Hz信号里重复的30帧游戏内容；真60帧别硬砍半。时间戳仍保留。";
     case 206:return L"让框选区域少受NR改动，最多4块。只管NR，不给超分和补帧当保镖。";
     case 207:return L"选择DLSS SR或RTX视频超分，以及视频超分质量。两条路线各有脾气，试着看画质和耗时。";
-    case 208:return L"选择DLSS或实验XeSS补帧。XeSS目前为预览2X，不支持视频导出；别只看名字，看实际效果。";
+    case 208:return L"选择DLSS、实验XeSS或AMD FSR补帧。XeSS/FSR的生成帧只存在于显示交换链，导出管线拿不到；导出时会自动改用DLSS补帧，显卡不支持则关闭补帧，提示和日志都会写明。别只看名字，看实际效果。";
     case 209:return L"选择运动估算后端。NVOF、FidelityFX、GPU DIS负责看出物体怎么动。DIS是实验算法，走通用计算单元，可能和NR抢活干，不保证更快；选它不会换掉你的补帧方式，也不会解锁AMD NR。";
     case 211:return L"把增强参数恢复为内建默认。调迷路了就走这里，保存的用户预设不会被删。";
     case 213:return L"在画面上拖框添加NR保护区域，Esc取消。把不想被改的地方圈出来。";

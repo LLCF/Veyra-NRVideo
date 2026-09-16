@@ -40,7 +40,29 @@ bool NvencD3D12Encoder::open(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
     using Create=NVENCSTATUS(NVENCAPI*)(NV_ENCODE_API_FUNCTION_LIST*);auto create=reinterpret_cast<Create>(GetProcAddress(p.dll,"NvEncodeAPICreateInstance"));
     p.api.version=NV_ENCODE_API_FUNCTION_LIST_VER;if(!create||!p.check(create(&p.api),"CreateInstance"))return false;
     NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS open{};open.version=NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER;open.apiVersion=NVENCAPI_VERSION;open.device=ctx.device();open.deviceType=NV_ENC_DEVICE_TYPE_DIRECTX;
-    if(!p.check(p.api.nvEncOpenEncodeSessionEx(&open,&p.encoder),"OpenD3D12Session"))return false;
+    // Some systems carry an older nvEncodeAPI64.dll (System32 copy from a
+    // mixed driver/tool install) which rejects the compiled 13.1 declaration
+    // with NV_ENC_ERR_INVALID_VERSION (status 15) - observed on a user RTX
+    // 5060 where every export died here. Older API versions are fully
+    // sufficient for our usage (H.264/HEVC, D3D12, low latency), so retry
+    // downwards before giving up.
+    // Test-only: pretend the compiled declaration was refused, so the fallback
+    // ladder below still gets exercised on a healthy driver. Never set by the UI.
+    const bool forcedMiss=GetEnvironmentVariableW(L"VEYRA_TEST_NVENC_FIRST_OPEN_FAILS",nullptr,0)>0;
+    if(forcedMiss)veyra::log::warn("nvenc","test-only: skipping the first OpenD3D12Session so the apiVersion ladder runs");
+    if(forcedMiss||!p.check(p.api.nvEncOpenEncodeSessionEx(&open,&p.encoder),"OpenD3D12Session")) {
+        const uint32_t fallbackVersions[]={NVENCAPI_MAJOR_VERSION,13u,12u,11u};
+        bool opened=false;uint32_t accepted=0;
+        for(const uint32_t major:fallbackVersions){
+            if(!forcedMiss&&major==NVENCAPI_MAJOR_VERSION)continue; // already refused above
+            open.apiVersion=major;
+            const auto result=p.api.nvEncOpenEncodeSessionEx(&open,&p.encoder);
+            log::info("nvenc",std::format("OpenD3D12Session retry apiVersion={}.0 status={}",major,unsigned(result)));
+            if(result==NV_ENC_SUCCESS){opened=true;accepted=major;break;}
+        }
+        if(!opened)return false;
+        log::info("nvenc",std::format("OpenD3D12Session accepted apiVersion={}.0 (compiled {}.0 was refused)",accepted,NVENCAPI_MAJOR_VERSION));
+    }
     p.hdr=graph.hdrOutput();if(p.hdr&&!hevc){veyra::log::error("nvenc","HDR export requires HEVC Main10");return false;}
     p.inputFormat=p.hdr?NV_ENC_BUFFER_FORMAT_YUV420_10BIT:NV_ENC_BUFFER_FORMAT_NV12;
     const GUID codec=hevc?NV_ENC_CODEC_HEVC_GUID:NV_ENC_CODEC_H264_GUID;
