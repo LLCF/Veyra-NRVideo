@@ -60,6 +60,15 @@
 - **验证**：`veyra_bitstream_probe 48000 --write-test` 在本机 SPDIF 上打开独占 AC-3 载波并写穿数据通路（`endpoint[1] wrote 245760 bytes through the exclusive carrier`）；delivery 短测 PASS `logs/delivery/e09ea0d7fdb34e38b238ee12dd255fc5/result.json`。UI 文案与帮助同步更新（"位流优先：优先直通给功放（无直通时解码为 PCM）"）。
 - **未验证（如实）**：本机采集卡不提供位流（G-1），**没有端到端的真实 Dolby 源验证**；需要持"支持位流输入的采集卡 + 支持解码的功放/回音壁"的用户按"位流优先"模式实测并回传 `capture-audio-bitstream` 日志（应出现 `passthrough to receiver kind=... endpoint="..."`）。E-AC-3/Atmos 直通依赖端点驱动声明，当前主流 Windows 端点普遍不支持。
 
+### 2026-09-16 FSR 统计显示修复：SDK 提交归零 / 补帧受限误报 / 帧生成耗时不可测
+
+用户报告 FSR 开启后"SDK提交 0.0 fps + 当前状态：补帧受限"，而实测日志显示 FSR 在正常补帧（`real=479 generated=466 presented=945`）。排查定位两处统计缺陷并修复：
+
+- **提交计数相位丢失**（EngineController）：present-sink FG 的 `xessSdkSubmitFps` 原来按"每次提交前后计数差"喂入；AMD provider 在**自己的线程**上报呈现，回调落在提交窗口之后时差值恒 0（XeSS 的计数在渲染线程同步维护所以"秒出"）。改为**累计对齐**：每次提交后喂"累计值 - 已喂值"，任何迟到的增量都会在下一次提交补上；settings 变化时随 presenter 一起归零。UI 的"补帧受限"判定（`actual<target*0.95` 连续 8 次）以该值为输入——归零被修复后误报随之消失。
+- **帧生成耗时"不可测"**（VideoPresenter/EngineController/UI）：present-sink FG 现在在提交列表上对 XeSS/FSR 的应用侧工作（输入拷贝、barrier、provider prepare）打 `FgBatch` GPU 时间戳；`measured.gpu[FgBatch]` 在 present-sink 模式下取 presenter 样本（图内 DLSS FG 仍用 graph 样本）；Dashboard/Panel 去掉硬编码"不可测"，无样本时显示"采样中"。实测 `gpuFgBatchP95Ms=0.197`（4K30 + FSR 2X）。
+- 证据：本机 30 秒 FSR 运行 `real=839/generated=838/presented=1677`、`presentSubmitFps=30.00`、`gpuFgBatchP95Ms=0.197`；delivery 短测 PASS `logs/delivery/442f41e29b684e7e87174bc075d4e282/result.json`。
+- **边界（如实）**：FgBatch 为**应用侧**计时（提供方内部的插值工作不经过我们的队列，无法打点）；用户机器上"SDK提交=0"的原始触发未能在本机复现（本机 r3 正常），累计对齐是针对该症状的根治性修法，需要用户在 r4 包上复测确认。
+
 ## 2026-09-15 采集卡直播窗口标题修复（第三方工具“识别不到 Veyra”）
 
 用户反馈除 OBS 外各平台直播工具无法识别“正在采集中的 Veyra”，且顺序敏感：先抓到窗口再开采集卡正常，先开采集卡再抓就抓不到。实机取证确认根因是 Veyra 自己：采集卡来源 `capture:`/`capture2:` 连接串被当文件名写进主窗口标题，实测标题长 776 字符（`Veyra — capture2:<十六进制设备路径>:...`），空闲/播放文件时为正常短名；直播伴侣日志把该标题截断到 259 字符后参与来源命名，其包内前端以 `${exe} ${title}` 命名来源。同场会话的 mediasdk_server 日志显示“采集卡已运行再添加 game 来源”的 hook 通路实际成功（`Load Shared Texture Success, size: 842 x 494`、`OnAutoSwitchMode from Window to Game`、GameSource 连续 60 秒以上有数据），因此本轮不做换链/画面的猜测性改动。

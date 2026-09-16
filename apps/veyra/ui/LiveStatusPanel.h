@@ -67,7 +67,9 @@ inline LRESULT CALLBACK proc(HWND h,UINT message,WPARAM wp,LPARAM lp){
         const diagnostics::GpuStage stages[]={diagnostics::GpuStage::Color,diagnostics::GpuStage::Sr,diagnostics::GpuStage::Flow,diagnostics::GpuStage::Nr,diagnostics::GpuStage::Residual,diagnostics::GpuStage::FgBatch,diagnostics::GpuStage::Blit};
         const wchar_t* names[]={L"② 输入颜色",L"③ 超分 SR",L"④ 光流队列区间",L"⑤ NR 增强",L"⑥ 残差合成",L"⑦ 补帧 FG",L"⑧ 输出合成"};
         for(size_t i=0;i<std::size(stages);++i){const auto& sample=s.metrics.gpu[size_t(stages[i])];
-            const auto value=xess&&stages[i]==diagnostics::GpuStage::FgBatch?L"SDK内部不可测":sample.state==diagnostics::SampleState::NotExecuted?L"未执行":timing(f.gpuTiming[size_t(stages[i])]);
+            // Present-sink FG (XeSS/FSR) is timed application-side; only fall
+            // back to the placeholder while no sample has been collected.
+            const auto value=(xess&&stages[i]==diagnostics::GpuStage::FgBatch&&!f.gpuTiming[size_t(stages[i])].mean)?L"SDK内部不可测":sample.state==diagnostics::SampleState::NotExecuted?L"未执行":timing(f.gpuTiming[size_t(stages[i])]);
             rows.emplace_back(names[i],value);
         }
         rows.emplace_back(L"⑨ 等待显示时间",timing(f.cpuTiming[size_t(diagnostics::CpuStage::DeadlineWait)]));

@@ -408,6 +408,12 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
             uint64_t previewSkippedTotal=0,previewSkippedSinceSubmit=0;
             bool previewSkipSinceProcess=false;
             XessGenerationGate xessGenerationGate;
+            // Cumulative provider-submission totals already fed to the frame
+            // flow. The AMD provider reports presentation from its own thread,
+            // so per-call deltas systematically miss updates that land just
+            // after a submission; feeding the cumulative difference at the
+            // next submission cannot lose them. Reset with the presenter.
+            uint64_t fedXessPresented=0,fedXessGenerated=0,fedFsrPresented=0,fedFsrGenerated=0;
             double playbackSpeedLastPts=0;Clock::time_point playbackSpeedLastWall{};
             CaptureHalfRate captureSampler;
             FrameLineageTracker lineageTracker;
@@ -953,7 +959,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     // Admission predictions and the XeSS gate must not carry
                     // samples across a settings revision (new backend/dimensions);
                     // soft preview-skip history breaks do NOT reopen them.
-                    if(settingsChanged){xessGenerationGate.reset();presenter.setXessGenerationSuppressed(false);}
+                    if(settingsChanged){xessGenerationGate.reset();presenter.setXessGenerationSuppressed(false);fedXessPresented=fedXessGenerated=fedFsrPresented=fedFsrGenerated=0;}
                     playbackSpeedLastWall={};
                     if(liveScheduler){liveStats={};liveStats.identity=out.batch.identity;liveSubmissions.clear();liveAges.clear();liveWaits.clear();livePresent.clear();liveReady.clear();}
                     if(settingsChanged||!completionRates)completionRates=std::make_shared<FrameCompletionRates>(host100ns());
@@ -1059,21 +1065,27 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                             }
                             const auto waited=elapsedMs(*s.deadlineStart);s.deadlineStart.reset();s.waitMs+=waited;flow->cpu(diagnostics::CpuStage::DeadlineWait,waited,host100ns());
                             const auto begin=Clock::now();const auto before=presenter.submittedCount();
-                            const auto beforeXess=presenter.xessGeneratedCount(),beforeXessPresented=presenter.xessPresentedCount();
-                            const auto beforeFsr=presenter.fsrGeneratedCount(),beforeFsrPresented=presenter.fsrPresentedCount();
                             if(!presenter.present(ctx,ring,graph,item.lease->slot,generated,item.lease->referencesValid,comparisonMode_,comparisonBase_,comparisonSplit_,item.identity,previewView()))return {State::Failed};
-                            const auto xessGenerated=presenter.xessGeneratedCount()-beforeXess,xessPresented=presenter.xessPresentedCount()-beforeXessPresented;
-                            const auto fsrGenerated=presenter.fsrGeneratedCount()-beforeFsr,fsrPresented=presenter.fsrPresentedCount()-beforeFsrPresented;
                             item.lease->consumerFence=ring.lastSignaledValue();const bool didPresent=presenter.submittedCount()>before;s.blit=presenter.blitTiming(ctx.fence());
                             const auto elapsed=elapsedMs(begin);s.presentMs+=elapsed;flow->cpu(diagnostics::CpuStage::Present,elapsed,host100ns());
                             if(didPresent){
                                 traceFrame(diagnostics::TraceKind::Present,item.identity,batch.batch.batchId,item.lease->consumerFence,item.pts100ns,item.subframe,1,elapsed);
                                 if(veyra::log::verboseFrameLogs())veyra::log::info("submit",std::format("batch={} epoch={} revision={} subframe={} pts100ns={} host100ns={} fence={} (submission, display unmeasured)",batch.batch.batchId,item.identity.epoch,item.identity.settingsRevision,item.subframe,item.pts100ns,host100ns(),item.lease->consumerFence));
                             }
-                            if(xessPresented)flow->xessSubmitted(xessPresented,xessGenerated,host100ns());
-                            // Same metric shape for the AMD provider: frames it actually
-                            // submitted to the display, real and generated.
-                            if(fsrPresented)flow->xessSubmitted(fsrPresented,fsrGenerated,host100ns());
+                            // Cumulative alignment: feed whatever the providers reported
+                            // since the last submission. The AMD provider publishes from
+                            // its own thread, so a per-call delta can miss an update that
+                            // lands just after the call and would then never be counted.
+                            {
+                                const auto xessPresentedTotal=presenter.xessPresentedCount(),xessGeneratedTotal=presenter.xessGeneratedCount();
+                                const uint64_t xessPresented=xessPresentedTotal-fedXessPresented,xessGenerated=xessGeneratedTotal-fedXessGenerated;
+                                if(xessPresented){flow->xessSubmitted(xessPresented,xessGenerated,host100ns());fedXessPresented=xessPresentedTotal;fedXessGenerated=xessGeneratedTotal;}
+                                const auto fsrPresentedTotal=presenter.fsrPresentedCount(),fsrGeneratedTotal=presenter.fsrGeneratedCount();
+                                const uint64_t fsrPresented=fsrPresentedTotal-fedFsrPresented,fsrGenerated=fsrGeneratedTotal-fedFsrGenerated;
+                                // Same metric shape for the AMD provider: frames it actually
+                                // submitted to the display, real and generated.
+                                if(fsrPresented){flow->xessSubmitted(fsrPresented,fsrGenerated,host100ns());fedFsrPresented=fsrPresentedTotal;fedFsrGenerated=fsrGeneratedTotal;}
+                            }
                             if(didPresent&&!isCapture){
                                 lastFilePresentedMs=itemPtsMs;lastFilePresentLateness=fileAwaitingVideo?0:nowMs()-itemPtsMs;
                                 {std::lock_guard lock(mutex_);if(snapshot_.sessionId==runSessionId&&snapshot_.applied.revision==item.identity.settingsRevision){
@@ -1163,7 +1175,12 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 }
 #endif
                 diagnostics::FrameMetrics measured;pipeline::EnhanceGraph::Metrics graphStats;uint64_t slotWaitCount=0,commandSubmits=0;double slotWaitMilliseconds=0;uint32_t slotsInFlight=0;
-                {measured=graph.gpuMetrics();graphStats=graph.metrics();measured.gpu[size_t(diagnostics::GpuStage::Blit)]=presenter.blitTiming(ctx.fence(),options.settings.revision,out.batch.identity.epoch);slotWaitCount=ring.cpuWaitCount()-slotWaitBase;slotWaitMilliseconds=ring.cpuWaitMilliseconds()-slotWaitMsBase;commandSubmits=ring.submitCount()-submitBase;slotsInFlight=ring.inFlightCount();
+                {measured=graph.gpuMetrics();graphStats=graph.metrics();measured.gpu[size_t(diagnostics::GpuStage::Blit)]=presenter.blitTiming(ctx.fence(),options.settings.revision,out.batch.identity.epoch);
+                 // Present-sink FG backends record their application-side work on
+                 // the presenter's list; surface that sample instead of leaving
+                 // the stage unmeasured. The in-graph DLSS FG keeps its own.
+                 if(graph.xessEnabled()||graph.fsrEnabled())measured.gpu[size_t(diagnostics::GpuStage::FgBatch)]=presenter.fgTiming(ctx.fence(),options.settings.revision,out.batch.identity.epoch);
+                 slotWaitCount=ring.cpuWaitCount()-slotWaitBase;slotWaitMilliseconds=ring.cpuWaitMilliseconds()-slotWaitMsBase;commandSubmits=ring.submitCount()-submitBase;slotsInFlight=ring.inFlightCount();
                     collectTimings();
                 }
                 if(measured.identity.settingsRevision!=options.settings.revision||measured.identity.epoch!=out.batch.identity.epoch){measured={};measured.identity=out.batch.identity;for(auto& sample:measured.gpu)sample.state=diagnostics::SampleState::Pending;}

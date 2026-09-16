@@ -93,6 +93,11 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
         if(enabled){
             // XeSS-FG ONLY_NOW records its input copies on this same command
             // list. Keep the Veyra state contract explicit on both sides.
+            // Timed as the application-side frame-generation stage: the
+            // provider's internal interpolation cannot be timestamped, but the
+            // copies and barriers it makes us record can, and that is what the
+            // dashboard shows for present-sink FG backends.
+            gpuTimer_.mark(list,diagnostics::GpuStage::FgBatch);
             ID3D12Resource* resources[]={bb,motion,depth};
             D3D12_RESOURCE_BARRIER toCopy[3]{};
             for(unsigned i=0;i<3;++i){
@@ -106,6 +111,7 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
             if(!xess->tag(list,bb,motion,depth,fgRect,true,reset,elapsed)){xessFailed_=true;return false;}
             for(auto& barrier:toCopy)std::swap(barrier.Transition.StateBefore,barrier.Transition.StateAfter);
             list->ResourceBarrier(3,toCopy);
+            gpuTimer_.mark(list,diagnostics::GpuStage::FgBatch,true);
         }else if(!xess->tag(list,bb,motion,depth,fgRect,false,reset,elapsed)){xessFailed_=true;return false;}
         lastXessFrame_=now;lastXessIdentity_=identity;xessWasEnabled_=enabled;
     }
@@ -116,7 +122,9 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
         // The AMD presenter degrades inside the provider (generation off, plain
         // presentation continues) instead of failing the frame: tearing the
         // swapchain down would only cost the session a restart.
+        if(enabled)gpuTimer_.mark(list,diagnostics::GpuStage::FgBatch);
         if(!fsr->tag(list,bb,graph.presentMotion(slot),graph.presentDepth(),fgRect,enabled,reset,elapsed))fsrFailed_=true;
+        if(enabled)gpuTimer_.mark(list,diagnostics::GpuStage::FgBatch,true);
         if(sink_.fsr()->failed())fsrFailed_=true;
         lastFsrFrame_=now;lastFsrIdentity_=identity;fsrWasEnabled_=enabled;
     }
