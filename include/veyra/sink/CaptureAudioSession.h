@@ -11,6 +11,9 @@ struct CaptureAudioState {
     bool available=false,running=false,clockEstimated=true,limited=false;
     unsigned inputChannels=0,outputChannels=0;uint32_t inputChannelMask=0,outputChannelMask=0;
     uint32_t inputSampleRate=0;unsigned inputContainerBits=0,inputValidBits=0;bool inputFloating=false;
+    // Non-empty when the input is a compressed bitstream (Dolby/DTS) that was
+    // decoded to PCM before this session saw it, e.g. "E-AC-3/DD+".
+    std::wstring inputBitstream;
     double compensationMs=0,bufferedMs=0,bufferHighWaterMs=0,endpointBufferedMs=0;
     double driftCorrectionPpm=0;
     uint64_t recoveryDiscardedFrames=0;
@@ -42,6 +45,8 @@ public:
     // request the old audio reset explicitly.
     void videoReset(bool resetAudio=true);
     void setGain(float);
+    // Records that the input arrived as a decoded bitstream (capture passthrough).
+    void setInputBitstream(std::wstring kind);
     // 0 automatic, 1 manual, 2 off. Positive offset delays sound.
     void setSync(unsigned mode,int offsetMs);
     CaptureAudioState snapshot()const;

@@ -2345,6 +2345,30 @@ DLSSG 能力门控没有排除 FSR，导致 FSR 会话下任何就地设置变�
 
 ### 2026-09-16 40 系 DLSS MFG 解锁（C-2）实现 + 本机结构/补丁机制验证
 
+### 2026-09-16 杜比/DTS 位流解码兜底（G-2）实现 + 本地解码验证
+
+新增 `include/veyra/sink/BitstreamAudio.h` + `src/sink/BitstreamAudio.cpp`（FFmpeg libavcodec/libswresample）：
+按 KSDATAFORMAT/WAVE subtype 分类 AC-3 / E-AC-3(含 DD+ Atmos 载体) / TrueHD-MLP / DTS / DTS-HD/DTS:X，
+S/PDIF 的 IEC 61937 突发自动解框，解码为交错 float PCM 并给出真实声道数与采样率。
+
+采集接线（`CaptureCardSource::configureAudio`）：PCM 媒体类型仍然优先；当**没有任何 PCM 能连接**时，
+按 TrueHD > DD+ > DTS-HD > DTS > AC-3 的优先级选压缩类型直通，首帧解码后用它报的声道数/采样率
+配置并启动 `CaptureAudioSession`（`audioSessionDeferred`），随后按原有 `push()` 契约进入既有 5.1 管线；
+状态面板新增"位流解码为 N 声道 (kind)"一行。本机参考采集卡没有位流类型（`device bitstream types=0`），
+因此该分支不会被触发，PCM 路径实测不变：`capture:0:0:0` 425 帧 60fps、exit 0（`logs/fsr/capture-after-g2.log`）。
+
+**本地可验证的部分已实测**：`veyra_bitstream_audio_test` 用同一份 FFmpeg 编码 2 秒 5.1 测试信号
+（每声道不同幅度、LFE 用 60Hz 低音），再经 `BitstreamDecoder` 分块解码：
+
+- AC-3 448kbps：6 声道、95232 帧，逐声道 RMS `0.3531/0.2824/0.2118/0.1765/0.1412/0.0706`
+  → 与编码幅度（0.5/0.4/0.3/0.25/0.2/0.1 的正弦 RMS）逐项吻合，**声道映射与幅度都正确**；
+- 同一份 AC-3 再套 IEC 61937 突发头：结果逐位一致 → 解框正确；
+- E-AC-3 640kbps：同样 6 声道与同样的幅度序列。
+
+**未验证**：真实采集卡的位流协商与长时稳定性（本机设备不提供位流）；TrueHD/DTS-HD 只验证了解码器存在
+（`avcodec_find_decoder` 命中）而没有真实素材，不得对外宣称已支持这两种格式的实机采集。
+证据：`logs/fsr/bitstream-decode-test.log`；delivery 短测 PASS（`logs/delivery/622908bcc14b47a381340e8662c5b0a2/result.json`）。
+
 移植 `ImDreamt/MFGAdaUnlock-RenoDx`（MIT，`third_party_local/community/`）到产品库
 `include/veyra/ngx/AdaMfgUnlock.h` + `src/ngx/AdaMfgUnlock.cpp`：两处 `0x1b0`(Blackwell) 架构比较
 改写为 `0x190`(Ada)、PTX 中点修正（注入 temporal 参数 + 104 处 `mul.ftz.f32 ...,0f3F000000`

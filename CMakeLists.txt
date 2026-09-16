@@ -414,6 +414,7 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
     src/sink/WasapiAudioSink.cpp
     src/sink/CaptureAudioSession.cpp
     src/sink/CaptureAudioDsp.cpp
+    src/sink/BitstreamAudio.cpp
     src/sink/ImageExportSink.cpp
     src/sink/NvencD3D12Encoder.cpp
   )
@@ -427,8 +428,11 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
   target_include_directories(veyra_sinks PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party_local/nvidia/nv-codec-headers/include")
   target_compile_definitions(veyra_sinks PRIVATE VEYRA_SHADER_DIR="${CMAKE_BINARY_DIR}/shaders")
   add_dependencies(veyra_sinks veyra_shader_rgb_nv12)
-  target_link_libraries(veyra_sinks PUBLIC veyra_base veyra_gfx ole32 windowscodecs mmdevapi avrt)
+target_link_libraries(veyra_sinks PUBLIC veyra_base veyra_gfx ole32 windowscodecs mmdevapi avrt)
   target_link_libraries(veyra_sinks PRIVATE ${FFMPEG_LIBRARIES})
+  if(FFMPEG_INCLUDE_DIRS)
+    target_include_directories(veyra_sinks PRIVATE ${FFMPEG_INCLUDE_DIRS})
+  endif()
 
   # veyra_sources: product input sources (Playbook R3/R7). MediaFileSource
   # composes veyra_media; no second decode implementation exists.
@@ -521,6 +525,14 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
   target_compile_features(veyra_audio_timeline_tests PRIVATE cxx_std_20)
   target_link_libraries(veyra_audio_timeline_tests PRIVATE veyra_sinks)
   add_executable(veyra_capture_audio_tests tests/integration/CaptureAudioTests.cpp)
+  if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavcodec/avcodec.h")
+    add_executable(veyra_bitstream_audio_test tools/bitstream_audio_test/main.cpp)
+    target_compile_features(veyra_bitstream_audio_test PRIVATE cxx_std_20)
+    target_compile_options(veyra_bitstream_audio_test PRIVATE /utf-8 /WX-)
+    target_compile_definitions(veyra_bitstream_audio_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+    target_include_directories(veyra_bitstream_audio_test PRIVATE ${FFMPEG_INCLUDE_DIRS})
+    target_link_libraries(veyra_bitstream_audio_test PRIVATE veyra_sinks veyra_base ${FFMPEG_LIBRARIES})
+  endif()
   add_executable(veyra_audio_waveform_tests tests/integration/AudioWaveformTests.cpp)
   target_compile_features(veyra_audio_waveform_tests PRIVATE cxx_std_20)
   target_compile_definitions(veyra_audio_waveform_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
