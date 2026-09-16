@@ -158,6 +158,31 @@ HRESULT suggestCaptureAudioBuffering(IPin* pin,const WAVEFORMATEX& format){
     log::info("capture-audio-buffer",std::format("upstream request bytes={} blockMs={:.3f} rate={} channels={} bits={} hr=0x{:08X} (advisory; actual callbacks logged separately)",wanted.cbBuffer,1000.0*wanted.cbBuffer/format.nAvgBytesPerSec,format.nSamplesPerSec,format.nChannels,format.wBitsPerSample,uint32_t(hr)));
     return hr;
 }
+HRESULT suggestCaptureVideoBuffering(IPin* pin,long buffers,long bytes){
+    if(!pin)return E_POINTER;
+    if(buffers<=0||bytes<=0)return E_INVALIDARG;
+    ComPtr<IAMBufferNegotiation> negotiation;
+    const auto queryHr=pin->QueryInterface(IID_PPV_ARGS(&negotiation));
+    if(FAILED(queryHr)){
+        log::warn("capture-buffer",std::format("upstream negotiation unavailable hr=0x{:08X}; driver defaults retained",uint32_t(queryHr)));
+        return queryHr;
+    }
+    const ALLOCATOR_PROPERTIES wanted{buffers,bytes,-1,-1};
+    const auto hr=negotiation->SuggestAllocatorProperties(&wanted);
+    log::info("capture-buffer",std::format("upstream request buffers={} bytes={} hr=0x{:08X} (advisory; actual allocator logged after connect)",buffers,bytes,uint32_t(hr)));
+    return hr;
+}
+HRESULT queryCaptureAllocatorProperties(IPin* pin,ALLOCATOR_PROPERTIES& out){
+    out={};
+    if(!pin)return E_POINTER;
+    ComPtr<IMemInputPin> input;
+    auto hr=pin->QueryInterface(IID_PPV_ARGS(&input));
+    if(FAILED(hr))return hr;
+    ComPtr<IMemAllocator> allocator;
+    hr=input->GetAllocator(&allocator);
+    if(FAILED(hr))return hr;
+    return allocator->GetProperties(&out);
+}
 HRESULT createNativeCaptureSink(const AM_MEDIA_TYPE& type,std::function<HRESULT(IMediaSample*)> callback,ComPtr<IBaseFilter>& filter,ComPtr<IPin>& pin){
     filter.Reset();pin.Reset();CaptureMediaLayout layout;if(!captureMediaLayout(type,layout))return VFW_E_INVALIDMEDIATYPE;
     try{filter.Attach(new NativeSink(type,std::move(callback)));return filter.As(&pin);}catch(...){return E_OUTOFMEMORY;}

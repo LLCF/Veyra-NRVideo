@@ -214,6 +214,21 @@ int main(){
         settings.captureAudio=static_cast<engine::CaptureAudioIngress>(3);
         check(!settings.validate().empty(),"capture audio ingress outside the enum is rejected");
     }
+    {
+        engine::EnhancementSettings settings;
+        check(settings.captureBuffer==veyra::source::CaptureBufferMode::Auto,"capture buffer mode defaults to auto");
+        for(auto mode:{veyra::source::CaptureBufferMode::Auto,veyra::source::CaptureBufferMode::Minimum,veyra::source::CaptureBufferMode::DriverDefault}){
+            settings.captureBuffer=mode;
+            check(settings.validate().empty(),"capture buffer modes validate");
+        }
+        settings.captureBuffer=static_cast<veyra::source::CaptureBufferMode>(3);
+        check(!settings.validate().empty(),"capture buffer mode outside the enum is rejected");
+        check(veyra::source::captureDesiredVideoBuffers(veyra::source::CaptureBufferMode::Auto,1920,1080)==2&&
+            veyra::source::captureDesiredVideoBuffers(veyra::source::CaptureBufferMode::Auto,3840,2160)==3&&
+            veyra::source::captureDesiredVideoBuffers(veyra::source::CaptureBufferMode::Minimum,3840,2160)==1&&
+            veyra::source::captureDesiredVideoBuffers(veyra::source::CaptureBufferMode::DriverDefault,1920,1080)==0,
+            "capture buffer policy: auto 2/3 by size, minimum 1, driver default none");
+    }
     check(engine::opticalFlowBackendName(engine::OpticalFlowBackend::Nvidia)=="NVIDIA_NVOF"&&engine::opticalFlowBackendName(engine::OpticalFlowBackend::AmdFidelityFx)=="AMD_FIDELITYFX_OF","optical-flow backend names identify every backend");
     s.model.intensity=std::numeric_limits<float>::quiet_NaN();check(!s.validate().empty(),"reject NaN transaction");
     s={};s.multiplier=5;check(s.validate().empty(),"5X multiplier accepted by the API guard (6X ceiling)");

@@ -1,5 +1,29 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-16 采集链路优化开工：隔离分支 + N4 视频 pin 缓冲协商
+
+用户指令："直接开隔离区分支，开始优化采集链路"。已建 tag `checkpoint/pre-capture-decode-latency-20260916`（main `2406f81`）与分支 `codex/capture-decode-latency-20260916`，按 `docs/CAPTURE_DECODE_LATENCY_PLAN_2026-09-16.md` 的 N4→N3→N1→N2 顺序开工。
+
+**N4 实现**：
+
+- `include/veyra/source/CaptureBuffer.h`（新）：`CaptureBufferMode{Auto,Minimum,DriverDefault}` + 策略 `captureDesiredVideoBuffers`（Auto：≤1080p 2、>1080p 3；Minimum：1；DriverDefault：0 不干预）。
+- `NativeCaptureSink`：新增 `suggestCaptureVideoBuffering`（连前对视频输出 pin 调 `IAMBufferNegotiation::SuggestAllocatorProperties`）与 `queryCaptureAllocatorProperties`（连后读实际 allocator 属性）。
+- `CaptureCardSource`：新增 `setBufferMode`；直连路径连前建议、连后记录 `[capture-buffer] mode=… requested=… actual buffers=… bytes=… align=…`，驱动忽略时标注 `(driver ignored; negotiation not applied)`。
+- 设置/持久化/UI/CLI：`EnhancementSettings::captureBuffer`（重连生效）、预设 schema v16→v17、采集面板新增"设备缓冲（变更需重连）"三档下拉与帮助、`--capture-buffer=auto|minimum|driver` 诊断开关；总增强开关关闭（首次默认状态）时也一并下发。
+- 测试：构建 93/93 exit 0；修复合同 187 项 0 失败（新增 6 项：默认 auto、三档 validate、超范围拒绝、策略 2/3/1/0）；预设 66 组迁移 + v17 往返 exit 0；采集颜色测试 failures=0。
+
+**真机 A/B（本机 ¥30 USB3 卡，1080p60 YUY2，三档各 10 秒，串行执行）**：
+
+| 模式 | 请求 | 实际 | 结果 |
+| --- | --- | --- | --- |
+| auto | 2 | **10** | 驱动忽略建议；frames=578、dropped=0、callback→Present P95 2.615ms、readAgeMs 0.47–1.45ms |
+| minimum | 1 | **10** | 同上；P95 2.597ms、dropped=0 |
+| driver | 0（不干预） | 10 | 基线；P95 2.601ms、dropped=0 |
+
+结论：**这张卡的驱动接受调用但忽略建议（S_OK 后仍分配 10 个缓冲）**，N4 在它身上无收益，如实记录（符合方案的"该卡无收益"边界）；档位、requested/actual 日志与"协商未生效"标注可用，等待支持协商的卡验证 `cBuffers≤2` 的收益。三档均 0 丢帧，无回归。首轮三进程并行启动互相抢卡导致 `Run hr=0x800705AA`，已改串行 `Start-Process -Wait` 重跑；失败记录保留在 `logs/veyra-app.log`（13:15 段）。
+
+**未做（如实）**：`GetAllocatorRequirements` 强制要求属于"驱动忽略时的二级手段"，风险高，留待评估；N3/N1/N2 与压缩解码链路尚未开工。
+
 ## 2026-09-16 隔离分支合并到 main（用户授权）
 
 用户指令："先把这些修复合并到main吧，然后创建好git存档，更新项目日志和各文档，先把工作区弄干净。"本轮在 main 上执行合并、存档与文档同步：

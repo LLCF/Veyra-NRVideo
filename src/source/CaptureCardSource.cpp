@@ -3,6 +3,7 @@
 #include "veyra/source/CaptureTiming.h"
 #include "veyra/source/CaptureMediaType.h"
 #include "veyra/source/NativeCaptureSink.h"
+#include "veyra/source/CaptureBuffer.h"
 #include "veyra/pipeline/ColorMetadata.h"
 #include "veyra/Log.h"
 #include "veyra/sink/AudioFormat.h"
@@ -141,6 +142,9 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
     // 0 automatic, 1 PCM only, 2 bitstream preferred (see
     // engine::CaptureAudioIngress). Read when the audio graph is built.
     unsigned audioIngressMode=0;
+    // Video-pin allocator policy (0 auto, 1 minimum, 2 driver default); read
+    // when the capture graph is built. See CaptureBuffer.h.
+    unsigned bufferMode=0;
     // Manual capture flip; read by the DirectShow callback thread.
     std::atomic<bool> verticalFlip{false};
     std::unique_ptr<WasapiAudioInput> wasapi;
@@ -233,6 +237,14 @@ void CaptureCardSource::setAudioIngress(unsigned mode){
     log::info("capture-audio-ingress",std::format("mode={} ({}) takes effect on the next connect",clamped,
         clamped==1?"PCM only":clamped==2?"bitstream preferred":"automatic"));
 }
+void CaptureCardSource::setBufferMode(unsigned mode){
+    auto& p=*p_;
+    const unsigned clamped=mode>2?0:mode;
+    if(p.bufferMode==clamped)return;
+    p.bufferMode=clamped;
+    const auto policy=static_cast<CaptureBufferMode>(clamped);
+    log::info("capture-buffer",std::format("mode={} ({}) takes effect on the next connect",clamped,captureBufferModeKey(policy)));
+}
 void CaptureCardSource::setVerticalFlip(bool enabled){
     auto& p=*p_;
     if(p.verticalFlip.exchange(enabled)==enabled)return;
@@ -291,12 +303,25 @@ bool CaptureCardSource::configure(const SourceOpenDesc& desc){close();p_->lastAu
     const bool direct=nativeSupported&&!desc.legacyCaptureRgbForDiagnostic;
     AM_MEDIA_TYPE connected{};
     if(direct){
+        // N4: suggest the video-pin allocator size before ConnectDirect. The
+        // suggestion is advisory; a refusal keeps the driver's defaults and is
+        // reported after the connect instead of failing the device.
+        const auto bufferPolicy=static_cast<CaptureBufferMode>(p.bufferMode);
+        const long suggestedBuffers=captureDesiredVideoBuffers(bufferPolicy,long(nativeLayout.width),long(nativeLayout.height));
         ComPtr<IPin> input,output;
         hr=createNativeCaptureSink(*native,[&p](IMediaSample* sample){REFERENCE_TIME a=0,b=0;const auto timeHr=sample->GetTime(&a,&b);if(FAILED(timeHr))return timeHr;return p.SampleCB(double(a)/1e7,sample);},p.grabFilter,input);
         if(SUCCEEDED(hr))hr=p.graph->AddFilter(p.grabFilter.Get(),L"Native frame mailbox");
         if(SUCCEEDED(hr))hr=p.builder->FindPin(p.device.Get(),PINDIR_OUTPUT,&PIN_CATEGORY_CAPTURE,&MEDIATYPE_Video,FALSE,0,&output);
+        if(SUCCEEDED(hr)&&suggestedBuffers>0)suggestCaptureVideoBuffering(output.Get(),suggestedBuffers,LONG(nativeLayout.sampleBytes));
         if(SUCCEEDED(hr))hr=p.graph->ConnectDirect(output.Get(),input.Get(),native);
         if(SUCCEEDED(hr))hr=input->ConnectionMediaType(&connected);
+        if(SUCCEEDED(hr)){
+            ALLOCATOR_PROPERTIES actual{};
+            const auto allocatorHr=queryCaptureAllocatorProperties(input.Get(),actual);
+            const bool negotiated=suggestedBuffers>0;
+            const bool honored=negotiated&&SUCCEEDED(allocatorHr)&&actual.cBuffers==suggestedBuffers;
+            log::info("capture-buffer",std::format("mode={} requested={} actual buffers={} bytes={} align={} hr=0x{:08X} {}",captureBufferModeKey(bufferPolicy),suggestedBuffers,actual.cBuffers,actual.cbBuffer,actual.cbAlign,uint32_t(allocatorHr),!negotiated?"(driver default)":honored?"(driver honored)":"(driver ignored; negotiation not applied)"));
+        }
         log::info("capture",std::format("native ConnectDirect subtype=0x{:08X} hr=0x{:08X} converters=0",native->subtype.Data1,uint32_t(hr)));
     }else{
         log::warn("capture",std::format("explicit RGB32 compatibility path subtype=0x{:08X} diagnostic={} (decoder/color converter may be inserted)",requestedSubtype.Data1,desc.legacyCaptureRgbForDiagnostic));

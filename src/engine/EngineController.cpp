@@ -202,6 +202,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 // through to the file open check (fixed 2026-09-16).
                 if(physicalCapture)captureSource.setAudioIngress(unsigned(options.settings.captureAudio));
                 if(physicalCapture)captureSource.setVerticalFlip(options.settings.captureFlipVertical);
+                if(physicalCapture)captureSource.setBufferMode(unsigned(options.settings.captureBuffer));
 #ifdef VEYRA_ENABLE_REMOTEPLAY
                 if(remote){
                     status(L"正在连接 PS5…");
@@ -374,6 +375,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
             captureSource.setAudioSync(unsigned(options.settings.audioSync),options.settings.audioOffsetMs);
             captureSource.setAudioIngress(unsigned(options.settings.captureAudio));
             captureSource.setVerticalFlip(options.settings.captureFlipVertical);
+            captureSource.setBufferMode(unsigned(options.settings.captureBuffer));
             if(physicalCapture&&!captureSource.start()){status(L"无法启动采集，请查看诊断",true);break;}
             {std::lock_guard lock(mutex_);snapshot_.duration=duration;snapshot_.nominalSourceFps=isImage?0:activeSource->info().averageFps;snapshot_.running=true;snapshot_.transport=TransportState::Playing;snapshot_.image=isImage;snapshot_.capture=isCapture;snapshot_.applied=options.snapshot();snapshot_.desired=desired_;}
             status(isImage?L"图片已增强，可保存PNG/JPEG":std::format(L"{} | 输入 {}×{} / 底图 {}×{} / NR {}×{} / 光流 {}×{} / FG与输出 {}×{} | {}",isRemote?L"PS5 串流":isCapture?L"实时采集":L"播放",width,height,gd.workWidth,gd.workHeight,gd.nrWidth,gd.nrHeight,gd.flowWidth,gd.flowHeight,gd.workWidth,gd.workHeight,gd.nrBeforeSr?L"低延迟 · NR先行后超分":gd.nrWidth<gd.workWidth?L"实时内部处理并回填":L"原生NR（性能成本较高）"));
@@ -599,6 +601,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     status(std::format(L"采集信号中断，正在重连原设备（第 {} 次）",captureRetries));
                     captureSource.setAudioIngress(unsigned(options.settings.captureAudio));
                     captureSource.setVerticalFlip(options.settings.captureFlipVertical);
+                    captureSource.setBufferMode(unsigned(options.settings.captureBuffer));
                     if(captureSource.reconnect(muted_?0.0f:volume_.load(),unsigned(options.settings.audioSync),options.settings.audioOffsetMs)){
                         captureRecovering=false;reset=true;pendingResetCause=pipeline::ResetReason::DeviceLost;captureSampler.reset();
                         {std::lock_guard lock(mutex_);snapshot_.captureRecovering=false;}
@@ -652,6 +655,14 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                         options.settings.captureFlipVertical=requested.captureFlipVertical;
                         captureSource.setVerticalFlip(requested.captureFlipVertical);
                         status(requested.captureFlipVertical?L"采集画面已上下翻转（仅影响本机采集画面）":L"采集画面方向已恢复",false);
+                    }
+                    // The video-pin allocator is created while the graph is
+                    // built: record the mode now and let the reconnect below
+                    // (or the next connect) apply it.
+                    if(requested.captureBuffer!=options.settings.captureBuffer){
+                        options.settings.captureBuffer=requested.captureBuffer;
+                        captureSource.setBufferMode(unsigned(requested.captureBuffer));
+                        status(L"设备缓冲模式已记录；重新连接采集卡后生效",false);
                     }
                     std::lock_guard lock(mutex_);snapshot_.applied=options.snapshot();snapshot_.applying=desired_!=snapshot_.applied;
                     veyra::log::info("settings",std::format("Audio applied videoRevision={} mode={} offsetMs={} (video history retained)",requested.revision,unsigned(requested.audioSync),requested.audioOffsetMs));

@@ -42,7 +42,7 @@ bool legacyBackends(const std::filesystem::path& path) {
    if(version>=7&&(value.audioSync!=AudioSyncMode::Manual||value.audioOffsetMs!=137))return false;
    if(!store.put(L"legacy",value,true))return false;
    std::ifstream file(path);std::string magic;int savedVersion=0;file>>magic>>savedVersion;
-   if(magic!="VEYRA_PRESETS"||savedVersion!=16)return false;
+   if(magic!="VEYRA_PRESETS"||savedVersion!=17)return false;
    PresetStore reloaded(path);
    if(!reloaded.load()||reloaded.defaultSettings()!=value)return false;
   }else{
@@ -109,6 +109,10 @@ ok=ok&&a.put(L"test",s)&&a.setDefault(0)&&!a.put(L"test",s);PresetStore b(p);ok=
  // Manual capture vertical flip (v16) round-trips with the rest of the preset.
  auto flipped=s;flipped.captureFlipVertical=true;ok=ok&&b.put(L"capture flip",flipped);
  PresetStore flipReload(p);ok=ok&&flipReload.load()&&flipReload.entries().size()==1&&flipReload.entries().back().settings.captureFlipVertical&&b.erase(0);
+ // Capture video-pin buffer policy (v17) round-trips with the rest of the preset.
+ auto buffers=s;buffers.captureBuffer=veyra::source::CaptureBufferMode::Minimum;ok=ok&&b.put(L"capture buffer",buffers);
+ PresetStore bufferReload(p);ok=ok&&bufferReload.load()&&bufferReload.entries().size()==1&&bufferReload.entries().back().settings.captureBuffer==veyra::source::CaptureBufferMode::Minimum&&b.erase(0);
+ auto badBuffer=s;badBuffer.captureBuffer=static_cast<veyra::source::CaptureBufferMode>(3);ok=ok&&!b.put(L"invalid buffer",badBuffer);
  {std::ofstream legacy(p);legacy<<"VEYRA_PRESETS 1\n\"legacy\" 1\n\"legacy\" 1 1 1 -1 0 0 0 1 1 1 1 1 1 0 1 0 1 0\n";}
  PresetStore old(p);ok=ok&&old.load()&&!old.defaultSettings().protection.enabled&&old.defaultSettings().srTarget==veyra::pipeline::SrTarget::Uhd4K&&old.put(L"v2",s);
  PresetStore upgraded(p);ok=ok&&upgraded.load()&&upgraded.entries().size()==2&&upgraded.entries()[1].settings==s;

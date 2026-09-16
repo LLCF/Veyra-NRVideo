@@ -5,6 +5,7 @@
 #include <string>
 #include <string_view>
 #include "veyra/pipeline/ResolutionPlan.h"
+#include "veyra/source/CaptureBuffer.h"
 namespace veyra::engine {
 enum class FrameGenerationBackend { Dlss, XeSS, Fsr };
 // Frame generation that runs inside the present sink (external frame
@@ -105,6 +106,9 @@ struct EnhancementSettings {
     // Capture audio ingress; requires a reconnect to take effect (the media type
     // is negotiated when the graph is built).
     CaptureAudioIngress captureAudio=CaptureAudioIngress::Auto;
+    // Capture video-pin allocator policy; requires a reconnect to take effect
+    // (the allocator is created while the capture graph is built).
+    source::CaptureBufferMode captureBuffer=source::CaptureBufferMode::Auto;
     // Capture ingest only: flip the incoming frame vertically. Exists because
     // some devices declare a DIB orientation that does not match their samples
     // (RGB24 upside-down reports); the capture source asks for top-down first,
@@ -156,6 +160,7 @@ struct EnhancementSettings {
         if(!revision)return "settingsRevision must be nonzero";
         if(nrRuntime!=NrRuntime::Original&&nrRuntime!=NrRuntime::Community&&nrRuntime!=NrRuntime::Ampere)return "invalid NR runtime";
         if(captureAudio<CaptureAudioIngress::Auto||captureAudio>CaptureAudioIngress::BitstreamPreferred)return "invalid capture audio ingress mode";
+        if(captureBuffer<source::CaptureBufferMode::Auto||captureBuffer>source::CaptureBufferMode::DriverDefault)return "invalid capture buffer mode";
         if(audioSync<AudioSyncMode::Automatic||audioSync>AudioSyncMode::Off||audioOffsetMs<-250||audioOffsetMs>250)return "invalid audio sync setting";
         if(!range(model.intensity,1)||!range(model.tone,1)||!range(model.structure,1))return "model parameter out of range";
         if(model.skin!=-1&&!range(model.skin,2))return "skin parameter out of range";
