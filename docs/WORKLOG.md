@@ -69,6 +69,17 @@
 - 证据：本机 30 秒 FSR 运行 `real=839/generated=838/presented=1677`、`presentSubmitFps=30.00`、`gpuFgBatchP95Ms=0.197`；delivery 短测 PASS `logs/delivery/442f41e29b684e7e87174bc075d4e282/result.json`。
 - **边界（如实）**：FgBatch 为**应用侧**计时（提供方内部的插值工作不经过我们的队列，无法打点）；用户机器上"SDK提交=0"的原始触发未能在本机复现（本机 r3 正常），累计对齐是针对该症状的根治性修法，需要用户在 r4 包上复测确认。
 
+### 2026-09-16 采集卡延迟全面排查（只排查，未改产品代码）
+
+用户要求"找出延迟低的原因和延迟高的原因，再给优化方案，不要擅自动手"。审计+实测报告见 [采集卡延迟排查](CAPTURE_LATENCY_INVESTIGATION_2026-09-16.md)。本轮**未改任何产品代码**，也**没有强杀 OBS** 去抢占采集卡。
+
+- **实测（OBS 虚拟摄像头 NV12 1440p60，同一条 DirectShow 原生路径，12 秒窗口）**：无特效 callback→Present 返回 p95 **12.45ms**（60.00fps、0 丢帧）；NR+SR **24.44ms**；NR+SR+FG2X 20.35ms（schedulingWait 6.0ms）；NR+SR+`--realtime` **12.51ms**。历史实卡（2026-09-07，MJPEG 1080p50）全关 3.67ms / NR 4.77ms / NR+FG 16.28ms。指标是软件内部计时，UI 已标注"非 HDMI→显示总延迟"。
+- **实卡今天测不了**：`USB3 Video` 被 OBS 独占，`Run` 返回 0x800705AA（ERROR_NO_SYSTEM_RESOURCES）；枚举显示该卡有 YUY2 1080p60/4K18 与 MJPEG 1080p60/4K18 两族格式。
+- **低延迟原因（代码证据）**：自实现原生终点滤波器替代 SampleGrabber（借样、无额外队列）＋`ConnectDirect` 零转换器＋容量 1 mailbox/双自有缓冲（慢消费者丢旧保新）＋等显示链路就绪再 Run（deferredRun）＋FG 最多等半个输入间隔（≤33.33ms）＋固定 System Clock＋呈现 `vsync=0`+tearing（`SyncInterval=0`）。
+- **高延迟原因（分层）**：①选到 MJPEG/H.264（"MPEG"）走兼容路径：卡内编码器 + 系统解码器重排序 + 颜色转换 + SampleGrabber CPU 拷贝 + NullRenderer，合计 100–300ms；格式默认是"记上次，否则第 0 项"，很多卡把 MJPEG 排前面、4K60 只能选它。②`audioSync=Automatic` 的 A/V 补偿会主动等视频（置信带 80ms/目标上限 1500ms、手动 ±250ms），这部分不体现在 callback→Present 指标里。③NR/SR/FG 在高分辨率高帧率下实测让管线从 12.45→24.44ms。④DWM/vsync 相位与刷新率漂移再 +1 帧。⑤USB 链路/卡固件/电视后处理属用户侧。
+- **方案（未实施）**：P0 格式"低延迟优先"排序与标注、解码器 `CODECAPI_AVLowLatencyMode`、视频 pin `IAMBufferNegotiation` 最小缓冲、音频同步补偿加上限；P1 采集延迟分层面板、WASAPI 低延迟档、独占全屏选项；P2 采集改用 Media Foundation + D3D11 纹理共享、卡内 H.264/HEVC 走硬件解码。
+- **待用户配合的实测**：释放卡后在 YUY2 与 MJPEG 之间 A/B（命令见文档 §6），以及用手机慢动作拍"主机画面+显示器"得到端到端光子延迟（同条件对比 OBS/PotPlayer）。反馈用户只需给四行日志（`[capture] configured upstreamSubtype=`、`[present] vsync/tearing`、`[capture-timing]` 那行、音频同步模式）。
+
 ### 2026-09-16 字幕系统重做：多格式 / 内嵌轨 / 双语 / 样式 / 延时 / 自动对齐
 
 用户："字幕你列出来的功能全部都加上吧……先修字幕，其他不动"。实现、证据与未做项见 [字幕系统](SUBTITLE_ENGINE_2026-09-16.md)；**未触碰 4K HEVC 解码、播放/导出链路**。
