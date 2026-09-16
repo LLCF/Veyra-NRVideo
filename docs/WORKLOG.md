@@ -1,5 +1,26 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-17 1.3.2beta 原生采集路径回归（用户实机发现，已修复并重新打包）
+
+用户反馈 1.3.2beta"采集进去只有 2 帧"。日志证据：YUY2 1080p60 会话里 `[capture-reconnect] Stop`
+每约 1.1 秒一轮、epoch 从 2 涨到 16+，每轮只出 1–2 帧（`received=3/5/7…`、`presentationCompletedReal=2/4/6…`）。
+
+- **根因（我的回归，提交 `35e5593` 引入）**：解码 worker 的帧池改造把 `read()` 里**所有非硬件帧**都走了
+  压缩路径的池记账（`p.pendingFrame=nullptr`），包括原生 YUY2/NV12/RGB32。清空后下一个 SampleCB 命中
+  `if(!valid||(!compressedPath&&!pendingFrame))` → `callbackError=true` → read 报错 → 引擎进入
+  采集恢复循环（重连→2 帧→再报错→再重连）。
+- **为什么没测出来（必须记住的教训）**：帧池提交之后我跑的每一个采集测试都是 MJPEG
+  （`capture:0:24` / `capture:0:46`）或探针压缩路径，**原生路径一次都没跑**，而用户用的正是 YUY2。
+- **修复（`3eaeaf1`）**：只有压缩路径使用池；原生路径恢复原来的信箱交换（pendingFrame 永不为空）。
+- **真机验证（每条 2 分钟，均 0 丢帧、无重连）**：YUY2 1080p60 7664 帧 P95 3.006ms；YUY2 4K18 2150 帧
+  P95 3.617ms；MJPEG 1080p60 7176 帧 P95 7.022ms（decoded=6600 errors=0）；MJPEG 4K18 2150 帧
+  P95 20.023ms（decoded=1800 errors=0）。
+- **防回归**：新增 `scripts/acceptance/capture-paths-smoke.ps1`，自动枚举设备格式、同时跑"第一条原生格式"
+  与"第一条压缩格式"，帧数塌陷或丢帧即失败（本地实测两条路径 PASS，701 帧/12 秒）。
+- **重新打包**：`C:\veyra-test-packages\mpeg-chain-1.3.2beta2\Veyra-1.3.2beta2-win64-portable.zip`
+  （469,880,671 字节，SHA256 `0CA29C3DF5E136818392CA78CD155755DEEA9B7FAB42D1AC6F69976698092994`），
+  便携包 smoke 全 PASS；1.3.2beta 的包作废，勿再分发。
+
 ## 2026-09-17 RTX 3060 DLSS 补帧报错排查（用户日志，不修复）
 
 用户提供粉丝日志 `3060 dlss 错误.log`（3992 行，2026-09-16 13:55–14:01，跑的是 1.3.1beta 便携包，

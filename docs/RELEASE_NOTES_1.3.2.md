@@ -4,6 +4,16 @@
 `codex/capture-decode-latency-20260916`（未合并 main、未推送、未创建 Release）。
 本包在 1.3.1beta 全部内容之上，重点是**采集（MPEG/压缩格式）链路重构**。
 
+## 1.3.2beta2 修复（收到 beta1 的人必看）
+
+**beta1 有一个严重影响原生采集格式（YUY2/NV12/RGB 系）的回归**：解码 worker 的帧池改造
+错误地套用到了非压缩路径，`read()` 把原生路径的 `pendingFrame` 置空，下一个驱动回调被判定为
+采集错误 → 引擎反复重连（约每 1 秒一轮），用户看到的是"采集进去只有 2 帧"。
+压缩格式（MJPEG/H.264/HEVC）不受影响，这也是它没在 beta1 的 MJPEG 测试里暴露的原因。
+beta2 已修复，并在真机对**四条路径各跑 2 分钟**：YUY2 1080p60 7664 帧 / YUY2 4K18 2150 帧 /
+MJPEG 1080p60 7176 帧 / MJPEG 4K18 2150 帧，全部 0 丢帧、无重连。
+新增 `scripts/acceptance/capture-paths-smoke.ps1`：一条命令同时验证原生与压缩两条路径。
+
 ## 采集链路（本次重点）
 
 - **压缩格式不再走系统解码器**：MJPEG/H.264/HEVC/AV1/VP9 由 `ConnectDirect` 直接送入我们的
