@@ -79,6 +79,7 @@
 - **本机证据**：自造复现素材 `out/tail-jump.mkv`（300 帧 1080p30，尾帧 10.000s 而非 9.967s）：无补帧 300 帧 @30fps、`--fg-xess 4X` 1200 帧 @120fps（backend=DLSS 替换）、`--fg-fsr 2X` 600 帧 @60fps、`VEYRA_TEST_FG_MULTIFRAME_MAX=1` 降级 2X 600 帧、`=0` 补帧关闭 300 帧 —— 全部 exit 0 且逐帧解码验证通过；修复合同测试新增 4 项尾帧规则后 169 项 0 失败；delivery 短测 PASS `logs/delivery/95a4effb615949cbaedd502d87272cb1/result.json`（46.9s）。
 - **顺带修**：`--fg-xess/--fg-fsr/--fg-dlss` 在第一遍参数解析里未识别会落进 `autoInput`（`clip.mp4 --fg-xess` 会去打开名为 `--fg-xess` 的文件），已改为位置无关；设置页补帧方式与帮助文案同步更新。
 - **未做（如实）**：FFX SDK 2.3.0 的非交换链 FG（`ffxDispatchDescFrameGeneration{outputs[4]}`）理论上能做真正的 FSR 补帧导出，本轮未实现；XeSS 无此入口，只能替换/关闭；案例一的陈旧 DLL 现场本机无法复现，需原用户用新包复测。
+- **测试包（提交 `6c70eb2`，未合并 main/未推送/未发布）**：`C:\veyra-test-packages\final-exportfix-r5\Veyra-1.3.1beta-win64-portable.zip`，469,779,240 字节，SHA256 `A7B10DD98C47A052F5479ED5B652BBA67E1B0D8F7D3C645D5388B611AB9930EC`；包内 `Veyra.exe` `81782558FE0486632A6A544F7E19B0D91D76D2B2C716681094AAEC5AE5E70D26`（与构建树一致），包内 EXE 复测 XeSS 替换导出 600 帧 @60fps、逐帧验证通过、exit 0。
 
 ## 2026-09-15 采集卡直播窗口标题修复（第三方工具“识别不到 Veyra”）
 

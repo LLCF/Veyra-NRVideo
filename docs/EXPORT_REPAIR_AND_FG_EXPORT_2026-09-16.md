@@ -121,3 +121,12 @@ GOP 截断）。`CfrTimeline` 的相位窗逐帧收紧，尾帧一格格子就�
 - **XeSS 补帧导出**：SDK 没有非交换链入口，只能替换或关闭，永远拿不到真正的 XeSS 帧。
 - **案例一现场复现**：本机驱动正常，无法复现陈旧 `nvEncodeAPI64.dll`，需要原用户复测。
 - **未测**：AMD 显卡上的 FSR 补帧导出（导出路径仍只支持 NVENC）；40/30 系实机导出。
+
+## 7. 测试包（未合并 main、未推送、未发布）
+
+`C:\veyra-test-packages\final-exportfix-r5\Veyra-1.3.1beta-win64-portable.zip`，
+469,779,240 字节，SHA256
+`A7B10DD98C47A052F5479ED5B652BBA67E1B0D8F7D3C645D5388B611AB9930EC`；
+包内 `Veyra.exe` SHA256 `81782558FE0486632A6A544F7E19B0D91D76D2B2C716681094AAEC5AE5E70D26`
+（与构建树一致）。用包内 EXE 直接跑 `--fg-xess --fg-multiplier 2` 导出 300 帧素材：
+600 帧 @60fps、逐帧验证通过、exit 0。
