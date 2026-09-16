@@ -39,7 +39,18 @@
 - **产品接入**（提交 `3dd5add`）：`EnhanceGraph::applyAmpereMfgUnlock()` 在 FG 能力查询前调用（仅 RTX 30 设备窗口触发）；provider 在 30 系上仍会报 FG 不可用（Ada/Blackwell 门控），当审计版解锁已安装时宽限继续并把缺失的 MultiFrameCountMax 补为审计上限 5（显式更小的报告值仍被尊重）；shutdown 与 Ada 解锁对称释放。
 - **本机证据**（仅结构与机制）：probe `veyra_dlssg_ampere_probe` → scan 全绿（runs=8/200 槽/25+38+6 fatbin/44 lea/2 gate/temporal 唯一）、apply `applied=1 preflight=69/69 readBack=1 restored=1`；delivery 短测 PASS `logs/delivery/548a606d92484286806f272d4744d2a7/result.json`。
 - **未验证（如实）**：RTX 30 实机行为——provider 是否还有 310.7 特有的额外 gate、sm_86 内核的实际插帧质量/性能、以及 dashdogy 自述的 "very early and experimental" 风险（可能部分配置不工作）。需要 30 系机器按 `Veyra.exe --fg-multiplier 6 --smoke-seconds 15 <视频>` 取证并回传日志。
-- **测试包（含 30 系解锁，当前交付版）**：`C:\veyra-test-packages\final-30x86-r2\Veyra-1.3.1beta-win64-portable.zip`，469,773,588 字节，SHA256 `8933605B22527E6393BC0995CE5A8E0A0317716E90C1F7A57FB9BFF9ED1B2E80`；包内 `Veyra.exe` SHA256 `1C19D80EC6A4A4FCDCACC05121C35EF7A153CBD004986F33F0C13CA71B7AF389`（与构建树一致）、`nvngx_dlssg.dll` 仍为审计原版 `135EAF07…`；包内 EXE 4K30 烟测 exit 0。此包同时包含 40 系 6X、50 系 6X、XeSS、FSR、杜比兜底与采集音频手动选择，可一次覆盖 30/40/50 三台机器验收。较早的 `final-30x86\` 包同内容、旧 zip 时间戳，保留作存档。
+- **测试包（含 30 系解锁，当前交付版）**：`C:\veyra-test-packages\final-30x86-r2\Veyra-1.3.1beta-win64-portable.zip`，469,773,588 字节，SHA256 `8933605B22527E6393BC0995CE5A8E0A0317716E90C1F7A57FB9BFF9ED1B2E80`；包内 `Veyra.exe` SHA256 `1C19D80EC6A4A4FCDCACC05121C35EF7A153CBD004986F33F0C13CA71B7AF389`（与构建树一致）、`nvngx_dlssg.dll` 仍为审计原版 `135EAF07…`；包内 EXE 4K30 烟测 exit 0。此包同时包含 40 系 6X、50 系 6X、XeSS、FSR、杜比兜底与采集音频手动选择，可一次覆盖 30/40/50 三台机器验收。较早的 `final-30x86\` 包同内容、旧 zip 时间戳，保留作存档。后续 FSR/XeSS 修复（本节末）在此包之后，需要重新打包才包含。
+
+### 2026-09-16 FSR 补帧停止 / XeSS 切换 / 崩溃三项排查与修复（`870358c`）
+
+用户报告"FSR 开启后完全不补帧、显示受限"与"XeSS 切换不过去"。以生产日志（`E:\App\Veyra-1.3.1beta-win64-portable\logs\veyra-app.log`）+ UI 级脚本复现定位：
+
+- **FSR"完全不补帧"根因＝视图守卫**：`VideoPresenter` 用 `view==PreviewView{}`（浮点精确比较）门控 present-sink FG。用户滚轮缩放后 center 定格在 `0.49875…`（日志实证 `[preview-view] zoom=1 center=0.4987547,0.50221384`），此后 XeSS/FSR 每帧 `enabled` 恒 false，provider 静默不生成、无任何错误。修复：生成区域改为跟随视图（contain×zoom+pan，裁剪到窗口、偶对齐），移除精确比较。实测（`ui-fsr-xess-switch.py`）：滚轮缩放后 FSR 生成继续（118→238）。
+- **teardown 崩溃（排查中实抓）**：`FsrFgPresenter::shutdown()` 被执行两次（显式调用＋析构），而 FFX `DestroyContext` 不清空 context 指针 → 第二次对已销毁 context 调 `Dispatch` → AV in `amd_fidelityfx_framegeneration_dx12.dll`（WER 0xC0000005，偏移 0x10b9a9）。修复：销毁后置空指针、销毁前排空 present 队列、**不再 FreeLibrary loader**（卸载时同样 AV）、每步 flush 日志便于取证。
+- **FSR→XeSS 实机边界（结论）**：FidelityFX 代理占用窗口唯一的 flip-model swapchain 槽位；**完整销毁**（官方顺序＋排空＋释放最后 COM 引用，refcount 实测归 2→0）后窗口仍无法承载任何新 swapchain——XeSS 创建、native 创建、甚至 FFX 自己重建代理全部失败（逐一实测）。因此改为：保留代理、拒绝切换、回滚到健康的 FSR 会话（无崩溃，FSR 继续生成：477 帧）；恢复路径给 UI 提示"切到 XeSS 需要重启软件"。`xefgSwapChainD3D12InitFromSwapChain` 包装路径已实现，留作 FFX 行为变化后的入口。
+- 附带修复：`PresentSink` 重新初始化前 `swapChain_.Reset()`（`ComPtr::GetAddressOf` 直接写入会泄漏旧引用）；测试脚本 `scripts/acceptance/ui-fsr-xess-switch.py`（PASS）。
+- 证据：delivery `logs/delivery/899266286a2f46cda5480bae0a3721bb/result.json`。
+- **未完成（如实）**：杜比位流直通输出（独占 WASAPI＋IEC 61937＋端点能力探测）需要独立施工轮次；已完成的杜比相关项仍为 G-1 探测与 G-2 解码兜底。
 
 ## 2026-09-15 采集卡直播窗口标题修复（第三方工具“识别不到 Veyra”）
 
