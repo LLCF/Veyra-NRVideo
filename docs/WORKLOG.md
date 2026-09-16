@@ -2349,6 +2349,41 @@ DLSSG 能力门控没有排除 FSR，导致 FSR 会话下任何就地设置变�
 
 ### 2026-09-16 采集音频改为可手动指定（用户反馈自动识别不好用）
 
+### 2026-09-16 XeSS 节奏 hook（A-2）移植 + 用 4K/30fps 素材实测
+
+移植 `Coldwood1026/OptiScaler`（GPL-3.0，`70676c5f`）`XeFGPacing.h` 的**核心调度调用**到
+`include/veyra/gfx/XessPacing.h` + `src/gfx/XessPacing.cpp`（present thunk `0x25C0` 用既有
+`ThunkHook` 接管，返回地址过滤 `0x2202ED`/`0x220467`，把循环里的生成帧交给提供方自己的调度器
+`0x21EE30`，参数 `gate=burst[0xC0]&1` + ring 快照 `0x224CF0(ctx+0x168)`）。
+安装前三处 thunk 的目标逐一校验（present→`0x21F730`、sched→`0x21EE30`、ring→`0x224CF0`），
+不匹配就拒绝；只在 >2X 会话安装，退出时 `ThunkHook::remove()` 原字节恢复。
+
+测试素材：用户指定的 `GTAVI_An_Extended_Look_4K_Native.mp4`（4K / 30fps）。
+
+**4X 实测（`logs/fsr/xess4x-final.log`）**：
+
+- `[xess-pacing] installed for 4X: present thunk hooked, scheduler wired`；
+- 提供方调度器在线（日志里 `ctx+0x340=0 ctx+0x341=1`），`refused=0` → 每次调用都真的执行，
+  不是"打进去但被门控空转"；
+- **同一 burst 内生成帧间距 mean=8.303–8.306ms、min≈8.14–8.19、max≈8.37–8.42**，
+  而 30fps 4X 的目标间距是 33.33/4 = **8.33ms** → 间距由提供方自己的调度器给出并与目标吻合；
+- 339 真实帧 / 1005 生成帧（≈3×，即 4X）、exit 0、30.00fps 播放、无丢帧；
+- 退出：`unlock rolled back 5/5`，`xess-pacing removed (scheduled=… refused=0 bypassed=0)`。
+
+**对照（`VEYRA_DISABLE_XESS_PACING=1`，`logs/fsr/xess4x-unpaced.log`）**：4X 仍然每真实帧出 4 帧，
+但**没有任何调度发生**（无 scheduling 日志）——中间帧不带呈现时间，就是修复前的状态。
+这个对照只能证明"有没有调度"，修复前的观感数字（一串挤一起）来自上游分析，不作为本机实测。
+
+**顺带修掉一个真 bug**：`XessPresenter` 原先对 2X 也走解锁路径，而解锁在"无需解锁"时返回
+`applied=false`，被当成失败 → **XeSS 2X 会静默退回原生呈现（等于没补帧）**。现在 >1 才解锁，
+2X 走提供方原生 2X：实测 `Create result=0`、`maxInterpolations=1 => 2X`、280 真实 / 276 生成、
+exit 0（`logs/fsr/xess2x-fixed.log`）。
+
+回归：delivery 短测 PASS（`logs/delivery/05331f9d7c294b03b190dd8aeed19936/result.json`）、
+`veyra_repair_contract_tests` 165 项 0 失败。
+
+**未移植**：上游的时间戳/截止时间层（`0x3430`/`0x7A30`）与墙钟回退；当前只做核心调度调用。
+
 用户反馈"自动识别并不好用"，要求在采集面板里像 HDR 那样手动选。已加：
 
 - 采集面板新增下拉框「采集音频（变更需重连）」：**自动**（优先线性 PCM，PCM 不可用时位流解码）、

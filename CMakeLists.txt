@@ -77,6 +77,7 @@ add_library(veyra_gfx STATIC
   src/gfx/PresentSink.cpp
   src/gfx/XessPresenter.cpp
   src/gfx/XessMfgUnlock.cpp
+  src/gfx/XessPacing.cpp
   src/gfx/FsrFgPresenter.cpp
   src/gfx/FsrSrBackend.cpp
 )

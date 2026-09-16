@@ -82,7 +82,7 @@ $env:VEYRA_TEST_FG_FORCE_MULTIPLIER='1'
 
 | 项 | 状态 | 说明 / 下一步 |
 | --- | --- | --- |
-| XeSS 节奏 hook（A-2） | **未移植（移植计划已细化）** | 上游 `XeFGPacing.h` RVA/算法逐项核实完毕，见 [XeSS 节奏移植计划](XESS_PACING_PORT_PLAN_2026-09-16.md)：只移植核心调度调用（present thunk `0x25C0` + 调度器 `0x21EE30`），先不移植时间戳/截止时间层。>2X 的生成帧间距仍标注**未验证** |
+| XeSS 节奏 hook（A-2） | **已移植并实测（`9dd…`：见提交记录）** | present thunk `0x25C0` 接管 + 提供方调度器 `0x21EE30`，只在 >2X 安装、退出回滚。4K/30fps 素材 4X 实测：`refused=0`、同 burst 内间距 mean≈**8.303ms**（目标 33.33/4=8.33ms）、min≈8.14ms、max≈8.42ms，339 真实 / 1005 生成、exit 0；关掉 hook 的对照里 4X 完全没有调度发生。**未移植**：上游时间戳/截止时间层与墙钟回退。顺带修掉 XeSS 2X 静默退回原生呈现的 bug（现在 280 真实 / 276 生成） |
 | 40 系 DLSS MFG 解锁（C-2） | **已实现并提交（`9179449`）** | 移植 `ImDreamt/MFGAdaUnlock-RenoDx`（MIT）：两处 `0x1b0` 架构比较改写、PTX 中点修正（注入 temporal 参数 + 104 处 0.5 替换 + fatbin 截断逼 JIT）、8 个 `dlfg_kernel` 槽位重定向，全程进程内、可回滚。本机结构扫描与 `--apply-test` 全部通过（gates=2/descriptors=8/ptx=99362/midpoints=104；`applied=1 readBack=1 restored=1`），50 系 6X 完全不受影响。**行为未验证**：3X/4X 是否真出运动帧、Ada 缺硬件 flip metering 是否冻结，需要 40 系实机 |
 | 30 系原生 2X（D） | **决策：不移植无许可证的上游，改用 FSR 补帧** | `dlssg_for_sm86` 无许可证 → 项目规则禁止复制；它本质是把 DLSSG 代理成 FSR3 补帧，而 Veyra 自己的 FSR 帧生成（E）已经能提供同样的 2X 且厂商无关。详见 [30 系补帧决策](DLSSG_30SERIES_DECISION_2026-09-16.md)。**未验证**：FSR 补帧在 RTX 30 实机上能否运行 |
 | FSR 帧生成（E） | **已完成并实测（2X）** | 见上文 §一.5 与 [接入记录](FSR_FRAMEGEN_INTEGRATION_2026-09-16.md)；4.0.1 ML 需 AMD 卡复测 |

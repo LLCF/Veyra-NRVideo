@@ -2,10 +2,23 @@
 #include "veyra/Log.h"
 #include "veyra/RuntimePaths.h"
 #include "veyra/gfx/XessMfgUnlock.h"
+#include "veyra/gfx/XessPacing.h"
 #ifdef VEYRA_HAS_XESS
 #include <xess_fg/xefg_swapchain_d3d12.h>
 #include <xell/xell_d3d12.h>
 #endif
+
+namespace {
+// Local wide->narrow for log lines (the presenter's detail strings are wide).
+std::string narrowDetail(const std::wstring& value){
+    if(value.empty())return {};
+    const int length=WideCharToMultiByte(CP_UTF8,0,value.c_str(),int(value.size()),nullptr,0,nullptr,nullptr);
+    if(length<=0)return {};
+    std::string text(size_t(length),'\0');
+    WideCharToMultiByte(CP_UTF8,0,value.c_str(),int(value.size()),text.data(),length,nullptr,nullptr);
+    return text;
+}
+}
 
 namespace veyra::gfx {
 struct XessPresenter::Impl {
@@ -47,6 +60,9 @@ struct XessPresenter::Impl {
         if(ll&&xellDestroyContextFn)check(xellDestroyContextFn(ll),"XeLL destroy",true);
         // Restore the provider bytes only after every XeFG/XeLL context is gone.
         XessMfgUnlock::release();
+        // Same rule for the pacing thunk: the present hook is removed before the
+        // provider module is released.
+        XessPacing::release();
         if(fgDll)FreeLibrary(fgDll);if(llDll)FreeLibrary(llDll);
     }
 #endif
@@ -87,7 +103,10 @@ bool XessPresenter::initialize(ID3D12Device* device,ID3D12CommandQueue* queue,ID
     // Multi-frame generation needs the audited OptiScaler unlock before the
     // first XeFG context exists; 2X deliberately leaves the provider untouched.
     p.requestedGenerated=fgMultiplier>1?fgMultiplier-1:0;
-    if(p.requestedGenerated>0){
+    // 2X is the provider's stock behaviour: no unlock, no pacing, and the
+    // presenter must not treat "nothing to unlock" as a failure (that used to
+    // drop the whole XeSS session back to native presentation).
+    if(p.requestedGenerated>1){
         const auto unlock=XessMfgUnlock::apply(p.fgDll,p.requestedGenerated);
         p.maxInterpolations=unlock.maxInterpolations;
         veyra::log::info("xess-mfg",std::format("unlock requestedGenerated={} applied={} identityVerified={} recognisedBuild={}",
@@ -95,6 +114,16 @@ bool XessPresenter::initialize(ID3D12Device* device,ID3D12CommandQueue* queue,ID
         if(!unlock.applied){
             log::error("xess-mfg",std::format("unlock unavailable for {}X request; keeping stock presentation",p.requestedGenerated+1));
             return false;
+        }
+        // Above 2X the provider presents a burst of generated frames back to
+        // back; hand its intermediate frames to its own frame scheduler.
+        if(GetEnvironmentVariableW(L"VEYRA_DISABLE_XESS_PACING",nullptr,0)==0){
+            const auto pacing=XessPacing::install(p.fgDll,p.requestedGenerated);
+            log::info("xess-pacing",std::format("install requestedGenerated={} installed={} structureVerified={} detail={}",
+                p.requestedGenerated,pacing.installed,pacing.structureVerified,
+                narrowDetail(pacing.detail)));
+        }else{
+            log::warn("xess-pacing","disabled by VEYRA_DISABLE_XESS_PACING (diagnostic only)");
         }
     }
     if(!p.check(p.xellD3D12CreateContextFn(device,&p.ll),"XeLL create",true)||!p.check(p.xefgSwapChainD3D12CreateContextFn(device,&p.fg),"Create",true))return false;
