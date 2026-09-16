@@ -49,6 +49,41 @@ namespace {
 constexpr int64_t usPerSecond = 1000000;
 float uintBits(uint32_t v) { return std::bit_cast<float>(v); }
 
+// N1 packed capture ingress helpers. Codes match pipeline::packedInputCode:
+// 1 BGR24, 2 RGB555, 3 RGB565, 4 UYVY, 5 YVYU.
+unsigned packedIngressRowBytes(uint32_t code,unsigned width){
+    return code==1?width*3:width*2;
+}
+unsigned packedIngressTexels(uint32_t code,unsigned width){
+    return (packedIngressRowBytes(code,width)+3)/4;
+}
+AVPixelFormat packedIngressFormat(uint32_t code){
+    switch(code){
+    case 1:return AV_PIX_FMT_BGR24;
+    case 2:return AV_PIX_FMT_RGB555LE;
+    case 3:return AV_PIX_FMT_RGB565LE;
+    case 4:return AV_PIX_FMT_UYVY422;
+    case 5:return AV_PIX_FMT_YVYU422;
+    default:break;
+    }
+    return AV_PIX_FMT_NONE;
+}
+// Coarse luma sample for scene analysis; mirrors the CPU luma weights.
+uint8_t packedIngressLuma(const AVFrame& frame,uint32_t code,unsigned x,unsigned y){
+    const auto* p=frame.data[0]+ptrdiff_t(y)*frame.linesize[0];
+    switch(code){
+    case 1:{const auto* q=p+x*3;return uint8_t((54*unsigned(q[2])+183*unsigned(q[1])+19*unsigned(q[0])+128)>>8);}
+    case 2:{const unsigned w=unsigned(p[x*2])|(unsigned(p[x*2+1])<<8);
+        const unsigned r=(w>>10)&31,g=(w>>5)&31,b=w&31;return uint8_t((54*(r<<3|r>>2)+183*(g<<3|g>>2)+19*(b<<3|b>>2)+128)>>8);}
+    case 3:{const unsigned w=unsigned(p[x*2])|(unsigned(p[x*2+1])<<8);
+        const unsigned r=(w>>11)&31,g=(w>>5)&63,b=w&31;return uint8_t((54*(r<<3|r>>2)+183*(g<<2|g>>4)+19*(b<<3|b>>2)+128)>>8);}
+    case 4:return p[x*2+1]; // UYVY: Y0 follows U
+    case 5:return p[x*2];   // YVYU: Y0 leads
+    default:break;
+    }
+    return 0;
+}
+
 } // namespace
 
 EnhanceGraph::EnhanceGraph(gfx::D3D12DeviceContext& context, gfx::CommandSlotRing& ring)
@@ -167,9 +202,10 @@ bool EnhanceGraph::createResources()
     upZeroMotion_ = makeUploadBuffer(context_.device(), dPitch_ * workH_);
     lumaTex_ = makeTexture(context_.device(), srcW_, srcH_, desc_.wideYuvInput()?DXGI_FORMAT_R16_UNORM:DXGI_FORMAT_R8_UNORM, true);
     chromaTex_ = makeTexture(context_.device(), (srcW_+1) / 2, (srcH_+1) / 2, desc_.wideYuvInput()?DXGI_FORMAT_R16G16_UNORM:DXGI_FORMAT_R8G8_UNORM, true);
-    if(desc_.rgbInput||desc_.yuy2Input){
-        if(desc_.yuy2Input&&(srcW_%2||desc_.rgbInput))return false;
-        const unsigned packedWidth=desc_.yuy2Input?srcW_/2:srcW_;
+    if(desc_.rgbInput||desc_.yuy2Input||desc_.packedInput){
+        if((desc_.yuy2Input||desc_.packedInput==4||desc_.packedInput==5)&&srcW_%2)return false;
+        if(desc_.rgbInput&&(desc_.yuy2Input||desc_.packedInput))return false;
+        const unsigned packedWidth=desc_.packedInput?packedIngressTexels(desc_.packedInput,srcW_):desc_.yuy2Input?srcW_/2:srcW_;
         rgbPitch_=(size_t(packedWidth)*4+255)&~size_t(255);
         rgbTex_=makeTexture(context_.device(),packedWidth,srcH_,DXGI_FORMAT_R8G8B8A8_UNORM,false);
         if(!rgbTex_)return false;
@@ -771,7 +807,8 @@ bool EnhanceGraph::createComputePasses()
     if(!residualPass_.loadShader("NrResidualComposite.dxil",cs)||!residualPass_.create(context_.device(),cs,4,3,1,24))return false;
     if(!flowAdaptPass_.loadShader("FlowAdapt.dxil",cs)||!flowAdaptPass_.create(context_.device(),cs,3,1,1))return false;
     if (!yuvPass_.loadShader("YuvToLinearRgb.dxil", cs) || !yuvPass_.create(context_.device(), cs, 8, 2, 1, 12)) return false;
-    if((desc_.rgbInput||desc_.yuy2Input)&&(!rgbPass_.loadShader(desc_.yuy2Input?"Yuy2ToLinear.dxil":"RgbToLinear.dxil",cs)||!rgbPass_.create(context_.device(),cs,8,1,1)))return false;
+    const char* rgbShader=desc_.packedInput?"PackedCaptureToLinear.dxil":desc_.yuy2Input?"Yuy2ToLinear.dxil":"RgbToLinear.dxil";
+    if((desc_.rgbInput||desc_.yuy2Input||desc_.packedInput)&&(!rgbPass_.loadShader(rgbShader,cs)||!rgbPass_.create(context_.device(),cs,8,1,1)))return false;
     if (!encPass_.loadShader("ParityEncode.dxil", cs) || !encPass_.create(context_.device(), cs, 8, 1, 1)) return false;
     if (!decPass_.loadShader("ParityDecode.dxil", cs) || !decPass_.create(context_.device(), cs, 8)) return false;
     if (!blitPass_.loadShader("ScaleBlit.dxil", cs) || !blitPass_.create(context_.device(), cs, 19, 1, 1)) return false;
@@ -843,7 +880,7 @@ bool EnhanceGraph::createViews()
         stagedSrv(videoSrOutput_.Get(),DXGI_FORMAT_R8G8B8A8_UNORM,hdrVideoSrPass_,6);
     }
     // Immutable per-resource views.
-    if(desc_.rgbInput||desc_.yuy2Input){
+    if(desc_.rgbInput||desc_.yuy2Input||desc_.packedInput){
         stagedSrv(rgbTex_.Get(),DXGI_FORMAT_R8G8B8A8_UNORM,rgbPass_,0);
         makeUav(context_.device(),srcRgba_.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT,cpu(rgbPass_,1));
     }
@@ -960,7 +997,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
             hdr10Output()?"PQ-BT2020-RGB10":desc_.hdrOutput?"scRGB-FP16":"sRGB-RGB8",
             desc_.hdrOutput?"none":"BT2390-luminance+neutral-ray-gamut-compression"));
     }
-    if (resolved.isHdrPath()&&(!desc_.hdrInput||desc_.rgbInput||desc_.yuy2Input)) {
+    if (resolved.isHdrPath()&&(!desc_.hdrInput||desc_.rgbInput||desc_.yuy2Input||desc_.packedInput)) {
         veyra::log::error("graph", "HDR input requires an explicit YUV HDR contract; RGB/YUY2 HDR ingress is unsupported"); return false;
     }
     if(std::abs(ptsMs)>9e13){veyra::log::error("timeline","PTS outside representable range");return false;}
@@ -1019,14 +1056,16 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
         previousLuma_=std::move(sample);
     };
 
-    if(desc_.rgbInput||desc_.yuy2Input){
-        if(desc_.yuy2Input?frame->format!=AV_PIX_FMT_YUYV422:(frame->format!=AV_PIX_FMT_RGBA&&frame->format!=AV_PIX_FMT_BGRA&&frame->format!=AV_PIX_FMT_RGB0&&frame->format!=AV_PIX_FMT_BGR0)){
-            veyra::log::error("graph","direct RGB input contract requires packed RGBA/BGRA/RGB0/BGR0 frame");return false;
+    if(desc_.rgbInput||desc_.yuy2Input||desc_.packedInput){
+        const bool packed=desc_.packedInput!=0;
+        if(packed?frame->format!=packedIngressFormat(desc_.packedInput):(desc_.yuy2Input?frame->format!=AV_PIX_FMT_YUYV422:(frame->format!=AV_PIX_FMT_RGBA&&frame->format!=AV_PIX_FMT_BGRA&&frame->format!=AV_PIX_FMT_RGB0&&frame->format!=AV_PIX_FMT_BGR0))){
+            veyra::log::error("graph",std::format("direct capture input contract mismatch packing={} frameFormat={}",desc_.packedInput,int(frame->format)));return false;
         }
-        if(frame->width!=int(srcW_)||frame->height!=int(srcH_)||!frame->data[0]||std::abs(int64_t(frame->linesize[0]))<int64_t(srcW_)*(desc_.yuy2Input?2:4))return false;
+        const unsigned ingressRowBytes=packed?packedIngressRowBytes(desc_.packedInput,srcW_):srcW_*(desc_.yuy2Input?2:4);
+        if(frame->width!=int(srcW_)||frame->height!=int(srcH_)||!frame->data[0]||std::abs(int64_t(frame->linesize[0]))<int64_t(ingressRowBytes))return false;
         for(uint32_t y=0;y<srcH_;++y){
             auto* dst=mappedRgb_[parity]+y*rgbPitch_;const auto* src=frame->data[0]+ptrdiff_t(y)*frame->linesize[0];
-            if(desc_.yuy2Input||frame->format==AV_PIX_FMT_RGBA)std::memcpy(dst,src,size_t(srcW_)*(desc_.yuy2Input?2:4));
+            if(packed||desc_.yuy2Input||frame->format==AV_PIX_FMT_RGBA)std::memcpy(dst,src,size_t(ingressRowBytes));
             else for(uint32_t x=0;x<srcW_;++x){
                 const bool bgr=frame->format==AV_PIX_FMT_BGRA||frame->format==AV_PIX_FMT_BGR0;
                 dst[x*4]=src[x*4+(bgr?2:0)];dst[x*4+1]=src[x*4+1];dst[x*4+2]=src[x*4+(bgr?0:2)];
@@ -1037,15 +1076,17 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
             std::vector<uint8_t> sample;sample.reserve(64*36);
             const bool bgr=frame->format==AV_PIX_FMT_BGRA||frame->format==AV_PIX_FMT_BGR0;
             for(unsigned y=0;y<36;++y)for(unsigned x=0;x<64;++x){
-                const auto* p=frame->data[0]+ptrdiff_t(y*srcH_/36)*frame->linesize[0]+(x*srcW_/64)*(desc_.yuy2Input?2:4);
-                sample.push_back(desc_.yuy2Input?p[0]:uint8_t((54*unsigned(p[bgr?2:0])+183*unsigned(p[1])+19*unsigned(p[bgr?0:2])+128)>>8));
+                const unsigned sx=x*srcW_/64,sy=y*srcH_/36;
+                if(packed)sample.push_back(packedIngressLuma(*frame,desc_.packedInput,sx,sy));
+                else{const auto* p=frame->data[0]+ptrdiff_t(sy)*frame->linesize[0]+sx*(desc_.yuy2Input?2:4);
+                    sample.push_back(desc_.yuy2Input?p[0]:uint8_t((54*unsigned(p[bgr?2:0])+183*unsigned(p[1])+19*unsigned(p[bgr?0:2])+128)>>8));}
             }
             analyzeLuma(std::move(sample));
         }
         tracker_.transition(list,rgbTex_.Get(),D3D12_RESOURCE_STATE_COPY_DEST);
         D3D12_TEXTURE_COPY_LOCATION dst{},src{};dst.pResource=rgbTex_.Get();dst.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         src.pResource=upRgb_[parity].Get();src.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        src.PlacedFootprint.Footprint={DXGI_FORMAT_R8G8B8A8_UNORM,desc_.yuy2Input?srcW_/2:srcW_,srcH_,1,UINT(rgbPitch_)};
+        src.PlacedFootprint.Footprint={DXGI_FORMAT_R8G8B8A8_UNORM,packed?packedIngressTexels(desc_.packedInput,srcW_):desc_.yuy2Input?srcW_/2:srcW_,srcH_,1,UINT(rgbPitch_)};
         list->CopyTextureRegion(&dst,0,0,0,&src,nullptr);
         tracker_.transition(list,rgbTex_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     } else if (frame->format == AV_PIX_FMT_D3D12) {
@@ -1153,9 +1194,9 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
 
     // 2. YUV -> RGBA16F.
     tracker_.transition(list, srcRgba_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    if(desc_.rgbInput||desc_.yuy2Input){
+    if(desc_.rgbInput||desc_.yuy2Input||desc_.packedInput){
         const float c[8]={uintBits(srcW_),uintBits(srcH_),uintBits(workingTransferCode(resolved)),uintBits(resolved.range==ColorRange::Limited?1u:0u),
-            resolved.range==ColorRange::Full?0.0f:1.0f,resolved.matrix==YuvMatrix::BT2020NCL?2.0f:resolved.matrix==YuvMatrix::BT601?0.0f:1.0f,resolved.primaries==ColorPrimaries::BT2020?1.0f:0.0f,0};
+            resolved.range==ColorRange::Full?0.0f:1.0f,resolved.matrix==YuvMatrix::BT2020NCL?2.0f:resolved.matrix==YuvMatrix::BT601?0.0f:1.0f,resolved.primaries==ColorPrimaries::BT2020?1.0f:0.0f,uintBits(desc_.packedInput)};
         rgbPass_.bind(list,c,gpuHandleOf(rgbPass_,0).ptr,gpuHandleOf(rgbPass_,1).ptr);
         list->Dispatch((srcW_+15)/16,(srcH_+15)/16,1);
     }else{

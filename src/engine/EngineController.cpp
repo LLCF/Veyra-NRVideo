@@ -203,6 +203,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 if(physicalCapture)captureSource.setAudioIngress(unsigned(options.settings.captureAudio));
                 if(physicalCapture)captureSource.setVerticalFlip(options.settings.captureFlipVertical);
                 if(physicalCapture)captureSource.setBufferMode(unsigned(options.settings.captureBuffer));
+                if(physicalCapture)captureSource.setCpuUnpack(options.captureCpuUnpack);
 #ifdef VEYRA_ENABLE_REMOTEPLAY
                 if(remote){
                     status(L"正在连接 PS5…");
@@ -251,6 +252,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
             gd.rgbInput=isImage||(isCapture&&activeSource->info().color.pixelFormat==pipeline::SourcePixelFormat::Bgra8);
             gd.captureBitDepth=activeSource->info().color.pixelFormat==pipeline::SourcePixelFormat::P010?10:activeSource->info().color.pixelFormat==pipeline::SourcePixelFormat::P016?16:8;
             gd.yuy2Input=isCapture&&activeSource->info().color.pixelFormat==pipeline::SourcePixelFormat::Yuy2;gd.stillImage=isImage;
+            gd.packedInput=isCapture?pipeline::packedInputCode(activeSource->info().color.pixelFormat):0;
             const auto resolution=pipeline::ResolutionPlan::make({width,height},options.sr,options.snapshot().nrPolicy,isImage,options.settings.revision,options.settings.srTarget,options.settings.lowLatency&&options.nr);
             gd.workWidth=resolution.base.width;gd.workHeight=resolution.base.height;gd.nrWidth=resolution.nr.width;gd.nrHeight=resolution.nr.height;gd.flowWidth=resolution.flow.width;gd.flowHeight=resolution.flow.height;
             const bool nvidiaAdapter=ctx.adapter().isNvidia;

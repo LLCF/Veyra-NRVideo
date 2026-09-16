@@ -25,10 +25,9 @@ template<class Check> void captureFormatCases(Check check){
         check(!copyCaptureSample(l,bytes.data(),bytes.size()-1,*f)&&f->data[0][0]==previous,"short sample rejected before writes");bytes[0]=1;
         bool exact=true;
         for(unsigned y=0;y<4;++y){const auto* s=bytes.data()+(l.bottomUp?3-y:y)*l.stride;const auto* d=f->data[0]+y*f->linesize[0];
-            if(l.packing==CapturePacking::Bgr24){for(unsigned x=0;x<4;++x)for(unsigned c=0;c<3;++c)exact&=d[x*4+c]==s[x*3+c];}
-            else if(l.packing==CapturePacking::Uyvy){for(unsigned x=0;x<8;x+=4)exact&=d[x]==s[x+1]&&d[x+1]==s[x]&&d[x+2]==s[x+3]&&d[x+3]==s[x+2];}
-            else if(l.packing==CapturePacking::Yvyu){for(unsigned x=0;x<8;x+=4)exact&=d[x]==s[x]&&d[x+1]==s[x+3]&&d[x+2]==s[x+2]&&d[x+3]==s[x+1];}
-            else if(l.packing!=CapturePacking::Rgb555&&l.packing!=CapturePacking::Rgb565)exact&=memcmp(d,s,l.rowBytes)==0;
+            // N1: every packed capture format keeps the driver's bytes 1:1;
+            // the GPU upload shader does the unpack, so rows compare raw.
+            exact&=memcmp(d,s,l.rowBytes)==0;
         }
         for(unsigned p=1;p<l.planes;++p)for(unsigned y=0;y<2;++y){const auto* s=bytes.data()+(p==1?l.chromaOffset:l.secondChromaOffset)+y*l.chromaStride;const auto* d=f->data[p]+y*f->linesize[p];
             if(l.packing==CapturePacking::Nv21)for(unsigned x=0;x<l.chromaRowBytes;x+=2)exact&=d[x]==s[x+1]&&d[x+1]==s[x];else exact&=memcmp(d,s,l.chromaRowBytes)==0;}
@@ -46,9 +45,19 @@ template<class Check> void captureFormatCases(Check check){
     t.subtype=fourcc("YV12");check(captureMediaLayout(t,l)&&l.chromaOffset==20&&l.secondChromaOffset==16,"YV12 V precedes U in incoming memory");
     for(const auto id:{MEDIASUBTYPE_RGB555,MEDIASUBTYPE_RGB565}){
         t.subtype=id;captureMediaLayout(t,l);std::vector<uint8_t> raw(l.sampleBytes,255);AVFrame* f=av_frame_alloc();f->width=4;f->height=4;f->format=l.format;av_frame_get_buffer(f,32);
-        check(copyCaptureSample(l,raw.data(),raw.size(),*f)&&f->data[0][0]==255&&f->data[0][1]==255&&f->data[0][2]==255,"RGB555/565 full-scale expands to white");
+        check(copyCaptureSample(l,raw.data(),raw.size(),*f)&&f->data[0][0]==255&&f->data[0][1]==255,"RGB555/565 keep the driver's white word for the GPU unpack");
         for(unsigned y=0;y<4;++y){raw[y*l.stride]=0;raw[y*l.stride+1]=id==MEDIASUBTYPE_RGB565?0xf8:0x7c;}
-        check(copyCaptureSample(l,raw.data(),raw.size(),*f)&&f->data[0][0]==0&&f->data[0][1]==0&&f->data[0][2]==255,"RGB555/565 red channel masks");av_frame_free(&f);
+        check(copyCaptureSample(l,raw.data(),raw.size(),*f)&&f->data[0][0]==0&&f->data[0][1]==(id==MEDIASUBTYPE_RGB565?0xf8:0x7c),"RGB555/565 red mask bytes are preserved for the GPU unpack");av_frame_free(&f);
+    }
+    // N1: the packed capture contract and the legacy CPU-unpack rollback.
+    {
+        vi.bmiHeader.biWidth=4;vi.bmiHeader.biHeight=4;vi.bmiHeader.biSizeImage=0;t.subtype=MEDIASUBTYPE_RGB565;
+        CaptureMediaLayout packed;check(captureMediaLayout(t,packed)&&packed.format==AV_PIX_FMT_RGB565LE,"N1 keeps the driver packing in the frame contract");
+        CaptureMediaLayout legacy=packed;check(captureLegacyCpuLayout(legacy)&&legacy.format==AV_PIX_FMT_BGR0,"legacy CPU-unpack maps RGB565 back to BGR0");
+        std::vector<uint8_t> raw(legacy.sampleBytes,255);AVFrame* f=av_frame_alloc();f->width=4;f->height=4;f->format=legacy.format;av_frame_get_buffer(f,16);
+        check(copyCaptureSample(legacy,raw.data(),raw.size(),*f)&&f->data[0][0]==255&&f->data[0][2]==255&&f->data[0][3]==255,"legacy CPU-unpack still expands RGB565 to opaque BGR0");av_frame_free(&f);
+        t.subtype=fourcc("UYVY");CaptureMediaLayout uy;check(captureMediaLayout(t,uy)&&uy.format==AV_PIX_FMT_UYVY422,"N1 keeps UYVY packing in the frame contract");
+        CaptureMediaLayout uyLegacy=uy;check(captureLegacyCpuLayout(uyLegacy)&&uyLegacy.format==AV_PIX_FMT_YUYV422,"legacy CPU-unpack maps UYVY back to YUY2");vi.bmiHeader.biWidth=4;
     }
     // Orientation contract: the DIB sign decides whether ingest flips, the
     // manual override inverts that decision, and planar chroma follows luma.

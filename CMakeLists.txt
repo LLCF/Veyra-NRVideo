@@ -221,6 +221,7 @@ endif()
 veyra_add_compute_shader(veyra_shader_yuv_to_rgb YuvToLinearRgb)
 veyra_add_compute_shader(veyra_shader_rgb_to_linear RgbToLinear)
 veyra_add_compute_shader(veyra_shader_yuy2_to_linear Yuy2ToLinear)
+veyra_add_compute_shader(veyra_shader_packed_capture PackedCaptureToLinear)
 add_dependencies(veyra_shader_rgb_to_linear veyra_shader_yuy2_to_linear)
 # ScaleBlit: working frame -> swapchain backbuffer (Phase 6 present path).
 veyra_add_compute_shader(veyra_shader_scale_blit ScaleBlit)
@@ -392,7 +393,7 @@ if(TARGET veyra_ngx AND TARGET veyra_nvof AND VEYRA_FFMPEG_ROOT)
   add_dependencies(veyra_pipeline
     veyra_shader_yuv_to_rgb veyra_shader_rgb_to_linear veyra_shader_parity_encode
     veyra_shader_parity_decode veyra_shader_scale_blit
-    veyra_shader_nv12_upload veyra_shader_nvof_densify)
+    veyra_shader_nv12_upload veyra_shader_nvof_densify veyra_shader_packed_capture)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -524,6 +525,11 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
   add_executable(veyra_repair_parameter_tests tests/integration/RepairParameterTests.cpp)
   add_executable(veyra_image_dimension_tests tests/integration/ImageDimensionTests.cpp)
   add_executable(veyra_capture_color_probe tools/capture_color_probe/main.cpp)
+  add_executable(veyra_capture_copy_bench tools/capture_copy_bench/main.cpp)
+  target_compile_features(veyra_capture_copy_bench PRIVATE cxx_std_20)
+  target_compile_options(veyra_capture_copy_bench PRIVATE /utf-8 /WX-)
+  target_compile_definitions(veyra_capture_copy_bench PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_link_libraries(veyra_capture_copy_bench PRIVATE veyra_engine)
   add_executable(veyra_decode_profile_probe tools/decode_profile_probe/main.cpp)
   target_compile_features(veyra_decode_profile_probe PRIVATE cxx_std_20)
   target_compile_options(veyra_decode_profile_probe PRIVATE /utf-8 /WX-)

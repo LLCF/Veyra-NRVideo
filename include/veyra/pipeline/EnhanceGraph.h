@@ -81,6 +81,9 @@ struct EnhanceGraphDesc {
     bool highQualityPresentation = false; // PS5 ordinary scaling, no AI SR
     bool rgbInput = false;       // allocate direct RGBA ingestion before NGX creation
     bool yuy2Input = false;      // packed Y0 U Y1 V -> linear FP16; never subsample to NV12
+    // N1: packed capture ingress (1 BGR24, 2 RGB555, 3 RGB565, 4 UYVY, 5 YVYU).
+    // The driver's bytes are uploaded 1:1 and unpacked by the upload shader.
+    uint32_t packedInput = 0;
     bool stillImage = false;     // no temporal motion/FG history for a single image
     uint32_t nrWidth=0,nrHeight=0; // zero preserves legacy native working extent
     uint32_t flowWidth=0,flowHeight=0; // zero preserves legacy source-space NVOF extent

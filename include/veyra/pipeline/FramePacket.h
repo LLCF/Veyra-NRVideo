@@ -65,7 +65,26 @@ enum class SourcePixelFormat : uint8_t {
     Bgra8,     // 8-bit BGRA
     Rgba16F,   // canonical linear working format
     P016,      // 16-bit capture storage; does not imply HDR transfer
+    // N1 packed capture formats: the driver's bytes reach the GPU 1:1 and the
+    // upload shader unpacks them (see EnhanceGraphDesc::packedInput).
+    Bgr24,     // RGB24 DIB, BGR byte order
+    Rgb555,    // 16-bit 5:5:5 DIB
+    Rgb565,    // 16-bit 5:6:5 DIB
+    Uyvy,      // UYVY 4:2:2
+    Yvyu,      // YVYU 4:2:2
 };
+// Value carried in EnhanceGraphDesc::packedInput; 0 means "not a packed input".
+constexpr uint32_t packedInputCode(SourcePixelFormat format) {
+    switch (format) {
+    case SourcePixelFormat::Bgr24: return 1;
+    case SourcePixelFormat::Rgb555: return 2;
+    case SourcePixelFormat::Rgb565: return 3;
+    case SourcePixelFormat::Uyvy: return 4;
+    case SourcePixelFormat::Yvyu: return 5;
+    default: break;
+    }
+    return 0;
+}
 
 enum class ColorRange : uint8_t { Unknown = 0, Limited, Full };
 enum class YuvMatrix : uint8_t { Unknown = 0, BT601, BT709, BT2020NCL, BT2020CL };

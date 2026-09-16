@@ -146,6 +146,8 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
     // Video-pin allocator policy (0 auto, 1 minimum, 2 driver default); read
     // when the capture graph is built. See CaptureBuffer.h.
     unsigned bufferMode=0;
+    // N1 diagnostic: legacy per-pixel CPU unpack instead of GPU unpack.
+    bool cpuUnpack=false;
     // Manual capture flip; read by the DirectShow callback thread.
     std::atomic<bool> verticalFlip{false};
     std::unique_ptr<WasapiAudioInput> wasapi;
@@ -256,6 +258,12 @@ void CaptureCardSource::setVerticalFlip(bool enabled){
     if(p.verticalFlip.exchange(enabled)==enabled)return;
     log::info("capture-flip",std::format("manual vertical flip={} (applies to the next sample; ingest only)",enabled?1:0));
 }
+void CaptureCardSource::setCpuUnpack(bool enabled){
+    auto& p=*p_;
+    if(p.cpuUnpack==enabled)return;
+    p.cpuUnpack=enabled;
+    log::warn("capture-unpack",std::format("legacy CPU per-pixel unpack={} (diagnostic; takes effect on the next connect)",enabled?1:0));
+}
 bool CaptureCardSource::setAudioGain(float gain){
     if(p_->wasapi){p_->wasapi->setGain(gain);return p_->wasapi->snapshot().available;}
     auto& p=*p_;if(p.audioSession){p.audioSession->setGain(gain);return p.audioSession->snapshot().available;}if(!p.graph||!p.audioFilter)return false;
@@ -343,6 +351,7 @@ bool CaptureCardSource::configure(const SourceOpenDesc& desc){close();p_->lastAu
     }
     freeType(native);const bool layoutValid=SUCCEEDED(hr)&&captureMediaLayout(connected,p.layout);freeType(&connected,false);
     if(!layoutValid){log::error("capture",std::format("unsupported negotiated layout/connect failure hr=0x{:08X}",uint32_t(hr)));return false;}
+    if(p.cpuUnpack&&captureLegacyCpuLayout(p.layout))log::warn("capture-unpack",std::format("legacy CPU unpack path active packing={} format={} (per-pixel conversion stays on the callback thread)",int(p.layout.packing),int(p.layout.format)));
     const unsigned colorOverride=selection.colorOverride;
     if(colorOverride>2)return false;
     if(colorOverride){

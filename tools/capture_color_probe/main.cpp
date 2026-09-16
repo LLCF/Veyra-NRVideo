@@ -30,6 +30,7 @@ int wmain(int argc,wchar_t**argv){
     gd.sourceWidth=gd.workWidth=info.width;gd.sourceHeight=gd.workHeight=info.height;
     gd.rgbInput=info.color.pixelFormat==pipeline::SourcePixelFormat::Bgra8;
     gd.yuy2Input=info.color.pixelFormat==pipeline::SourcePixelFormat::Yuy2;
+    gd.packedInput=pipeline::packedInputCode(info.color.pixelFormat);
     gd.captureBitDepth=info.color.pixelFormat==pipeline::SourcePixelFormat::P010?10:info.color.pixelFormat==pipeline::SourcePixelFormat::P016?16:8;
     gd.enableNr=gd.enableFg=false;gd.noFeatures=true;
     const HWND window=CreateWindowExW(0,L"STATIC",L"Veyra color diagnostic",WS_POPUP,0,0,info.width,info.height,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);

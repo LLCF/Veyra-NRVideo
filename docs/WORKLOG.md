@@ -1,5 +1,14 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-16 采集链路 N1：逐像素转换从 CPU 挪到 GPU
+
+- 采集侧：`captureMediaLayout` 对 UYVY/YVYU/BGR24/RGB555/RGB565 保留驱动真实 packing（UYVY422/YVYU422/BGR24/RGB555LE/RGB565LE）；`copyCaptureSample` 改为按行原样拷贝（保留 DIB 方向契约、手动翻转与 YUV 色度行跟随）；新增 `captureLegacyCpuLayout` + `--capture-cpu-unpack` 诊断开关，旧 BGR0/YUY2 逐像素转换仍可回退。
+- GPU 侧：`EnhanceGraphDesc::packedInput`（1 BGR24 / 2 RGB555 / 3 RGB565 / 4 UYVY / 5 YVYU）；上传把驱动字节 1:1 放进 R8G8B8A8 纹理（纹素宽 = ceil(rowBytes/4)）；新增 `PackedCaptureToLinear.dxil` 统一 unpack（BGR24 取字节、RGB555/565 位扩展、UYVY/YVYU 双像素取样 + 既有颜色合同），`Yuy2ToLinear`/`RgbToLinear` 原路径不动。
+- 拷贝优化：翻转时源正序读、目标倒序写（原来倒序读源把 4K RGB24 拖到 1.88ms）；无翻转且行距相等时整平面一次 memcpy。
+- 测试：构建 exit 0（含 dxc 编译新 shader）；`veyra_capture_color_tests` failures=0；`veyra_hdr_color_tests` 全 15 格式 × full/limited GPU 用例 pass（新格式 error=0）；修复合同 191/0；预设 66 组 exit 0。
+- 微基准（新工具 `veyra_capture_copy_bench`，4K 3840×2160、30 次/帧，N1 行拷贝 vs 旧 CPU 拆包 ms/帧）：YUY2 0.611；UYVY 0.640 vs 2.47；YVYU 0.595 vs 2.51；RGB24 1.120 vs 5.23；RGB555 0.791 vs 11.06；RGB565 0.828 vs 10.87；NV12 0.199。全部达到 N1 目标（YUY2≤1.0、BGR24≤1.5、UYVY/RGB555/565≤1.2）。
+- 未执行（如实）：真卡冒烟与 delivery 门禁本轮未跑——用户自己的 Veyra 实例（21:33 启动、GPU 71%）正占用采集卡与 GPU，待释放后补跑；"旧 CPU vs 新 GPU 全图逐像素平均/最大误差"未单独做（GPU 用例以黑白/10bit 阶梯验证 error=0）。
+
 ## 2026-09-16 采集链路 N3：格式排序与延迟标注
 
 - `include/veyra/source/CaptureFormatRank.h`（新）：`captureFormatRank` / `captureFormatTier` / `captureFormatTierLabel` / `captureFormatNeedsCostHint`。推荐顺序：NV12/P010 → YUY2 → RGB24/RGB32/ARGB32 → UYVY/YVYU/RGB555/RGB565 → 压缩/需解码（rank 100）。

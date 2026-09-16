@@ -52,6 +52,9 @@ public:
     // match the samples (RGB24 upside-down reports). Applies to the next
     // sample; works for RGB and YUV without touching the device.
     void setVerticalFlip(bool enabled);
+    // N1 diagnostic: keep the legacy per-pixel CPU unpack (BGR0/YUY2 targets)
+    // instead of the GPU unpack path. Applied on the next connect.
+    void setCpuUnpack(bool enabled);
     CaptureMetrics metrics()const;
     void videoPresented(double ptsMs,int64_t host100ns,int64_t arrival100ns);
     void videoReset(bool resetAudio=true);
