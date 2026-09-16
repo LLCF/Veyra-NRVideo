@@ -56,12 +56,13 @@ experimental"*、可能完全不工作。这些 kernel cache 是构建输入的�
 
 | 路线 | 内容 | 状态 |
 | --- | --- | --- |
-| A 原生 DLSS-G | 移植 dashdogy ampere 框架（`ampere_backend` 133KB + `ampere_gpu` 76KB + 契约系统，MIT）+ 自产 SM86 程序 + 30 系实机验证 | 技术可行性已证实，未开工；工程量最大（天级），且需 30 系实机配合 |
-| B FSR 补帧 | Veyra 自带 AMD FidelityFX 帧生成（E 工作流，已实现）。AMD 官方 FSR3 FG 支持 RTX 30 系及以上 | **已完成代码**，待 30 系实机验证（`veyra.exe --fg-fsr --smoke-seconds 10 <视频>`） |
+| A 原生 DLSS-G | 按 dashdogy ampere 机制在 310.7 上重新实现的 `AmpereMfgUnlock`（69 fatbin → sm_86 重建、200 指针槽 + 44 lea + 2 gate 发布、CUDA 预验证、全量回滚） | **2026-09-16 用户授权后已实现**（`4154733`/`3dd5add`），本机机制验证通过；**待 30 系实机验证**（`veyra.exe --fg-multiplier 6 --smoke-seconds 15 <视频>`） |
+| B FSR 补帧 | Veyra 自带 AMD FidelityFX 帧生成（E 工作流，已实现）。AMD 官方 FSR3 FG 支持 RTX 30 系及以上 | 保留为备选；待 30 系实机验证 |
 | C 代理式 | `Nukem9/dlssg-to-fsr3`（GPL-3.0）代理 | 不推荐：它会替换磁盘 DLL 语义，与"进程内修改"路线冲突 |
 
-建议：先用 B 在 30 系实机拿到第一份可用补帧（成本 5 分钟）；是否投入 A 的完整移植
-按用户对"30 系原生 6X"价值/成本的判断另行授权。
+说明：dashdogy 的三个 gate pattern（metadata / create-validation / sl-availability）针对 310.9
+fixture，在 310.7 上 0 匹配，因此 gate 采用 40 系同款两处架构比较（0x1b0→0x170）。若 30 系实机
+发现 provider 仍有 310.7 特有的额外拒绝点，将以实机日志为证据迭代定位。
 
 ## 30 系用户现在的 2X 路径
 

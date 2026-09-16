@@ -208,6 +208,41 @@ Evidence on this machine (RTX 5070, structure and patch mechanics only):
 delivery gate `logs/delivery/d0a266a1e549402ca26c2c8ec8d27022/result.json`.
 Ada behaviour still has to be verified on RTX 40 hardware.
 
+### dashdogy/RTX40MFG-Unlock v1.3.3 — RTX 30 (sm_86) Ampere path (2026-09-16)
+
+Same upstream (MIT, commit `33b41835dc39c5d8ab1ef93efb2449be31139c09`),
+`source/native/ampere_gpu.cpp` (`FindUniqueSm89Ptx`, `BuildAmpereSm86Fatbin`),
+`ampere_cuda_program.cpp` (driver preflight intent) and `ampere_policy.h`
+(sm_86 adapter contract), ported into
+`include/veyra/ngx/AmpereMfgUnlock.h` / `src/ngx/AmpereMfgUnlock.cpp`.
+
+The provider ships zero sm_86 targets; every DLSS-G fatbin only carries sm_89
+PTX and sm_120 PTX/cubin. Veyra rebuilds all 69 fatbins of the audited 310.7
+runtime as single-entry sm_86 PTX programs — 25 registration-table programs
+(8 runs x 25 slots, 200 pointer fields), 38 `.rdata` neural-network programs
+and 6 `.data` auxiliary programs (font/capture/clear) referenced through 44
+RIP-relative `lea` sites — and republishes every reference plus the two
+architecture compares (`0x1b0` -> `0x170`). The temporal program additionally
+receives the same midpoint correction as the Ada path. Ada/Blackwell-only PTX
+constructs (`.e4m3`, `.e5m2`, `wgmma.`, `tcgen05.`, `mmma.sp::ordered_metadata`,
+`sm_90`, `sm_120`) are refused, matching the upstream refusal list.
+
+Veyra additions: module identity is verified against the audited 310.7 build;
+the rebuilt set must load through a private CUDA context (`cuModuleLoadDataEx`)
+before any pointer is published; the allocation window is chosen so every
+RIP-relative displacement stays encodable; every write is recorded and fully
+restored on release; the on-disk DLL is never touched. The upstream native
+cache (cubin) path is not used — dashdogy does not publish those kernels, and
+the published PTX path is sufficient (verified 69/69 through the driver JIT).
+Upstream explicitly labels its RTX 30 support "very early and experimental";
+the same caveat applies here until real Ampere hardware validation.
+
+Local evidence (RTX 5070, structure and mechanics only):
+`veyra_dlssg_ampere_probe` — scan (runs=8, 200 slots, 25+38+6 fatbins, 44 lea,
+2 gates, temporal unique), apply (applied=1, preflight=69/69, readBack=1,
+restored=1), delivery gate
+`logs/delivery/548a606d92484286806f272d4744d2a7/result.json`.
+
 ## dav1d (1.3.0 AV1 playback)
 
 FFmpeg dynamically links dav1d 1.5.4 from the pinned local vcpkg build. The portable package includes its complete aggregated copyright/license text in `licenses/DAV1D-COPYRIGHT.txt` and provenance in `licenses/DAV1D-SPDX.json`. The FFmpeg corresponding-source ZIP includes dav1d source and its vcpkg port. Upstream: https://code.videolan.org/videolan/dav1d . License set recorded by the build: Apache-2.0, BSD-2-Clause, ISC and MIT; retain all notices supplied with the source.

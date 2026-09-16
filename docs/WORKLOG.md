@@ -28,6 +28,18 @@
 - **未验证**：40 系实机行为（6X 真实插帧质量、Ada 缺硬件 flip metering 的冻结风险）仍需用户实机验收；XeSS/FSR/杜比各项边界与上一段一致。
 - **测试包（本轮重打）**：`C:\veyra-test-packages\final-40x6x\Veyra-1.3.1beta-win64-portable.zip`，469,753,546 字节，SHA256 `B0581D3628F744805EBC4324509E32473B8EABECD147D64C96C6193F052B6848`；包内 `Veyra.exe` SHA256 `BBBF0C4E4AB8EC346928E8DD2CD6E073DD28085482AAEAD5E3B20ECBB7A80C68`（与构建树一致）、`runtime/experimental/nvngx_dlssg.dll` 仍为审计原版 `135EAF07…`（补丁只存在于进程内存，磁盘文件未改动）。包内 EXE `--smoke-seconds 5` 播放 4K30 GTAVI exit 0。旧包 `C:\veyra-test-packages\final\` 保留未动（被本包取代）。
 
+### 2026-09-16 RTX 30（sm_86）原生 DLSS-G 解析与实现（用户授权 A 路线）
+
+用户决策："直接开工 A，FSR 终究只是替代方案，还是在隔离区操作"。施工全部在 `codex/framegen-fsr-dolby-20260916` 分支。
+
+- **结构解析（本机实测，非推断）**：审计版 310.7 `nvngx_dlssg.dll` 含 69 个 fatbin，**sm_86 目标 0 个**（100 个 sm_89 PTX + 31 个 sm_120 PTX + 31 个 sm_89 cubin）。引用结构：25 个程序 fatbin 位于 8 组×25 条 48 字节注册表记录的 +8 字段（共 200 个指针槽），38 个 `.rdata` 神经网络 fatbin + 6 个 `.data` 辅助 fatbin（font/capture/clear）各由一条 RIP-relative `lea` 引用（共 44 处）；两处 `cmp …, 0x1b0` 架构门。
+- **上游对照**：dashdogy v1.3.3 的 `ampere_gpu.cpp`（`FindUniqueSm89Ptx`/`BuildAmpereSm86Fatbin`/发布事务）正是同一机制；他的三个 gate pattern（metadata/create-validation/sl-availability）在 310.7 上 **0 匹配**（为 310.9 fixture 设计），故按 310.7 自有结构重新实现，gate 采用 40 系同款两处架构比较（0x1b0→0x170，30/40/50 全放行）。
+- **实现**：`include/veyra/ngx/AmpereMfgUnlock.h` + `src/ngx/AmpereMfgUnlock.cpp`（提交 `4154733`）：把全部 69 个 fatbin 重建为单条目 sm_86 PTX（拒绝 `.e4m3/.e5m2/wgmma./tcgen05./sm_90/sm_120` 等 Ada/Blackwell 专有构造），temporal 程序附带与 40 系一致的中点修正；重建集用 VirtualQuery 在模块 ±1.25 GiB 内分配（保证 lea 位移可编码），发布 200 个指针槽 + 44 个 lea + 2 个 gate，全部记录并可回滚。
+- **预验证**：发布前用私有 CUDA context 逐个 `cuModuleLoadDataEx` 加载重建程序，任一被拒即整体拒绝。本机（5070）实测 `preflight=69/69`。
+- **产品接入**（提交 `3dd5add`）：`EnhanceGraph::applyAmpereMfgUnlock()` 在 FG 能力查询前调用（仅 RTX 30 设备窗口触发）；provider 在 30 系上仍会报 FG 不可用（Ada/Blackwell 门控），当审计版解锁已安装时宽限继续并把缺失的 MultiFrameCountMax 补为审计上限 5（显式更小的报告值仍被尊重）；shutdown 与 Ada 解锁对称释放。
+- **本机证据**（仅结构与机制）：probe `veyra_dlssg_ampere_probe` → scan 全绿（runs=8/200 槽/25+38+6 fatbin/44 lea/2 gate/temporal 唯一）、apply `applied=1 preflight=69/69 readBack=1 restored=1`；delivery 短测 PASS `logs/delivery/548a606d92484286806f272d4744d2a7/result.json`。
+- **未验证（如实）**：RTX 30 实机行为——provider 是否还有 310.7 特有的额外 gate、sm_86 内核的实际插帧质量/性能、以及 dashdogy 自述的 "very early and experimental" 风险（可能部分配置不工作）。需要 30 系机器按 `Veyra.exe --fg-multiplier 6 --smoke-seconds 15 <视频>` 取证并回传日志。
+
 ## 2026-09-15 采集卡直播窗口标题修复（第三方工具“识别不到 Veyra”）
 
 用户反馈除 OBS 外各平台直播工具无法识别“正在采集中的 Veyra”，且顺序敏感：先抓到窗口再开采集卡正常，先开采集卡再抓就抓不到。实机取证确认根因是 Veyra 自己：采集卡来源 `capture:`/`capture2:` 连接串被当文件名写进主窗口标题，实测标题长 776 字符（`Veyra — capture2:<十六进制设备路径>:...`），空闲/播放文件时为正常短名；直播伴侣日志把该标题截断到 259 字符后参与来源命名，其包内前端以 `${exe} ${title}` 命名来源。同场会话的 mediasdk_server 日志显示“采集卡已运行再添加 game 来源”的 hook 通路实际成功（`Load Shared Texture Success, size: 842 x 494`、`OnAutoSwitchMode from Window to Game`、GameSource 连续 60 秒以上有数据），因此本轮不做换链/画面的猜测性改动。
