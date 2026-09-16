@@ -40,6 +40,23 @@ MJPEG 1080p60 7176 帧 / MJPEG 4K18 2150 帧，全部 0 丢帧、无重连。
 **注意**：串流失败后**不要连续猛点重连**——每次失败都会让 PS5 的释放窗口重新计时；
 新版本会自动等待，手动重连时建议等 20 秒以上。
 
+## 40 系的多帧上限：可以到 6X（2026-09-17 澄清）
+
+补丁在运行库里的落点是 `test dl,dl / je <Blackwell-only 检查> / mov esi,5`：**5（6X）本来就是
+默认上限**，"仅 Blackwell"只是附在前面的一道条件分支。我们的补丁把那道分支跳过
+（`0f 84 → eb 04`），注释明确"分支之后的 count/index/profile 限制全部保留"。因此 **40 系补丁后的
+上报上限就是 5（6X）**，UI 会照此提供倍率选项（选项由运行库上报的 `maxGeneratedFrames` 驱动，
+没有硬编码 40 系 = 4X 之类的限制）。
+
+**尚未在 40 系实机验证**（本机只有 50 系），需要确认三件事：
+`FG capability available=true multiFrameMax=5`、实际生成帧数接近 5×、画面稳定
+（**Ada 没有 Blackwell 的 flip metering 硬件，高倍率时序是最大未知**）。
+
+40 系验证命令：
+```powershell
+.\Veyra.exe <任意视频> --fg --fg-multiplier 6 --smoke-seconds 15
+```
+
 ## 采集链路（本次重点）
 
 - **压缩格式不再走系统解码器**：MJPEG/H.264/HEVC/AV1/VP9 由 `ConnectDirect` 直接送入我们的
