@@ -62,9 +62,15 @@ bool EngineController::idle()const{std::lock_guard lock(mutex_);return !busy_&&!
 void EngineController::open(HWND video,const std::wstring& path,PlayerOptions opts){
     const bool captureReplay=opts.captureReplayForTest;
     const bool disableAdmission=opts.captureReplayDisableFgAdmissionForTest;
+    // Diagnostics-only PlayerOptions fields never enter EnhancementSettings;
+    // keep them across the snapshot round-trip below.
+    const bool captureCpuUnpack=opts.captureCpuUnpack;
+    const bool captureDirectIngress=opts.captureDirectIngress;
     {std::lock_guard lock(mutex_);snapshot_={};activeFlow_.reset();previewView_={};fgMultiFrameMaxCap_=0;xessMaxInterpolatedFramesCap_=0;fsrMaxGeneratedFramesCap_=0;snapshot_.sessionId=++sessionId_;snapshot_.transport=TransportState::Opening;savePath_.clear();desired_=opts.snapshot();desired_.revision=++nextRevision_;snapshot_.desired=desired_;opts=PlayerOptions::from(desired_);}
     opts.captureReplayForTest=captureReplay;
     opts.captureReplayDisableFgAdmissionForTest=disableAdmission;
+    opts.captureCpuUnpack=captureCpuUnpack;
+    opts.captureDirectIngress=captureDirectIngress;
     post([this,video,path,opts]{paused_=false;seekSeconds_=-1;run(video,path,opts);});
 }
 #ifdef VEYRA_ENABLE_REMOTEPLAY
@@ -285,6 +291,8 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                             hooks.context=&graph;
                             hooks.prepare=[](void* context,unsigned slot,void*& buffer,size_t& capacity,unsigned& pitch,unsigned& rowBytes){
                                 return static_cast<pipeline::EnhanceGraph*>(context)->tryPrepareIngressSlot(slot,buffer,capacity,pitch,rowBytes);};
+                            hooks.current=[](void* context,unsigned slot,void*& buffer){
+                                return static_cast<pipeline::EnhanceGraph*>(context)->ingressSlotBuffer(slot,buffer);};
                             if(captureSource.attachDirectIngress(hooks))veyra::log::info("capture-direct","N2 direct capture ingress enabled");
                         }
                         failure=FailedBackend::Infrastructure;

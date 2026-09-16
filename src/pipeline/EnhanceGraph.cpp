@@ -1706,6 +1706,12 @@ bool EnhanceGraph::prepareIngressSlot(unsigned slot,void*& buffer,size_t& capaci
     if(uploadFences_[slot]&&!context_.waitForFenceValue(uploadFences_[slot]))return false;
     return tryPrepareIngressSlot(slot,buffer,capacity,pitch,rowBytes);
 }
+bool EnhanceGraph::ingressSlotBuffer(unsigned slot,void*& buffer) const{
+    buffer=nullptr;
+    if(slot>1||!ingressDirectReady_.load()||!upRgb_[slot]||!mappedRgb_[slot])return false;
+    buffer=mappedRgb_[slot];
+    return true;
+}
 void EnhanceGraph::shutdown()
 {
     ingressDirectReady_.store(false);

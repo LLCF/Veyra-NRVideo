@@ -310,7 +310,7 @@ void CaptureCardSource::setCpuUnpack(bool enabled){
 }
 bool CaptureCardSource::attachDirectIngress(const DirectIngressHooks& hooks){
     auto& p=*p_;
-    if(!hooks.prepare)return false;
+    if(!hooks.prepare||!hooks.current)return false;
     std::lock_guard lock(p.mutex);
     if(!p.configured||p.layout.planes!=1)return false;
     for(auto*& view:p.directView){if(!view)view=av_frame_alloc();if(!view)return false;}
@@ -763,7 +763,7 @@ SourceReadStatus CaptureCardSource::readWithWait(pipeline::FramePacket& packet,c
             if(slot>=0){
                 const unsigned s=unsigned(slot);
                 void* buffer=nullptr;size_t capacity=0;unsigned pitch=0,rowBytes=0;
-                if(p.direct.prepare&&p.direct.prepare(p.direct.context,s,buffer,capacity,pitch,rowBytes)&&buffer==p.directCommitted[s]){
+                if(p.direct.current&&p.direct.current(p.direct.context,s,buffer)&&buffer==p.directCommitted[s]){
                     p.directInUse[s].store(true);p.directSlot=int(s);p.directPending=false;
                     outFrame=p.directView[s];time=p.directTime;p.readArrival=p.directArrival;duration=p.directDuration;
                 }else{

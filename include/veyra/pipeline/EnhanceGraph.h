@@ -134,6 +134,10 @@ public:
     // still in flight, so the capture callback can fall back to its mailbox
     // instead of blocking the DirectShow thread on a GPU fence.
     bool tryPrepareIngressSlot(unsigned slot,void*& buffer,size_t& capacity,unsigned& pitch,unsigned& rowBytes);
+    // Cheap freshness probe for the consumer: current mapped buffer of a slot,
+    // no fence wait (the consumer only checks that the frame it committed still
+    // belongs to the live graph generation).
+    bool ingressSlotBuffer(unsigned slot,void*& buffer) const;
 
     struct FrameOutputs {
         FrameBatch batch;

@@ -63,6 +63,8 @@ public:
     struct DirectIngressHooks {
         void* context=nullptr;
         bool (*prepare)(void* context,unsigned slot,void*& buffer,size_t& capacity,unsigned& pitch,unsigned& rowBytes)=nullptr;
+        // Consumer-side freshness probe: current buffer of a slot, no fence wait.
+        bool (*current)(void* context,unsigned slot,void*& buffer)=nullptr;
     };
     bool attachDirectIngress(const DirectIngressHooks& hooks);
     void detachDirectIngress();

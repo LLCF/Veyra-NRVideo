@@ -10,6 +10,8 @@
 
 **同日后续（根因修复 + 新的阻塞点）**：定位到最可能的根因——**上传 fence 索引错位**：图按自己的 parity 记录提交 fence，但直接模式下缓冲槽位由源决定，丢帧后两者错位，源会在 GPU 仍在读取该缓冲时覆盖它（表现为 GPU-ready 84ms、每帧 reset、10fps 自激）。已修：直接帧的提交 fence 同时记录到其缓冲槽位（`uploadFences_[slot]`），并加了回调侧直接提交/回退计数（每 120 帧一条日志）。重跑时又发现 **`--capture-direct-ingress` 没有真正触发 attach**（日志无 `[capture-direct]`）：根因是 `options()` 从引擎快照重建 `PlayerOptions` 时丢弃了 CLI-only 字段；已修（`options()` 现在携带 `captureCpuUnpack`/`captureDirectIngress`）。截至本轮结束，**带 attach 的直接路径尚未完成真机复测**：默认（信箱）路径健康、门禁 PASS（`logs/delivery/5b494cdb690d4254a670d1d14ccfe54e/result.json`），直接路径继续默认关闭。下一步：用 `--capture-direct-ingress` 复测确认 attach→直接提交计数→4K18 A/B，再决定是否转默认。
 
+**同日第三次修正（CLI 管道修好后的实测，14:29/14:31）**：`EngineController::open()` 还会用 `PlayerOptions::from(desired_)` 重建 options——这是字段丢失的真正位置（只显式保留了 captureReplay 两字段）。已修并复测：**attach 成功**（`[capture-direct] graph direct ingress attached`），回调计数证实直接路径全程在用：`commits=479 fallbacks=1 drops=0`（每 120 帧一条）。读取侧也不再因 fence 未完成而误丢帧（新增 `ingressSlotBuffer` 无 fence 的"当前缓冲"校验，仅比对缓冲指针；回调写入前仍用带 fence 的 `tryPrepareIngressSlot`）。**但引擎仍退化**：`processed=102/565`、`displaySubmits=1`、`firstValidObserveMs=89.3ms`、每帧一次 history reset、P95 177ms——**说明卡点已不在"回调→图缓冲"的交接层，而在呈现/实时调度路径**（直接视图帧作为图输入后，呈现只提交了 1 次；信箱路径同条件 displaySubmits≈processed）。N2 继续默认关闭，下一步聚焦：直接帧与信箱帧的 `pkt`/frame 字段逐项对比（pts/arrival、frame 指针身份、view 的 buf[0]=null 对 live scheduler/presenter 的影响），定位为何呈现停摆。
+
 ## 2026-09-16 采集链路 N1：逐像素转换从 CPU 挪到 GPU
 
 - 采集侧：`captureMediaLayout` 对 UYVY/YVYU/BGR24/RGB555/RGB565 保留驱动真实 packing（UYVY422/YVYU422/BGR24/RGB555LE/RGB565LE）；`copyCaptureSample` 改为按行原样拷贝（保留 DIB 方向契约、手动翻转与 YUV 色度行跟随）；新增 `captureLegacyCpuLayout` + `--capture-cpu-unpack` 诊断开关，旧 BGR0/YUY2 逐像素转换仍可回退。
