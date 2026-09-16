@@ -16,6 +16,9 @@ constexpr bool presentSinkFrameGeneration(FrameGenerationBackend backend) {
 // exposes 2/3/4/6 and MFG buyers pick from those; 1 = generation off.
 inline constexpr uint32_t kFgMultiplierChoices[]={1,2,3,4,6};
 inline constexpr size_t kFgMultiplierChoiceCount=sizeof(kFgMultiplierChoices)/sizeof(kFgMultiplierChoices[0]);
+// videoSrQuality values: 0 = DLSS SR, 1..4 = RTX video SR quality steps,
+// 5 = AMD FSR upscaling (vendor neutral; verified on an NVIDIA adapter).
+inline constexpr uint32_t kVideoSrFsr=5;
 enum class NrRuntime { Original, Community, Ampere };
 constexpr std::string_view nrRuntimeName(NrRuntime runtime) {
     switch(runtime) {
@@ -127,7 +130,7 @@ struct EnhancementSettings {
         // The AMD 3.1.x provider delivers one generated frame per present; the
         // probe measured the same count for 2/3/4 requested frames.
         if(frameGenerationBackend==FrameGenerationBackend::Fsr&&multiplier>2)return "AMD FSR frame generation supports up to 2X";
-        if(videoSrQuality>4)return "invalid video SR quality";
+        if(videoSrQuality>kVideoSrFsr)return "invalid video SR quality";
         if(!pipeline::validSrTarget(srTarget))return "invalid SR target";
         if(opticalFlowBackend!=OpticalFlowBackend::Nvidia&&opticalFlowBackend!=OpticalFlowBackend::AmdFidelityFx&&opticalFlowBackend!=OpticalFlowBackend::GpuDis)return "invalid optical flow backend";
         if(multiplier<1||multiplier>6)return "unsupported multiplier";

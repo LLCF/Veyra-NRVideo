@@ -21,6 +21,7 @@
 #include "veyra/gfx/CommandSlotRing.h"
 #include "veyra/gfx/D3D12DeviceContext.h"
 #include "veyra/ngx/DlssFgBackend.h"
+#include "veyra/gfx/FsrSrBackend.h"
 #include "veyra/ngx/DlssNrParameters.h"
 #include "veyra/ngx/DlssNrRuntimeAdapter.h"
 #include "veyra/ngx/DlssSrBackend.h"
@@ -74,7 +75,7 @@ bool EnhanceGraph::initialize(const EnhanceGraphDesc& desc)
         veyra::log::info("graph","diagnostic SR motion override active; no product entry point enables this");
     }
     desc_ = desc;tracker_={};prevValid_=false;fgHistorySkipped_=false;cadence_.reset();scene_.reset();previousLuma_.clear();
-    if(desc.videoSrQuality>4)return false;
+    if(desc.videoSrQuality>engine::kVideoSrFsr){veyra::log::error("graph",std::format("invalid video SR quality value={}",desc.videoSrQuality));return false;}
     srcW_ = desc.sourceWidth;
     srcH_ = desc.sourceHeight;
     workW_ = desc.workWidth;
@@ -118,6 +119,7 @@ bool EnhanceGraph::initialize(const EnhanceGraphDesc& desc)
     if (!createResources()) return false;
     if (!initZeroAndDepthTextures()) return false;
     if (!initNvof()) { failedBackend_=engine::FailedBackend::OpticalFlow; return false; }
+    if (!initFsrSr()) return false;
     if(nrEnabled_&&GetEnvironmentVariableW(L"VEYRA_TEST_NR_INIT_FAILURE",nullptr,0)){
         failedBackend_=engine::FailedBackend::Nr;
         veyra::log::error("backend-recovery-test","test-only NR initialization rejection before SDK call; not a hardware failure");return false;
@@ -174,7 +176,18 @@ bool EnhanceGraph::createResources()
         }
     }
     srcRgba_ = makeTexture(context_.device(), srcW_, srcH_, DXGI_FORMAT_R16G16B16A16_FLOAT, true);
-    if(srEnabled_&&desc_.videoSrQuality){videoSrInput_=makeTexture(context_.device(),srcW_,srcH_,DXGI_FORMAT_R8G8B8A8_UNORM,true);videoSrOutput_=makeTexture(context_.device(),workW_,workH_,DXGI_FORMAT_R8G8B8A8_UNORM,true);if(!videoSrInput_||!videoSrOutput_)return false;}
+    if(srEnabled_&&desc_.videoSrQuality&&desc_.videoSrQuality!=engine::kVideoSrFsr){videoSrInput_=makeTexture(context_.device(),srcW_,srcH_,DXGI_FORMAT_R8G8B8A8_UNORM,true);videoSrOutput_=makeTexture(context_.device(),workW_,workH_,DXGI_FORMAT_R8G8B8A8_UNORM,true);if(!videoSrInput_||!videoSrOutput_)return false;}
+    // FSR upscaling needs a render-extent depth; Veyra has no source-resolution
+    // depth source, so this is the same explicit constant far depth the
+    // frame-generation path uses. It limits disocclusion quality and must not
+    // be described as engine-native depth.
+    if(srEnabled_&&desc_.videoSrQuality==engine::kVideoSrFsr){
+        fsrSrDepth_=makeTexture(context_.device(),srcW_,srcH_,DXGI_FORMAT_R32_FLOAT,false);
+        if(!fsrSrDepth_)return false;
+        fsrSrDepthPitch_=size_t(srcW_)*sizeof(float);
+        upFsrSrDepth_=makeUploadBuffer(context_.device(),fsrSrDepthPitch_*srcH_);
+        if(!upFsrSrDepth_)return false;
+    }
     const bool directBase=!srEnabled_&&srcW_==workW_&&srcH_==workH_;
     workRgba_=directBase?srcRgba_:makeTexture(context_.device(),workW_,workH_,DXGI_FORMAT_R16G16B16A16_FLOAT,true);
     for(unsigned i=0;i<2;++i){sourceReferences_[i]=makeTexture(context_.device(),srcW_,srcH_,DXGI_FORMAT_R16G16B16A16_FLOAT,false);baseReferences_[i]=directBase?sourceReferences_[i]:makeTexture(context_.device(),workW_,workH_,DXGI_FORMAT_R16G16B16A16_FLOAT,false);if(!sourceReferences_[i]||!baseReferences_[i])return false;}
@@ -235,9 +248,11 @@ bool EnhanceGraph::initZeroAndDepthTextures()
 {
     // Depth constants uploaded once (copies are safe before views exist).
     uint8_t* d = nullptr; uint8_t* zd = nullptr; uint8_t* zm = nullptr;
+    uint8_t* fd = nullptr;
     upDepth_->Map(0, nullptr, reinterpret_cast<void**>(&d));
     upZeroDepth_->Map(0, nullptr, reinterpret_cast<void**>(&zd));
     upZeroMotion_->Map(0, nullptr, reinterpret_cast<void**>(&zm));
+    if(upFsrSrDepth_!=nullptr)upFsrSrDepth_->Map(0,nullptr,reinterpret_cast<void**>(&fd));
     for (uint32_t y = 0; y < workH_; ++y) {
         float* dRow = reinterpret_cast<float*>(d + y * dPitch_);
         float* zdRow = reinterpret_cast<float*>(zd + y * dPitch_);
@@ -251,6 +266,13 @@ bool EnhanceGraph::initZeroAndDepthTextures()
     upDepth_->Unmap(0, nullptr);
     upZeroDepth_->Unmap(0, nullptr);
     upZeroMotion_->Unmap(0, nullptr);
+    if(upFsrSrDepth_!=nullptr){
+        for(uint32_t y=0;y<srcH_;++y){
+            float* row=reinterpret_cast<float*>(fd+size_t(y)*fsrSrDepthPitch_);
+            for(uint32_t x=0;x<srcW_;++x)row[x]=0.9f;
+        }
+        upFsrSrDepth_->Unmap(0,nullptr);
+    }
 
     Status st = Status::Ok;
     ID3D12GraphicsCommandList* list = ring_.acquire(0, st);
@@ -283,6 +305,28 @@ bool EnhanceGraph::initZeroAndDepthTextures()
     uploadTex(depthTex_.Get(), upDepth_, DXGI_FORMAT_R32_FLOAT);
     uploadTex(nrZeroDepth_.Get(), upZeroDepth_, DXGI_FORMAT_R32_FLOAT);
     uploadTex(nrZeroMotion_.Get(), upZeroMotion_, DXGI_FORMAT_R16G16_FLOAT);
+    if(fsrSrDepth_!=nullptr&&upFsrSrDepth_!=nullptr){
+        D3D12_RESOURCE_BARRIER b{};
+        b.Transition.pResource=fsrSrDepth_.Get();
+        b.Transition.StateBefore=D3D12_RESOURCE_STATE_COMMON;
+        b.Transition.StateAfter=D3D12_RESOURCE_STATE_COPY_DEST;
+        b.Transition.Subresource=D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1,&b);
+        D3D12_TEXTURE_COPY_LOCATION dst{},src{};
+        dst.pResource=fsrSrDepth_.Get();
+        dst.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        src.pResource=upFsrSrDepth_.Get();
+        src.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint.Footprint.Format=DXGI_FORMAT_R32_FLOAT;
+        src.PlacedFootprint.Footprint.Width=srcW_;
+        src.PlacedFootprint.Footprint.Height=srcH_;
+        src.PlacedFootprint.Footprint.Depth=1;
+        src.PlacedFootprint.Footprint.RowPitch=static_cast<UINT>(fsrSrDepthPitch_);
+        list->CopyTextureRegion(&dst,0,0,0,&src,nullptr);
+        b.Transition.StateBefore=D3D12_RESOURCE_STATE_COPY_DEST;
+        b.Transition.StateAfter=D3D12_RESOURCE_STATE_COMMON;
+        list->ResourceBarrier(1,&b);
+    }
     list->Close();
     ID3D12CommandList* lists[] = { list };
     context_.directQueue()->ExecuteCommandLists(1, lists);
@@ -301,7 +345,7 @@ bool EnhanceGraph::initZeroAndDepthTextures()
 bool EnhanceGraph::initNvof()
 {
     if(desc_.stillImage){mvecSource_="single-image (no temporal motion)";return true;}
-    if (desc_.noFeatures || !(nvofStandalone_ || presentSinkFg() || (fgEnabled_&&desc_.frameGenerationBackend==engine::FrameGenerationBackend::Dlss) || (srEnabled_&&!desc_.videoSrQuality))) {
+    if (desc_.noFeatures || !(nvofStandalone_ || presentSinkFg() || (fgEnabled_&&desc_.frameGenerationBackend==engine::FrameGenerationBackend::Dlss) || (srEnabled_&&(desc_.videoSrQuality==0||desc_.videoSrQuality==engine::kVideoSrFsr)))) {
         veyra::log::info("graph", "VEYRA_NO_FEATURES: NVOF session skipped");
         return true;
     }
@@ -346,11 +390,56 @@ bool EnhanceGraph::initNvof()
     return true;
 }
 
+bool EnhanceGraph::fsrSrEnabled() const
+{
+    return fsrSrBackend_ != nullptr && fsrSrBackend_->created();
+}
+
+bool EnhanceGraph::initFsrSr()
+{
+    if (!fsrSrRequested()) return true;
+    if (desc_.noFeatures) {
+        veyra::log::warn("fsr-sr", "feature-disabled configuration: AMD FSR upscaling skipped");
+        return true;
+    }
+    if (desc_.hdrOutput) {
+        // The working color here is linear FP16 with Veyra's own HDR contract;
+        // feeding that to the FSR HDR path without a verified transfer contract
+        // would be a guess. Refuse the stage instead of shipping a wrong image.
+        veyra::log::warn("fsr-sr", "HDR output is not supported by the AMD FSR upscaling stage yet; continuing without it");
+        return true;
+    }
+    failedBackend_=engine::FailedBackend::Sr;
+    fsrSrBackend_=std::make_unique<gfx::FsrSrBackend>();
+    if(!fsrSrBackend_->initialize(context_.device(),srcW_,srcH_,workW_,workH_,false)){
+        fsrSrBackend_.reset();
+        // The engine checks fsrSrRequested() && !fsrSrEnabled() after the graph
+        // is created and disables the stage with a user-visible warning, so a
+        // missing local runtime never blocks basic playback.
+        veyra::log::error("fsr-sr", "AMD FSR upscaling unavailable; the engine will disable the stage");
+        failedBackend_=engine::FailedBackend::None;
+        return true;
+    }
+    failedBackend_=engine::FailedBackend::None;
+    veyra::log::info("fsr-sr", std::format("selected render={}x{} output={}x{} provider={}",srcW_,srcH_,workW_,workH_,
+                                           fsrSrBackend_->providerVersion()));
+    return true;
+}
+
 bool EnhanceGraph::initNgxFeatures()
 {
     failedBackend_=engine::FailedBackend::NgxCore;
     if (desc_.noNgx || desc_.noFeatures || (!nrEnabled_&&!srEnabled_&&!fgEnabled_)) {
         veyra::log::info("graph", "NGX core/features skipped by disabled-feature configuration");
+        return true;
+    }
+    // FSR upscaling is a FidelityFX effect: a session whose only feature is
+    // FSR SR must not require (or fail on) the NGX core.
+    const bool needNgxCore = nrEnabled_ || fgEnabled_ ||
+        (srEnabled_ && desc_.videoSrQuality!=engine::kVideoSrFsr);
+    if (!needNgxCore) {
+        veyra::log::info("graph", "NGX core skipped: AMD FSR upscaling is the only enabled stage");
+        failedBackend_=engine::FailedBackend::None;
         return true;
     }
     // Read the local NGX identity (same loader contract as the probes).
@@ -475,7 +564,7 @@ bool EnhanceGraph::initNgxFeatures()
         if(!ring_.submitAndSignal(0)||!ring_.waitIdle())return false;
     }
 
-    if (srEnabled_ && !desc_.noFeatures) {
+    if (srEnabled_ && !desc_.noFeatures && desc_.videoSrQuality!=engine::kVideoSrFsr) {
         ngx::DlssSrBackend::CreateDesc sd{};
         sd.inputWidth = srcW_; sd.inputHeight = srcH_;
         sd.outputWidth = workW_; sd.outputHeight = workH_;
@@ -970,7 +1059,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
 
     // Guidance from original source-space color before SR/NR. Queue waits are GPU-side.
     bool haveFlow = false;
-    const bool runMotion = nvofStandalone_ || presentSinkFg() || fgEnabled_ || (srEnabled_ && !desc_.videoSrQuality);
+    const bool runMotion = nvofStandalone_ || presentSinkFg() || fgEnabled_ || (srEnabled_ && (desc_.videoSrQuality==0||desc_.videoSrQuality==engine::kVideoSrFsr));
     if (runMotion && (gpuDis_ || amdOf_ || (nvof_ && nvof_->initialized()))) {
         const float dims[8] = {uintBits(nvofW_),uintBits(nvofH_),uintBits(nvofW_),uintBits(nvofH_),0,0,0,0};
         if (prevValid_) {
@@ -1058,7 +1147,26 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
     out.batch.a100ns=static_cast<int64_t>(std::llround(prevPtsMs_*10000));
     out.batch.b100ns=static_cast<int64_t>(std::llround(ptsMs*10000));gpuTimer_.identity(out.batch.identity);
     auto runSr=[&]()->bool{
-    if(srEnabled_&&videoSrBackend_){
+    if(srEnabled_&&fsrSrEnabled()&&haveFlow){
+        // AMD FSR upscaling: FidelityFX effect, render-extent color + guidance
+        // motion (previous = current + motion, same convention as the frame
+        // generator) straight into the working texture. A frame without valid
+        // motion falls through to the plain blit below instead of guessing.
+        gpuTimer_.mark(list,GpuStage::Sr);
+        const double deltaMs = (prevPtsMs_>=0.0&&ptsMs>prevPtsMs_)?(ptsMs-prevPtsMs_):16.6;
+        tracker_.transition(list,srcRgba_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        tracker_.transition(list,flowTex_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        tracker_.transition(list,fsrSrDepth_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        tracker_.transition(list,workRgba_.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if(!fsrSrBackend_->evaluate(list,srcRgba_.Get(),flowTex_.Get(),fsrSrDepth_.Get(),workRgba_.Get(),
+                                    srcW_,srcH_,workW_,workH_,reset,float(deltaMs))){
+            failedBackend_=engine::FailedBackend::Sr;
+            return false;
+        }
+        ++metrics_.srEvaluateCount;gpuTimer_.mark(list,GpuStage::Sr,true);
+        tracker_.uavBarrier(list,workRgba_.Get());
+        tracker_.transition(list,workRgba_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    } else if(srEnabled_&&videoSrBackend_){
         gpuTimer_.mark(list,GpuStage::Sr);
         tracker_.transition(list,videoSrInput_.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         const float enc[8]={uintBits(srcW_),uintBits(srcH_),uintBits(srcW_),uintBits(srcH_),desc_.hdrOutput?3.0f:1.0f,0,0,0};
@@ -1431,6 +1539,9 @@ void EnhanceGraph::shutdown()
     gpuDis_.reset();
     amdOf_.reset();
     for(auto& motion:presentMotion_)motion.Reset();
+    if(fsrSrBackend_){fsrSrBackend_->release();fsrSrBackend_.reset();}
+    fsrSrDepth_.Reset();
+    upFsrSrDepth_.Reset();
     if (fgBackend_) fgBackend_->release();
     if(videoSrBackend_){videoSrBackend_->release();videoSrBackend_.reset();}
     if (srBackend_) srBackend_->release();

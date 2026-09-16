@@ -252,7 +252,7 @@ case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.
     button(L"框选区域",213,0,12,188,140);button(L"清除区域",214,0,162,188);
     add(L"STATIC",L"最多4区，左键拖框，Esc取消。仅抑制NR变化；不保护SR或补帧。可随预设保存；换源清空。",1109,0,0,12,232,-1,82);
     for(auto& entry:items)if(entry.page==0&&entry.y>=104)entry.y+=48;
-    combo(207,0,100,{L"DLSS SR",L"RTX 视频超分 · 低",L"RTX 视频超分 · 中",L"RTX 视频超分 · 高",L"RTX 视频超分 · 最高"});
+    combo(207,0,100,{L"DLSS SR",L"RTX 视频超分 · 低",L"RTX 视频超分 · 中",L"RTX 视频超分 · 高",L"RTX 视频超分 · 最高",L"AMD FSR 超分 · 3.1.x（N卡可用）"});
     for(auto& entry:items)if(entry.page==0&&entry.y>=100)entry.y+=44;
     button(L"2K",730,0,12,100,80);button(L"4K",731,0,100,100,80);button(L"8K",732,0,188,100,80);
     for(auto& entry:items)if(entry.page==0&&entry.y>=56)entry.y+=80;

@@ -2341,6 +2341,32 @@ DLSSG 能力门控没有排除 FSR，导致 FSR 会话下任何就地设置变�
 
 ### 2026-09-16 FSR 超分可行性（N 卡）与接入点勘察
 
+### 2026-09-16 FSR 超分接入产品（同一分支，未合并 main）
+
+先前的"只做可行性"结论已升级为**已接入并实测**：
+
+- 新增 `include/veyra/gfx/FsrSrBackend.h` + `src/gfx/FsrSrBackend.cpp`（FidelityFX 超分上下文 +
+  逐帧 `ffxDispatchDescUpscale`），`EnhanceGraph` 新增 `initFsrSr()` 与 `runSr()` 的 FSR 分支，
+  只启用 FSR 超分时不再要求 NGX 核心；`videoSrQuality = 5`（`kVideoSrSrFsr`）作为新档位，
+  设置项"AMD FSR 超分 · 3.1.x（N卡可用）"，非 NVIDIA 归一化不再关掉该档，
+  创建失败走既有 `FailedBackend::Sr` 降级并提示（不静默直通）。
+- 运行库目录统一为 `runtime_local/amd/fidelityfx/`（loader + framegeneration + upscaler），
+  FSR 补帧路径同步改名后**回归通过**（218 真实 / 214 生成，exit 0）。
+- 实测（RTX 5070 / 提供方 3.1.5）：
+  - 播放器 `--video-sr 5`：206 帧、205 次 dispatch、0 失败、exit 0（`logs/fsr/smoke-fsrsr.log`）；
+  - 非 NVIDIA 形状：`--video-sr 5 --flow-amd`（AMD FFX 光流）226 次 dispatch、0 失败、exit 0
+    （`logs/fsr/smoke-fsrsr-amdflow.log`）；
+  - 质量探针 `--sr-mode 5`：19/19、`d3dDiagErrors=0`（`logs/fsr/q-fsrsr-diag.log`）；
+  - **同帧对照**（index=45、同 NR、4K 输出）：平均绝对差 0.31/255、平均亮度 115.98 vs 116.03
+    → 内容正确（`tools/image_check/compare_sr.ps1`）；
+  - **相对画质不如直通**：梯度能量 0.500 vs 0.563（比值 0.888），如实记录，不宣称更清晰。
+- 新工具/改动：`tools/quality_probe --sr-mode`（-1 直通 / 0 DLSS / 5 FSR，用于确定性 A/B）、
+  `tools/image_check/compare_sr.ps1`（内容一致性 + 梯度能量）、`--flow-amd` / `--flow-gpudis` 测试开关。
+- 已知限制：HDR 输出不支持（主动不创建）、flow 必须与源同尺寸、
+  GPU-based validation 与 FidelityFX 超分 dispatch 不兼容（探针显式跳过并打印警告）。
+- 回归：delivery 短测 PASS（`logs/delivery/1f0f1976eca045b9a22529e9b8f11fa4/result.json`）、
+  `veyra_repair_contract_tests` 160 项 0 失败、`veyra_repair_preset_tests` 全通过。
+
 新增 `tools/fsr_upscale_probe`（目标 `veyra_fsr_upscale_probe`）：枚举超分提供方 →
 建上下文 → 上传 64 像素棋盘 + 水平渐变（1280×720）→ FSR 放大到 2560×1440 → 回读校验内容。
 本机 RTX 5070 结果（`logs/fsr/upscale-probe.log`）：提供方只有 **3.1.5 与 2.3.4**（4.x ML 不出现）、

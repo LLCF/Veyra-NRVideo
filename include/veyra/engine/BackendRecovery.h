@@ -5,7 +5,11 @@ namespace veyra::engine {
 enum class FailedBackend { None, Infrastructure, OpticalFlow, NgxCore, Nr, Sr, Fg };
 inline bool disableUnsupportedNvidiaEffects(EnhancementSettings& settings,bool nvidia){
     if(nvidia)return false;
-    const auto before=settings;settings.nr=false;settings.sr=false;
+    const auto before=settings;
+    settings.nr=false;
+    // AMD FSR upscaling is vendor neutral and must survive the NVIDIA-only
+    // normalization; every other SR backend is NGX-only.
+    settings.sr=settings.videoSrQuality==kVideoSrFsr;
     if(settings.frameGenerationBackend==FrameGenerationBackend::Dlss)settings.multiplier=1;
     return settings!=before;
 }

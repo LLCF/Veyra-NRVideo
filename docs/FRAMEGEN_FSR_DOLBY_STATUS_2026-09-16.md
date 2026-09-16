@@ -86,7 +86,7 @@ $env:VEYRA_TEST_FG_FORCE_MULTIPLIER='1'
 | 40 系 DLSS MFG 解锁（C-2） | **未实现（本轮改为调研完成）** | 上游已定位并克隆：`ImDreamt/MFGAdaUnlock-RenoDx`（MIT，`third_party_local/community/`，gitignore）。机制=两处架构比较（0x1b0）+ **PTX 中点修正**（104 处 0.5 + fatbin 截断逼 JIT）+ 关闭硬件 flip metering（Streamline 专属，Veyra 走 NGX 不适用）。**没有实施的理由**：本机只有 5070，PTX 改写会改动一条已经正常的路径，无法区分"补丁生效"与"破坏原生 MFG"；上游也明确单改门控=黑帧。下一步按带身份校验/模式校验/回滚的进程内补丁实现，并需真实 40 系验收 |
 | 30 系原生 2X（D） | **未开始** | 需要 `dlssg_for_sm86` 代理方案与另一份 DLSSG 运行库身份，属发布范围变更 |
 | FSR 帧生成（E） | **已完成并实测（2X）** | 见上文 §一.5 与 [接入记录](FSR_FRAMEGEN_INTEGRATION_2026-09-16.md)；4.0.1 ML 需 AMD 卡复测 |
-| FSR 超分（F） | **可行性已验证，未接入** | 探针实测 N 卡可跑 FSR 3.1.5 超分（1280×720→2560×1440，回读是真图）；4.x ML 在 NVIDIA 上不被枚举。接入点、需要的输入、未验证点见 [FSR 超分计划](FSR_UPSCALING_PLAN_2026-09-16.md)；本轮没有写进产品，不当作已完成 |
+| FSR 超分（F） | **已接入并实测（3.1.x）** | 图内 SR 阶段新分支 + `videoSrQuality=5` 档位；播放器 205–226 次 dispatch 0 失败，AMD 光流形状 exit 0，同帧对照平均绝对差 0.31/255；**相对画质略软（梯度能量比 0.888）如实记录**；4.x ML 需 AMD 实机。见 [FSR 超分接入记录](FSR_UPSCALING_PLAN_2026-09-16.md) |
 | 杜比直通 / 解码（G-2） | **未开始** | 依赖支持位流的采集设备；当前设备已证实不提供 |
 
 ### A-2 节奏 hook：已完成的准备与勘察结论
@@ -116,7 +116,7 @@ $env:VEYRA_TEST_FG_FORCE_MULTIPLIER='1'
 
 0. `git log --oneline -12` 确认全部提交都在 `codex/framegen-fsr-dolby-20260916`，`main` 仍是 `693db07`、未推送、未发布。
    最终构建 `cmd.exe /c out\build\veyra-build-x64-release.cmd` exit 0；最终
-   `veyra.exe` SHA256 `6291F7CF6E737DD12C057F08848C8A1B48C6DBA394D429E5CE918B01E227A01D`；
+   `veyra.exe` SHA256 `7ADDF839F22E31C0D1BC52434B7CAC09C1AF9BA06A3E4DAD4733D7E79BEB28AD`；
    delivery 短测 PASS（`logs/delivery/7180a557fe934a27a225f6367a1b06e9/result.json`）；
    `veyra_repair_contract_tests` 157 项 0 失败；`veyra_repair_preset_tests` 60 组迁移全通过。
 1. **AMD FSR 补帧**：`out\build\audio-continuity-repair-20260915\veyra.exe --fg-fsr --smoke-seconds 10 <视频>`，

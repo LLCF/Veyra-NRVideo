@@ -78,6 +78,7 @@ add_library(veyra_gfx STATIC
   src/gfx/XessPresenter.cpp
   src/gfx/XessMfgUnlock.cpp
   src/gfx/FsrFgPresenter.cpp
+  src/gfx/FsrSrBackend.cpp
 )
 veyra_apply_warnings(veyra_gfx)
 target_compile_features(veyra_gfx PUBLIC cxx_std_20)
@@ -89,7 +90,8 @@ endif()
 if(EXISTS "${VEYRA_FIDELITYFX2_ROOT}/framegeneration/include/dx12/ffx_api_framegeneration_dx12.h")
   target_include_directories(veyra_gfx PRIVATE
     "${VEYRA_FIDELITYFX2_ROOT}/api/include"
-    "${VEYRA_FIDELITYFX2_ROOT}/framegeneration/include")
+    "${VEYRA_FIDELITYFX2_ROOT}/framegeneration/include"
+    "${VEYRA_FIDELITYFX2_ROOT}/upscalers/include")
   target_compile_definitions(veyra_gfx PRIVATE VEYRA_HAS_FSR=1)
 endif()
 if(VEYRA_ENABLE_D3D12_DEBUG)

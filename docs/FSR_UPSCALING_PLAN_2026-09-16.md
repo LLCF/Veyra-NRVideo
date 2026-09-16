@@ -1,7 +1,16 @@
-# FSR 超分（F 工作流）：证据、结论、接入点（隔离分支）
+# AMD FSR 超分（F 工作流）：接入记录与实测结论（隔离分支）
 
-**这是计划，不是已完成功能。** 本轮只做了可行性验证与接入点勘察，产品里还没有 FSR 超分。
-分支 `codex/framegen-fsr-dolby-20260916`，未合并 main、未推送、未发布。
+**已接入产品并实测。** 分支 `codex/framegen-fsr-dolby-20260916`，未合并 main、未推送、未发布。
+
+状态一览：
+
+| 项 | 状态 | 证据 |
+| --- | --- | --- |
+| FSR 3.1.5 超分接入图内 SR 阶段（1080p→4K） | **可用** | 播放器实跑 205–226 次 dispatch、0 失败；质量探针 19/19（`logs/fsr/smoke-fsrsr.log`、`logs/fsr/q-fsrsr-diag.log`） |
+| 非 NVIDIA 路径形状（AMD FFX 光流 + FSR 超分） | **本机验证** | `--flow-amd --video-sr 5`：226 次 dispatch、0 失败、exit 0（`logs/fsr/smoke-fsrsr-amdflow.log`） |
+| 输出内容正确性 | **验证** | 同帧 index=45、同 NR 设置、4K 对照：平均绝对差 **0.31/255**，平均亮度 115.98 vs 116.03（`tools/image_check/compare_sr.ps1`） |
+| 相对画质 | **未胜出，如实记录** | 同一对照里梯度能量 0.563（直通缩放）vs 0.500（FSR SR），比值 0.888 → 本片段上 FSR 反而略软 |
+| AMD 卡 FSR 4.1 | **不可用** | NVIDIA 上只枚举到 3.1.5 / 2.3.4，4.x 需 AMD 实机复测后另行开放 |
 
 ## 1. 用户问题的直接回答
 
@@ -18,9 +27,19 @@
 工具：`tools/fsr_upscale_probe`（CMake 目标 `veyra_fsr_upscale_probe`），做法是上传
 64 像素棋盘 + 水平渐变 → FSR 放大 2 倍 → 回读校验内容（不是"跑通不报错"就算过）。
 
-## 2. 与现有图结构的关系（接入点）
+## 2. 接入方式（已实现）
 
-Veyra 的 SR 阶段在 `EnhanceGraph` 的 `runSr()`，现在只有两个分支：
+`include/veyra/gfx/FsrSrBackend.h` + `src/gfx/FsrSrBackend.cpp` 封装 FidelityFX 超分上下文与逐帧 dispatch；
+`EnhanceGraph::runSr()` 里作为**新的第一分支**（`fsrSrEnabled() && haveFlow`）直接写 `workRgba_`，
+没有有效运动的那一帧退回直通缩放而不是猜测；`EnhanceGraph::initFsrSr()` 负责创建，
+`initNgxFeatures()` 在该会话只启用了 FSR 超分时**不再要求 NGX 核心**（这是它能跑在非 NVIDIA 卡上的前提）。
+
+引擎/UI 侧：`videoSrQuality = 5`（`engine::kVideoSrFsr`，vendor neutral）作为新档位，
+设置里出现"AMD FSR 超分 · 3.1.x（N卡可用）"，非 NVIDIA 归一化不再关掉这一档，
+图创建后若 `fsrSrRequested() && !fsrSrEnabled()` 会走既有 `FailedBackend::Sr` 恢复（关档并提示），
+不会静默变成直通。命令行：`--video-sr 5`（测试用 `--flow-amd` / `--flow-gpudis` 切换光流后端）。
+
+原来的 SR 阶段结构（供对照）：
 
 1. `videoSrBackend_`：RTX 视频超分（`videoSrQuality` 1–4），输入 `videoSrInput_`（SR 尺寸 RGBA8）→
    `videoSrOutput_`（工作尺寸 RGBA8）→ 回填 `workRgba_`；
@@ -49,16 +68,24 @@ FSR 超分应作为**第 3 个后端**接入，语义与 DLSS SR 分支最接近
 并放开 `gd.enableSr = plan.srApplied && nvidiaAdapter` 这个非 NVIDIA 硬门控
 （只对 FSR 后端放开，DLSS/RTX 视频超分继续只给 NVIDIA）。
 
-## 3. 还没验证、不能跳过的点
+## 3. 限制与还没验证的点（必须如实保留）
 
-1. **符号约定**：FSR FG 的重投影是 `previous = current + mv`（已在接入记录里核对）；
-   FSR 超分必须按同样方法核对 FS R 3.1 upscaler PTX/HLSL，再决定是否传负号。
-   不做这一步就接进去，结果是"能跑但拖影/抖动"，而且很难归因。
-2. **深度缺失的代价**：当前只传常量深度，边缘/遮挡处理会明显弱于游戏原生 FSR 路径；
-   要不要用现有的深度估计（Depth Anything 类）补上，是后续独立决定，不能顺手假装。
-3. **AMD 卡 4.1**：本机枚举不到 4.x 提供方，任何"4.1 AI 超分已支持"的说法都必须等 AMD 实机。
-4. **画质对照**：接入后要用同一段素材与 DLSS SR / RTX 视频超分做 A/B（现有
-   `veyra_quality_probe` 的指标与人工看片），否则不能宣称"效果更好"。
+1. **符号约定已核对**：FSR3 upscaler `ffx_fsr3upscaler_reproject.h` 里是
+   `fReprojectedHrUv = fHrUv + fMotionVector`（previous = current + mv），与 Veyra 的
+   current→previous 约定同向 → 传 `motionVectorScale = (1,1)`、像素单位，不加负号。
+2. **常量深度的代价**：没有源分辨率深度，只能传常量远深度；边缘/遮挡处理弱于游戏原生路径，
+   本文与 UI 都不宣称等同原生。
+3. **HDR 不支持**：`hdrOutput` 时 FSR 超分档**主动不创建**（日志写明原因），不做没验证过的传递函数猜测。
+4. **需要 flow 与源同尺寸**：实时档若把 NR/光流降到比源小（例如 1440p 源走 1080 光流），
+   当前实现不走 FSR 超分（直接退回直通），因为 FSR 期望运动矢量在渲染尺寸。
+   要支持就得先加一遍运动矢量重采样，不能糊过去。
+5. **画质没有胜出**：本片段实测 FSR 3.1.5 比直通缩放略软（梯度能量 0.888 比值）。
+   下一步可做的是把 FSR 自带的 RCAS 锐化（`enableSharpening`）做成可选并 A/B，
+   以及用真实影视素材而不是合成测试片段复测；在那之前不得宣传"更清晰"。
+6. **AMD 卡 4.1**：本机枚举不到 4.x 提供方，任何"4.1 AI 超分已支持"的说法都必须等 AMD 实机。
+7. **GPU-based validation 不适用**：`--diag` 的 GBV 在 FidelityFX 超分 dispatch 上不完成
+   （独立探针 `tools/fsr_upscale_probe --diag` 在 dispatch 前挂住，说明是验证层与提供方的交互），
+   所以质量探针在 FSR 超分档会**显式跳过 GBV、保留调试层并打印警告**，不假装跑过。
 
 ## 4. 归属
 

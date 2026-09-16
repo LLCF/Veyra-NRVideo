@@ -125,26 +125,32 @@ Remote Play also depends on **OpenSSL, Opus, json-c, libevent, miniupnpc, curl, 
 
 </details>
 
-## AMD FidelityFX SDK 2.3.0 (experimental FSR frame generation)
+## AMD FidelityFX SDK 2.3.0 (experimental FSR frame generation and FSR upscaling)
 
-The player's AMD FSR frame-generation backend is written against the public
-FidelityFX API documented and shipped in the AMD FidelityFX SDK 2.3.0 (MIT
-licensed). The SDK itself is **not** vendored into this source repository: it
-stays in the gitignored `third_party_local/amd/FidelityFX-SDK-2.3.0` tree, and
-the signed provider/loader DLLs are used from the local
-`runtime_local/amd/framegeneration/` folder like the other experimental
-runtimes. Integration code (`src/gfx/FsrFgPresenter.cpp`) is an independent
-implementation of the documented API sequence and was written against these
-references:
+The player's AMD FSR backends (frame generation in the present sink and
+upscaling in the enhancement graph) are written against the public FidelityFX
+API documented and shipped in the AMD FidelityFX SDK 2.3.0 (MIT licensed). The
+SDK itself is **not** vendored into this source repository: it stays in the
+gitignored `third_party_local/amd/FidelityFX-SDK-2.3.0` tree, and the signed
+provider/loader DLLs are used from the local
+`runtime_local/amd/fidelityfx/` folder like the other experimental runtimes.
+Integration code (`src/gfx/FsrFgPresenter.cpp`, `src/gfx/FsrSrBackend.cpp`) is an
+independent implementation of the documented API sequence and was written
+against these references:
 
 - `Kits/FidelityFX/docs/techniques/frame-interpolation-swap-chain.md`
 - `Kits/FidelityFX/docs/techniques/frame-interpolation-api.md`
+- `Kits/FidelityFX/upscalers/include/ffx_upscale.h` and the FSR3 upscaler
+  shader contract (`ffx_fsr3upscaler_reproject.h` for the motion convention)
 - `Samples/Upscalers/FidelityFX_FSR/dx12/fsrapirendermodule.cpp`
 
 Relevant negative finding, recorded so it is not re-litigated: a FidelityFX
 frame-generation swapchain context keeps the real DXGI swapchain alive after
 `ffxDestroyContext` (measured locally), so the player retains the proxy
-swapchain for the window's lifetime. See
+swapchain for the window's lifetime. The FidelityFX upscale dispatch also does
+not complete under D3D12 GPU-based validation (the standalone probe stalls
+before its dispatch), so that validation mode is skipped for the FSR SR
+configuration with an explicit log line. See
 [AMD FSR frame generation integration record](docs/FSR_FRAMEGEN_INTEGRATION_2026-09-16.md).
 
 ## MFGAdaUnlock-RenoDx (research only, not integrated)

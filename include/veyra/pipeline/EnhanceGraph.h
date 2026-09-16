@@ -40,6 +40,7 @@ namespace veyra::guidance { class AmdOpticalFlow; class GpuDisOpticalFlow; }
 namespace veyra::gfx {
 class D3D12DeviceContext;
 class CommandSlotRing;
+class FsrSrBackend;
 }
 
 namespace veyra::ngx {
@@ -205,6 +206,11 @@ public:
     // Frame generation implemented by the present sink (XeSS, FSR) instead of
     // the in-graph DLSSG path; both consume the same guidance motion texture.
     bool presentSinkFg() const { return xessEnabled() || fsrEnabled(); }
+    // AMD FSR upscaling replaces the SR stage; it is a FidelityFX effect, not
+    // an NGX feature, so it also works on non-NVIDIA adapters.
+    bool fsrSrRequested() const { return desc_.enableSr && !desc_.stillImage && desc_.videoSrQuality==engine::kVideoSrFsr; }
+    // Out of line: the backend type is only forward declared here.
+    bool fsrSrEnabled() const;
     // Requested output multiplier (2 = one generated frame). Consumed by the
     // present sink so the XeSS provider knows how many frames to generate.
     uint32_t fgMultiplier() const { return desc_.fgMultiplier; }
@@ -251,6 +257,7 @@ private:
     bool initZeroAndDepthTextures();
     bool initNvof();
     bool initNgxFeatures();
+    bool initFsrSr();
     bool createComputePasses();
 
     gfx::D3D12DeviceContext& context_;
@@ -323,6 +330,9 @@ private:
     std::unique_ptr<guidance::GpuDisOpticalFlow> gpuDis_;
     std::unique_ptr<ngx::VideoSrBackend> videoSrBackend_;
     std::unique_ptr<ngx::DlssFgBackend> fgBackend_;
+    std::unique_ptr<gfx::FsrSrBackend> fsrSrBackend_;
+    ComPtr<ID3D12Resource> fsrSrDepth_, upFsrSrDepth_;
+    size_t fsrSrDepthPitch_=0;
     NVSDK_NGX_Parameter* ngxParams_ = nullptr;
     NVSDK_NGX_Handle* nrHandle_ = nullptr;
     uint64_t nrResult_ = 0;

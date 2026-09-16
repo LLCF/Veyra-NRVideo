@@ -193,6 +193,15 @@ int main(){
         settings.multiplier=2;
         check(settings.validate().empty(),"AMD FSR 2X is a valid request");
     }
+    {
+        engine::EnhancementSettings settings;
+        settings.videoSrQuality=engine::kVideoSrFsr;
+        check(settings.validate().empty(),"AMD FSR upscaling is a valid video SR quality");
+        settings.videoSrQuality=engine::kVideoSrFsr+1;
+        check(!settings.validate().empty(),"video SR quality above the AMD FSR slot is rejected");
+        settings.videoSrQuality=0;
+        check(settings.validate().empty(),"DLSS SR quality remains valid");
+    }
     check(engine::opticalFlowBackendName(engine::OpticalFlowBackend::Nvidia)=="NVIDIA_NVOF"&&engine::opticalFlowBackendName(engine::OpticalFlowBackend::AmdFidelityFx)=="AMD_FIDELITYFX_OF","optical-flow backend names identify every backend");
     s.model.intensity=std::numeric_limits<float>::quiet_NaN();check(!s.validate().empty(),"reject NaN transaction");
     s={};s.multiplier=5;check(s.validate().empty(),"5X multiplier accepted by the API guard (6X ceiling)");

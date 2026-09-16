@@ -217,7 +217,7 @@ bool FsrFgPresenter::initialize(ID3D12Device* device, ID3D12CommandQueue* queue,
 #ifdef VEYRA_HAS_FSR
     auto& p = *p_;
     (void)fgMultiplier;
-    const auto root = runtime::localDataDirectory() / "amd" / "framegeneration";
+    const auto root = runtime::localDataDirectory() / "amd" / "fidelityfx";
     const auto loaderPath = std::filesystem::absolute(root / "amd_fidelityfx_loader_dx12.dll");
     const auto providerPath = std::filesystem::absolute(root / "amd_fidelityfx_framegeneration_dx12.dll");
 

@@ -181,6 +181,19 @@ int wmain(int argc, wchar_t** argv) {
     std::wprintf(L"[fsr-up] adapter=%s vendor=0x%04X\n", adapterDesc.Description, adapterDesc.VendorId);
 
     ComPtr<ID3D12Device> device;
+    bool diag = false;
+    for (int i = 1; i < argc; ++i) if (_wcsicmp(argv[i], L"--diag") == 0) diag = true;
+    if (diag) {
+        // Debug layer + GPU-based validation, the same pair the product's
+        // quality probe uses, so probe results can be compared directly.
+        ComPtr<ID3D12Debug> debug;
+        ComPtr<ID3D12Debug1> gbv;
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))) && SUCCEEDED(debug.As(&gbv))) {
+            debug->EnableDebugLayer();
+            gbv->SetEnableGPUBasedValidation(TRUE);
+            std::printf("[fsr-up] debug layer + GPU-based validation enabled\n");
+        }
+    }
     if (FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device)))) {
         std::printf("[fsr-up] D3D12CreateDevice failed\n");
         return 5;
