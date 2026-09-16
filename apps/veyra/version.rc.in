@@ -14,9 +14,9 @@ BEGIN
   BLOCK "040904B0"
   BEGIN
    VALUE "FileDescription", "Veyra Video Player"
-   VALUE "FileVersion", "@PROJECT_VERSION@"
+   VALUE "FileVersion", "@VEYRA_DISPLAY_VERSION@"
    VALUE "ProductName", "Veyra"
-   VALUE "ProductVersion", "@PROJECT_VERSION@"
+   VALUE "ProductVersion", "@VEYRA_DISPLAY_VERSION@"
    VALUE "OriginalFilename", "Veyra.exe"
    VALUE "LegalCopyright", "Veyra contributors. GPL-3.0."
   END

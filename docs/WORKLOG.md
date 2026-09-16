@@ -2351,6 +2351,40 @@ DLSSG 能力门控没有排除 FSR，导致 FSR 会话下任何就地设置变�
 
 ### 2026-09-16 XeSS 节奏 hook（A-2）移植 + 用 4K/30fps 素材实测
 
+### 2026-09-16 1.3.1beta 测试包（用户统一验收用）
+
+版本号改成 **1.3.1beta**：CMake 数值版本 1.3.1（`project(VERSION)` 不接受非数字），
+新增 `VEYRA_DISPLAY_VERSION=1.3.1beta` 写入 EXE 版本资源（`FileVersion`/`ProductVersion`
+实测均为 `1.3.1beta`）。打包脚本新增 `-Label beta` 只影响 staging/ZIP 名，
+版本校验改为"数值前缀匹配"，并新增 1.3.1 起把 **AMD FidelityFX 组件**放进包：
+
+| 文件 | 目录 | 版本 | 签名 | SHA-256 |
+| --- | --- | --- | --- | --- |
+| amd_fidelityfx_loader_dx12.dll | runtime_local/amd/fidelityfx | 2.3.0.2740 | Valid (AMD) | E2D85AA0…608AA |
+| amd_fidelityfx_framegeneration_dx12.dll | 同上 | 4.0.1.2740 | Valid (AMD) | 02297BEE…C2F18 |
+| amd_fidelityfx_upscaler_dx12.dll | 同上 | 4.1.1.2740 | Valid (AMD) | D0DCCCC7…C9FB46 |
+
+许可证 `licenses/AMD-FIDELITYFX-LICENSE.txt`（MIT，取自 vendored SDK `docs/license.md`），
+三者单独写在 `runtime_local/amd/fidelityfx/release-runtime-manifest.json`（含大小/哈希/版本/签名类别/
+experimental/removable）——这一步是补的：脚本原先只给两个旧目录写 manifest，AMD 目录会漏。
+
+产物：`C:\veyra-test-packages\final\Veyra-1.3.1beta-win64-portable.zip`
+469,750,063 字节 / SHA256 `CD72F80456736E0FC7A110B273ED33B7EB87ED7D87D31450F0B143C55707D000`，
+包内 `Veyra.exe` 报告版本 `1.3.1beta`，`package-manifest.json` 107 个文件。
+
+**从包内实跑验证（不是只打包）**：
+
+| 路径 | 结果 |
+| --- | --- |
+| FSR 帧生成 `--fg-fsr`（4K 源） | `using the retained AMD proxy swapchain`，282 真实 / 278 生成，exit 0 |
+| XeSS 4X `--fg-xess --fg-multiplier 4`（4K 源） | unlock 5/5、`pacing installed`、inBurstGaps mean **8.305ms**（目标 8.33）、refused=0、exit 0 |
+| FSR 超分 `--video-sr 5`（1080p→4K） | `fsr-sr providers count=2 selected=3.1.5`、`graph sr=1`、228 帧 exit 0 |
+| DLSS 6X `--fg-multiplier 6`（1080p 源） | `multiFrameMax=5`、160 真实 / 790 生成、exit 0 |
+
+注：4K 源 + 默认 4K 目标时 SR 不会被应用（`sr=0`，无需放大），这是正确行为，不是包的问题。
+先前一次打包（AMD 目录缺 manifest）的产物仍在 `C:\veyra-test-packages\` 根目录，属被取代的版本，
+本环境策略禁止 Agent 删文件，需用户自行删除。
+
 移植 `Coldwood1026/OptiScaler`（GPL-3.0，`70676c5f`）`XeFGPacing.h` 的**核心调度调用**到
 `include/veyra/gfx/XessPacing.h` + `src/gfx/XessPacing.cpp`（present thunk `0x25C0` 用既有
 `ThunkHook` 接管，返回地址过滤 `0x2202ED`/`0x220467`，把循环里的生成帧交给提供方自己的调度器

@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(veyra VERSION 1.3.0 LANGUAGES CXX RC)
+project(veyra VERSION 1.3.1 LANGUAGES CXX RC)
+# Shown in the EXE's version resource and in the package name. CMake versions
+# must be numeric, so the beta marker lives here instead.
+set(VEYRA_DISPLAY_VERSION "1.3.1beta" CACHE STRING "Human-readable version string")
 
 # Match the compiler's actual bytes, including on localized Windows installs.
 # CMake's cached, decoded prefix can leave Ninja with zero header dependencies.
