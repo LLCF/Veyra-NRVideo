@@ -1,5 +1,6 @@
 #pragma once
 #include "veyra/engine/BackendRecovery.h"
+#include <atomic>
 
 // EnhanceGraph - the real unified processing graph (Playbook R3.2).
 // Chains, per real frame:
@@ -122,6 +123,17 @@ public:
     // safe after every allocation in the process has happened.
     bool initialize(const EnhanceGraphDesc& desc);
     bool createViews();
+    // N2 direct capture ingress (single-plane rgb/yuy2/packed ingress only).
+    // The producer asks for a slot's mapped upload buffer after its upload
+    // fence, writes the frame and commits it; the consumer passes an AVFrame
+    // view over the same buffer to process(), which then skips the CPU copy.
+    // Returns false while the graph is not ready, so the caller keeps its own
+    // mailbox instead of touching stale buffers.
+    bool prepareIngressSlot(unsigned slot,void*& buffer,size_t& capacity,unsigned& pitch,unsigned& rowBytes);
+    // Non-blocking variant: returns false while the slot's previous upload is
+    // still in flight, so the capture callback can fall back to its mailbox
+    // instead of blocking the DirectShow thread on a GPU fence.
+    bool tryPrepareIngressSlot(unsigned slot,void*& buffer,size_t& capacity,unsigned& pitch,unsigned& rowBytes);
 
     struct FrameOutputs {
         FrameBatch batch;
@@ -353,6 +365,7 @@ private:
     std::weak_ptr<FrameLease> realLeases_[2],generatedLeases_[kGeneratedPoolSlots];
     uint32_t nextListSlot_ = 0;
     uint64_t uploadFences_[2] = {};
+    std::atomic<bool> ingressDirectReady_{false};
     // FFmpeg may recycle a hardware surface as soon as its AVFrame is freed.
     // Retain each imported surface until our last consumer fence completes.
     std::shared_ptr<AVFrame> hardwareInputFrames_[2];

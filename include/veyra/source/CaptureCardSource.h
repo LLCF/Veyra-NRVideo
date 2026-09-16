@@ -55,6 +55,19 @@ public:
     // N1 diagnostic: keep the legacy per-pixel CPU unpack (BGR0/YUY2 targets)
     // instead of the GPU unpack path. Applied on the next connect.
     void setCpuUnpack(bool enabled);
+    // N2 direct ingress: the graph provides mapped upload buffers; the
+    // callback writes capture frames straight into them and the owned mailbox
+    // stays as the fallback whenever prepare() returns false (graph rebuilding,
+    // slot busy, stale buffer). releaseDirectFrame() is called by the consumer
+    // once the frame returned by read() has been consumed.
+    struct DirectIngressHooks {
+        void* context=nullptr;
+        bool (*prepare)(void* context,unsigned slot,void*& buffer,size_t& capacity,unsigned& pitch,unsigned& rowBytes)=nullptr;
+    };
+    bool attachDirectIngress(const DirectIngressHooks& hooks);
+    void detachDirectIngress();
+    bool directIngressActive() const;
+    void releaseDirectFrame();
     CaptureMetrics metrics()const;
     void videoPresented(double ptsMs,int64_t host100ns,int64_t arrival100ns);
     void videoReset(bool resetAudio=true);

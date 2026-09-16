@@ -148,6 +148,18 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
     unsigned bufferMode=0;
     // N1 diagnostic: legacy per-pixel CPU unpack instead of GPU unpack.
     bool cpuUnpack=false;
+    // N2 direct ingress state. The callback writes into the graph's mapped
+    // upload buffers; the owned mailbox remains the fallback.
+    DirectIngressHooks direct{};
+    std::atomic<bool> directActive{false};
+    std::atomic<bool> directInUse[2]{};
+    std::atomic<int> directLatest{-1};
+    unsigned directNext=0;              // callback thread only
+    AVFrame* directView[2]{};
+    void* directCommitted[2]{};
+    double directTime=0;Clock::time_point directArrival{};pipeline::Rational directDuration;bool directPending=false;
+    int directSlot=-1;                  // consumer slot handed out by read()
+    uint64_t directDrops=0;
     // Manual capture flip; read by the DirectShow callback thread.
     std::atomic<bool> verticalFlip{false};
     std::unique_ptr<WasapiAudioInput> wasapi;
@@ -166,16 +178,45 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
             std::lock_guard lock(mutex);
             if(!valid||!pendingFrame){callbackError=true;}
             else {
-                // Copy directly into our bounded mailbox; read() swaps frames
-                // under this lock, so the frame consumed by the GPU is untouched.
-                if(!copyCaptureSample(layout,data,size_t(sample->GetActualDataLength()),*pendingFrame,verticalFlip.load())){callbackError=true;wake.notify_one();return S_OK;}
-                if(pending)++dropped;
+                // N2: write straight into the graph's mapped upload buffer when
+                // one is offered; otherwise keep the owned mailbox (first frame,
+                // graph rebuild, or both slots busy).
+                AVFrame* target=pendingFrame;unsigned directSlot=0;bool useDirect=false;
+                if(directActive.load()&&direct.prepare){
+                    directSlot=directNext;
+                    void* buffer=nullptr;size_t capacity=0;unsigned pitch=0,rowBytes=0;
+                    bool ready=direct.prepare(direct.context,directSlot,buffer,capacity,pitch,rowBytes)&&buffer&&capacity>=layout.sampleBytes&&rowBytes>=layout.rowBytes;
+                    if(ready&&directInUse[directSlot].load()){
+                        const unsigned other=directSlot^1;
+                        ready=!directInUse[other].load()&&direct.prepare(direct.context,other,buffer,capacity,pitch,rowBytes)&&buffer&&capacity>=layout.sampleBytes&&rowBytes>=layout.rowBytes;
+                        if(ready)directSlot=other;
+                    }
+                    if(ready){
+                        useDirect=true;target=directView[directSlot];
+                        target->format=layout.format;target->width=int(layout.width);target->height=int(layout.height);
+                        target->data[0]=static_cast<uint8_t*>(buffer);target->linesize[0]=int(pitch);
+                        directCommitted[directSlot]=buffer;
+                    }
+                }
+                // Copy directly into the destination; read() hands the buffer
+                // out under this lock, so the frame consumed by the GPU is not
+                // overwritten while it is in use.
+                if(!copyCaptureSample(layout,data,size_t(sample->GetActualDataLength()),*target,verticalFlip.load())){callbackError=true;wake.notify_one();return S_OK;}
+                if(useDirect){
+                    if(pending){pending=false;++dropped;} // discard a stale mailbox frame
+                    directNext=directSlot^1;
+                    const int previous=directLatest.exchange(int(directSlot));
+                    if(previous>=0)++dropped;             // unconsumed direct frame overwritten
+                    directTime=time;directArrival=arrival;
+                }else if(pending)++dropped;
                 // Inspect consecutive callbacks, not consecutive mailbox reads.
                 // Preserve a driver/clock break when its sample is overwritten.
-                pendingDiscontinuity=captureDiscontinuity(pending,pendingDiscontinuity,
+                pendingDiscontinuity=captureDiscontinuity(pending||directPending,pendingDiscontinuity,
                     sample->IsDiscontinuity()==S_OK,received>0,pendingTime,time,info.averageFps);
-                pending=true;pendingTime=time;pendingArrival=arrival;
+                if(useDirect)directPending=true;else pending=true;
+                pendingTime=time;pendingArrival=arrival;
                 pendingDuration=captureDuration(sampleStart,sampleEnd,sampleTime,nominalDuration100ns);
+                if(useDirect)directDuration=pendingDuration;
                 if(!received)firstArrival=arrival;
                 ++received;latestArrival=arrival;
             }
@@ -263,6 +304,29 @@ void CaptureCardSource::setCpuUnpack(bool enabled){
     if(p.cpuUnpack==enabled)return;
     p.cpuUnpack=enabled;
     log::warn("capture-unpack",std::format("legacy CPU per-pixel unpack={} (diagnostic; takes effect on the next connect)",enabled?1:0));
+}
+bool CaptureCardSource::attachDirectIngress(const DirectIngressHooks& hooks){
+    auto& p=*p_;
+    if(!hooks.prepare)return false;
+    std::lock_guard lock(p.mutex);
+    if(!p.configured||p.layout.planes!=1)return false;
+    for(auto*& view:p.directView){if(!view)view=av_frame_alloc();if(!view)return false;}
+    p.direct=hooks;p.directNext=0;p.directLatest.store(-1);p.directInUse[0].store(false);p.directInUse[1].store(false);
+    p.directSlot=-1;p.directPending=false;p.directCommitted[0]=p.directCommitted[1]=nullptr;
+    p.directActive.store(true);
+    log::info("capture-direct",std::format("graph direct ingress attached format={} rowBytes={} (owned mailbox retained as fallback)",int(p.layout.format),p.layout.rowBytes));
+    return true;
+}
+void CaptureCardSource::detachDirectIngress(){
+    auto& p=*p_;std::lock_guard lock(p.mutex);
+    if(!p.directActive.exchange(false))return;
+    p.direct={};p.directLatest.store(-1);p.directInUse[0].store(false);p.directInUse[1].store(false);p.directSlot=-1;p.directPending=false;
+    log::info("capture-direct","graph direct ingress detached");
+}
+bool CaptureCardSource::directIngressActive()const{return p_->directActive.load();}
+void CaptureCardSource::releaseDirectFrame(){
+    auto& p=*p_;std::lock_guard lock(p.mutex);
+    if(p.directSlot>=0){p.directInUse[unsigned(p.directSlot)].store(false);p.directSlot=-1;}
 }
 bool CaptureCardSource::setAudioGain(float gain){
     if(p_->wasapi){p_->wasapi->setGain(gain);return p_->wasapi->snapshot().available;}
@@ -687,13 +751,33 @@ SourceReadStatus CaptureCardSource::read(pipeline::FramePacket& packet,const AVF
 SourceReadStatus CaptureCardSource::tryRead(pipeline::FramePacket& packet,const AVFrame** frame){return readWithWait(packet,frame,0);}
 SourceReadStatus CaptureCardSource::readWithWait(pipeline::FramePacket& packet,const AVFrame** frame,unsigned milliseconds){auto& p=*p_;*frame=nullptr;if(!p.info.opened)return SourceReadStatus::Error;
     long code=0;LONG_PTR a=0,b=0;while(p.events&&p.events->GetEvent(&code,&a,&b,0)==S_OK){if(code==EC_DEVICE_LOST||code==EC_ERRORABORT)log::warn("capture-reconnect",std::format("DirectShow event={} detail=0x{:X}",code,uint64_t(a)));p.events->FreeEventParams(code,a,b);if(code==EC_DEVICE_LOST||code==EC_ERRORABORT)return SourceReadStatus::Error;}
-    double time=0;uint32_t flags=0;uint64_t sequence=0;pipeline::Rational duration;
+    double time=0;uint32_t flags=0;uint64_t sequence=0;pipeline::Rational duration;AVFrame* outFrame=nullptr;
     {
-        std::unique_lock lock(p.mutex);if(milliseconds)p.wake.wait_for(lock,std::chrono::milliseconds(milliseconds),[&]{return p.pending||p.callbackError;});
+        std::unique_lock lock(p.mutex);if(milliseconds)p.wake.wait_for(lock,std::chrono::milliseconds(milliseconds),[&]{return p.pending||p.directLatest.load()>=0||p.callbackError;});
         if(p.callbackError)return SourceReadStatus::Error;
-        if(!p.pending)return Impl::Clock::now()-p.lastFrame>std::chrono::seconds(3)?SourceReadStatus::Error:SourceReadStatus::Waiting;
-        std::swap(p.frame,p.pendingFrame);p.pending=false;time=p.pendingTime;p.readArrival=p.pendingArrival;
-        duration=p.pendingDuration;
+        if(p.directActive.load()&&p.directLatest.load()>=0){
+            const int slot=p.directLatest.exchange(-1);
+            if(slot>=0){
+                const unsigned s=unsigned(slot);
+                void* buffer=nullptr;size_t capacity=0;unsigned pitch=0,rowBytes=0;
+                if(p.direct.prepare&&p.direct.prepare(p.direct.context,s,buffer,capacity,pitch,rowBytes)&&buffer==p.directCommitted[s]){
+                    p.directInUse[s].store(true);p.directSlot=int(s);p.directPending=false;
+                    outFrame=p.directView[s];time=p.directTime;p.readArrival=p.directArrival;duration=p.directDuration;
+                }else{
+                    // The graph rebuilt between commit and read: the bytes live
+                    // in a retired buffer, so drop the frame instead of reading
+                    // stale memory. The mailbox path below stays available.
+                    ++p.directDrops;++p.dropped;
+                    if(p.directInUse[s].load())p.directInUse[s].store(false);
+                }
+            }
+        }
+        if(!outFrame){
+            if(!p.pending)return Impl::Clock::now()-p.lastFrame>std::chrono::seconds(3)?SourceReadStatus::Error:SourceReadStatus::Waiting;
+            std::swap(p.frame,p.pendingFrame);p.pending=false;time=p.pendingTime;p.readArrival=p.pendingArrival;
+            duration=p.pendingDuration;
+            outFrame=p.frame;
+        }
         p.readAgeMs=std::chrono::duration<double,std::milli>(Impl::Clock::now()-p.readArrival).count();
         if(!p.sequence)flags|=static_cast<uint32_t>(pipeline::FrameFlagBits::Open);
         if(p.dropped!=p.lastDrop)flags|=static_cast<uint32_t>(pipeline::FrameFlagBits::Drop);
@@ -701,10 +785,10 @@ SourceReadStatus CaptureCardSource::readWithWait(pipeline::FramePacket& packet,c
         if(p.forceDiscontinuity){flags|=static_cast<uint32_t>(pipeline::FrameFlagBits::Discontinuity);p.forceDiscontinuity=false;}
         p.lastDrop=p.dropped;p.lastPts=time;++p.sequence;sequence=p.received;
     }
-    p.frame->pts=static_cast<int64_t>(time*10000000);p.frame->duration=duration.isUnknown()?0:duration.to100ns();p.frame->time_base={1,10000000};packet={};packet.pts={p.frame->pts,10000000};packet.duration=duration;packet.colorInfo=p.info.color;packet.sourceKind=pipeline::SourceKind::CaptureCard;packet.sequence=sequence;packet.flags=flags;packet.sourceEpoch=1;
+    outFrame->pts=static_cast<int64_t>(time*10000000);outFrame->duration=duration.isUnknown()?0:duration.to100ns();outFrame->time_base={1,10000000};packet={};packet.pts={outFrame->pts,10000000};packet.duration=duration;packet.colorInfo=p.info.color;packet.sourceKind=pipeline::SourceKind::CaptureCard;packet.sequence=sequence;packet.flags=flags;packet.sourceEpoch=1;
     packet.sequence+=receivedOffset_;packet.sourceEpoch=epoch_;
     packet.arrivalHost100ns=std::chrono::duration_cast<std::chrono::nanoseconds>(p.readArrival.time_since_epoch()).count()/100;
-    *frame=p.frame;p.lastFrame=Impl::Clock::now();return SourceReadStatus::Frame;
+    *frame=outFrame;p.lastFrame=Impl::Clock::now();return SourceReadStatus::Frame;
 }
 void CaptureCardSource::close()noexcept{
     auto& p=*p_;if(p.control){const HRESULT hr=p.control->Stop();if(FAILED(hr))log::error("capture-close",std::format("Stop failed hr=0x{:08X}; releasing graph",uint32_t(hr)));}if(p.grab){const HRESULT hr=p.grab->SetCallback(nullptr,0);if(FAILED(hr))log::error("capture-close",std::format("detach callback hr=0x{:08X}",uint32_t(hr)));}
@@ -712,7 +796,8 @@ void CaptureCardSource::close()noexcept{
     if(p.audioSession)p.audioSession->stop();p.audioError.clear();
     if(p.audioPassthrough)p.audioPassthrough->close();
     p.events.Reset();p.control.Reset();p.grab.Reset();p.nullFilter.Reset();p.grabFilter.Reset();p.audioSink.Reset();p.audioFilter.Reset();p.config.Reset();p.device.Reset();p.builder.Reset();p.graph.Reset();p.referenceClock.Reset();p.audioSession.reset();p.audioPassthrough.reset();
-    av_frame_free(&p.frame);av_frame_free(&p.pendingFrame);p.info={};
+    av_frame_free(&p.frame);av_frame_free(&p.pendingFrame);for(auto*& view:p.directView)av_frame_free(&view);
+    p.directActive.store(false);p.direct={};p.directLatest.store(-1);p.info={};
     p.sequence=p.received=p.dropped=p.lastDrop=0;p.pending=p.callbackError=p.configured=p.forceDiscontinuity=false;p.lastPts=p.readAgeMs=0;
 }
 }

@@ -21,6 +21,10 @@ struct PlayerOptions { bool nr=false,sr=false,fg=false,realtime=true; uint32_t f
     bool captureReplayForTest=false; // file-backed live scheduler test; never enabled by UI
     bool captureReplayDisableFgAdmissionForTest=false; // controlled scheduler A/B only
     bool captureCpuUnpack=false; // N1 diagnostic: legacy per-pixel CPU unpack
+    // N2 direct ingress is opt-in: the first implementation (callback writes
+    // into the graph upload buffers) failed real-card verification (10fps /
+    // 460+ drops on 2026-09-16), so the default stays on the owned mailbox.
+    bool captureDirectIngress=false;
     EnhancementSettings snapshot()const{auto s=settings;s.nr=nr;s.sr=sr;s.multiplier=fg?fgMultiplier:1;s.nrPolicy=realtime?(settings.nrPolicy==pipeline::NrSizePolicy::Native?pipeline::NrSizePolicy::Realtime:settings.nrPolicy):pipeline::NrSizePolicy::Native;return s;}
     static PlayerOptions from(EnhancementSettings s){PlayerOptions o;o.nr=s.nr;o.sr=s.sr;o.fg=s.multiplier>1;o.fgMultiplier=std::max(2u,s.multiplier);o.realtime=s.nrPolicy!=pipeline::NrSizePolicy::Native;o.settings=s;return o;}
 };

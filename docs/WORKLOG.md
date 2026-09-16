@@ -1,5 +1,13 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-16 采集链路 N2 第一版：直接写入图上传缓冲（真机验证失败，默认关闭）
+
+按方案 §8 N2 实现"两次拷贝合并成一次"的第一版：`EnhanceGraph::prepareIngressSlot/tryPrepareIngressSlot` 暴露映射上传缓冲（写入前检查该 slot 的 upload fence，非阻塞版供采集回调使用）；`CaptureCardSource` 增加 `DirectIngressHooks`（attach/detach/releaseDirectFrame、双槽握手、inUse/latest 原子、图重建时丢弃陈旧缓冲并回退信箱）；`EnhanceGraph::process` 在帧指针等于映射缓冲时跳过 CPU 拷贝；引擎在建图后 attach、process 后 release；CLI `--capture-direct-ingress` 开启（默认关）。
+
+**真机验证（¥30 UVC 卡 1080p60 YUY2，10 秒）失败**：开启后 `processedFps=10.00`、`captureDropped≈465`、`mailboxOverwritten≈460`、`historyResets=101`（每帧一次重置）、`callbackToPresentReturnP95Ms=169ms`、`firstValidObserveMs=84.5ms`；两次修正（回调改用非阻塞 fence 检查、读取时校验缓冲指针是否已随图重建失效）后数值不变。默认（信箱路径）同卡复测正常：577 帧、60fps、0 丢帧、callback→Present P95 2.673ms；delivery 门禁 PASS（`logs/delivery/fa725fe8b5e844fd910600211ce35c9f/result.json`）。
+
+**处置**：`PlayerOptions::captureDirectIngress` 默认 **false**，保留 `--capture-direct-ingress` 供继续排查；信箱路径与所有既有行为不变。**未完成（如实）**：N2 未达标，需定位直接写入路径导致引擎每帧 reset/10fps 的根因（怀疑方向：Drop 标志自激、图 parity 与源槽位错位、upload fence 覆盖范围过大），修复并重新真机验证前不得计入收益。压缩解码链路仍未开工。
+
 ## 2026-09-16 采集链路 N1：逐像素转换从 CPU 挪到 GPU
 
 - 采集侧：`captureMediaLayout` 对 UYVY/YVYU/BGR24/RGB555/RGB565 保留驱动真实 packing（UYVY422/YVYU422/BGR24/RGB555LE/RGB565LE）；`copyCaptureSample` 改为按行原样拷贝（保留 DIB 方向契约、手动翻转与 YUV 色度行跟随）；新增 `captureLegacyCpuLayout` + `--capture-cpu-unpack` 诊断开关，旧 BGR0/YUY2 逐像素转换仍可回退。

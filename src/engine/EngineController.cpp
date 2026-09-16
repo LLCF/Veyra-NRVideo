@@ -280,6 +280,13 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     auto failure=graph.failedBackend();
                     if(opened){
                         opened=presenter.open(ctx,window,graph,selected.settings.captureCompatible)&&graph.createViews();
+                        if(opened&&physicalCapture&&options.captureDirectIngress){
+                            source::CaptureCardSource::DirectIngressHooks hooks{};
+                            hooks.context=&graph;
+                            hooks.prepare=[](void* context,unsigned slot,void*& buffer,size_t& capacity,unsigned& pitch,unsigned& rowBytes){
+                                return static_cast<pipeline::EnhanceGraph*>(context)->tryPrepareIngressSlot(slot,buffer,capacity,pitch,rowBytes);};
+                            if(captureSource.attachDirectIngress(hooks))veyra::log::info("capture-direct","N2 direct capture ingress enabled");
+                        }
                         failure=FailedBackend::Infrastructure;
                         if(opened&&graph.xessEnabled()&&!presenter.xessActive()){opened=false;failure=FailedBackend::Fg;}
                         if(opened&&graph.fsrEnabled()&&!presenter.fsrActive()){opened=false;failure=FailedBackend::Fg;}
@@ -932,6 +939,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 wchar_t testWork[16]{};
                 if(!isImage&&GetEnvironmentVariableW(L"VEYRA_TEST_VIDEO_WORK_MS",testWork,16))std::this_thread::sleep_for(std::chrono::milliseconds(std::clamp(_wtoi(testWork),0,150)));
                 bool processed=false;{processWaitBase=ring.cpuWaitCount();processWaitMsBase=ring.cpuWaitMilliseconds();processSubmitBase=ring.submitCount();processed=!injectedReject&&graph.process(frame,pts,historyReset,out,pkt.sequence,&pkt.colorInfo,comparisonMode_!=0,admitFg);processSlotWaitMs=ring.cpuWaitMilliseconds()-processWaitMsBase;}
+                if(physicalCapture)captureSource.releaseDirectFrame();
                 previewSkipSinceProcess=false;
                 if(!processed){
                     const auto failedComponent=graph.failedBackend();
