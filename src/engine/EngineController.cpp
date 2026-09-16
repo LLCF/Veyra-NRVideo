@@ -166,6 +166,11 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 if(!isCapture&&GetEnvironmentVariableW(L"VEYRA_TEST_FILE_HW_DECODE",nullptr,0)){
                     od.preferHardwareDecode=true;od.d3d12Device=ctx.device();od.d3d12Queue=ctx.directQueue();
                 }
+                // Capture ingest flip is a per-sample source-side property; set
+                // it before the branch chain so the first sample already honors
+                // it. Never insert statements between `}else` and the open call
+                // below: the `else` only binds to the next single statement.
+                captureSource.setVerticalFlip(options.settings.captureFlipVertical);
 #ifdef VEYRA_ENABLE_REMOTEPLAY
                 if(remote){
                     status(L"正在连接 PS5…");
@@ -182,9 +187,12 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                         std::this_thread::sleep_for(std::chrono::milliseconds(2));
                     }
                     if(stop_||!cachedFrame)break;
-                }else
+                }else{
 #endif
                 if(!(physicalCapture?captureSource.configure(od):activeSource->open(od))){status(!isCapture&&!source.errorMessage().empty()?source.errorMessage():L"无法打开视频，请查看诊断",true);break;}
+#ifdef VEYRA_ENABLE_REMOTEPLAY
+                }
+#endif
                 // A file's actual decoded pixel format and HDR VUI are only
                 // reliable on AVFrame. Prime one frame before constructing
                 // the graph so AV1/MOV 10-bit and HDR inputs do not get an
@@ -273,6 +281,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 if(graph.xessEnabled()&&!presenter.xessActive())snapshot_.backendWarning=L"XeSS 初始化失败；当前为普通呈现";
             }
             captureSource.setAudioSync(unsigned(options.settings.audioSync),options.settings.audioOffsetMs);
+            captureSource.setVerticalFlip(options.settings.captureFlipVertical);
             if(physicalCapture&&!captureSource.start()){status(L"无法启动采集，请查看诊断",true);break;}
             {std::lock_guard lock(mutex_);snapshot_.duration=duration;snapshot_.nominalSourceFps=isImage?0:activeSource->info().averageFps;snapshot_.running=true;snapshot_.transport=TransportState::Playing;snapshot_.image=isImage;snapshot_.capture=isCapture;snapshot_.applied=options.snapshot();snapshot_.desired=desired_;}
             status(isImage?L"图片已增强，可保存PNG/JPEG":std::format(L"{} | 输入 {}×{} / 底图 {}×{} / NR {}×{} / 光流 {}×{} / FG与输出 {}×{} | {}",isRemote?L"PS5 串流":isCapture?L"实时采集":L"播放",width,height,gd.workWidth,gd.workHeight,gd.nrWidth,gd.nrHeight,gd.flowWidth,gd.flowHeight,gd.workWidth,gd.workHeight,gd.nrBeforeSr?L"低延迟 · NR先行后超分":gd.nrWidth<gd.workWidth?L"实时内部处理并回填":L"原生NR（性能成本较高）"));
@@ -486,6 +495,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     ++captureRetries;
                     {std::lock_guard lock(mutex_);snapshot_.captureReconnectAttempts=captureRetries;}
                     status(std::format(L"采集信号中断，正在重连原设备（第 {} 次）",captureRetries));
+                    captureSource.setVerticalFlip(options.settings.captureFlipVertical);
                     if(captureSource.reconnect(muted_?0.0f:volume_.load(),unsigned(options.settings.audioSync),options.settings.audioOffsetMs)){
                         captureRecovering=false;reset=true;pendingResetCause=pipeline::ResetReason::DeviceLost;captureSampler.reset();
                         {std::lock_guard lock(mutex_);snapshot_.captureRecovering=false;}
@@ -507,6 +517,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 const float gain=muted_?0.0f:volume_.load();audio.setGain(gain);
                 if(physicalCapture)captureSource.recoverAudio(gain,unsigned(options.settings.audioSync),options.settings.audioOffsetMs);
                 captureSource.setAudioSync(unsigned(options.settings.audioSync),options.settings.audioOffsetMs);
+                captureSource.setVerticalFlip(options.settings.captureFlipVertical);
                 if(physicalCapture){const bool available=captureSource.setAudioGain(gain);const auto audioState=captureSource.audioState();std::lock_guard lock(mutex_);snapshot_.audioAvailable=available;snapshot_.captureAudio=audioState;snapshot_.audioInputChannels=audioState.inputChannels;snapshot_.audioOutputChannels=audioState.outputChannels;}
 #ifdef VEYRA_ENABLE_REMOTEPLAY
                 if(remote){remote->setAudioGain(gain);remote->setAudioSync(unsigned(options.settings.audioSync),options.settings.audioOffsetMs);
@@ -524,6 +535,13 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 if(requested.revision==options.settings.revision&&requested!=options.settings){
                     options.settings.audioSync=requested.audioSync;options.settings.audioOffsetMs=requested.audioOffsetMs;
                     captureSource.setAudioSync(unsigned(requested.audioSync),requested.audioOffsetMs);
+                    // The manual capture flip is applied per sample on the
+                    // DirectShow callback thread, so it is a live edit.
+                    if(requested.captureFlipVertical!=options.settings.captureFlipVertical){
+                        options.settings.captureFlipVertical=requested.captureFlipVertical;
+                        captureSource.setVerticalFlip(requested.captureFlipVertical);
+                        status(requested.captureFlipVertical?L"采集画面已上下翻转（仅影响本机采集画面）":L"采集画面方向已恢复",false);
+                    }
                     std::lock_guard lock(mutex_);snapshot_.applied=options.snapshot();snapshot_.applying=desired_!=snapshot_.applied;
                     veyra::log::info("settings",std::format("Audio applied videoRevision={} mode={} offsetMs={} (video history retained)",requested.revision,unsigned(requested.audioSync),requested.audioOffsetMs));
                 }

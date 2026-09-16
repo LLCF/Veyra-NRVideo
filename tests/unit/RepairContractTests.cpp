@@ -148,6 +148,7 @@ int main(){
     check(pipeline::ResolutionPlan::make({1448,1086},true,pipeline::NrSizePolicy::Native,true,1,pipeline::SrTarget::Uhd8K).output==pipeline::Extent{5760,4320},"8K 4:3 aspect preserved");
     check(pipeline::ResolutionPlan::make({8000,2000},true,pipeline::NrSizePolicy::Native,true,1,pipeline::SrTarget::Qhd).output==pipeline::Extent{8000,2000},"small target never shrinks long image");
     engine::EnhancementSettings s;check(s.validate().empty(),"default settings valid");
+    check(!s.captureFlipVertical,"capture vertical flip defaults off");
     auto audioOnly=s;audioOnly.revision=2;audioOnly.audioSync=engine::AudioSyncMode::Manual;audioOnly.audioOffsetMs=90;
     check(audioOnly.sameVideoConfiguration(s),"audio changes do not invalidate video configuration");
     auto attempted=audioOnly;attempted.model.style=1;

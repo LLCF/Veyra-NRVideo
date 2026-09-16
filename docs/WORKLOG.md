@@ -1,5 +1,15 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-16 RGB24 采集倒像修复并入 main（用户选定 A+B，不做强制转换 C）
+
+用户完成隔离分支上的两个修复后，要求把修复并入 main 并建立 git 存档。审计发现 main（693db07）**不包含** 2ffb5c7（采集音频手动入口），因此 PS5"无法打开视频"回归只存在于隔离分支与由其打出的 1.3.1beta 测试包；main 原本没有该缺陷。本次在 main 只移植 RGB24 方向修复，并把同一处 `else` 补上大括号防呆（行为不变）。
+
+内容：直连 RGB DIB（RGB24/RGB32/ARGB32/555/565）且 `biHeight>0` 时先向驱动协商 top-down（`SetFormat` 负高度），接受则按实际连接类型不翻转，拒绝则保持原符号翻转；新增采集面板"画面上下翻转"开关（`captureFlipVertical`，按样本立即生效、预设 schema v12→v13、`--capture-flip` 仅诊断）；`copyCaptureSample` 支持可选翻转参数（RGB 与 YUV 通用，YUV 色度行同步翻转）；采集颜色测试补上真正的方向断言（此前单元用例自证式、GPU 用例每行相同，上下翻转测不出来）。
+
+验证：`cmd.exe /c out\build\veyra-build-x64-release.cmd` exit 0（166/166）；`veyra_capture_color_tests.exe` failures=0（新增方向用例全 PASS）；`veyra_repair_contract_tests.exe` 145 checks 0 failures；`veyra_repair_preset_tests.exe <tmp>` 48 组迁移 + 全字段往返通过；实卡烟测 `capture:0:0:-1:0 --smoke-seconds 8 --capture-flip` exit 0、frames=458、failed=false、captureDropped=0，日志 `[capture-flip] manual vertical flip=1`；delivery 短测 23/23 PASS，48.69 秒，`logs/delivery/94abadd1321948ad84fb46a1c1920e0a/result.json`，EXE SHA256 `A7AF379D7DD7F6183965CED7E01CA7ED423EE747CBAB28AE514C65E3127B8CFD`。
+
+未执行：本机无 RGB24 设备，`DIB top-down request` 协商是否被问题卡接受仍待受影响用户实机确认（被拒绝时用面板开关兜底）；未打包、未发布、未 push。分支侧两个修复的存档为 `015f8a4` / tag `checkpoint/ps5-rgb24-fixes-20260916`，main 侧为 tag `checkpoint/main-rgb24-orientation-20260916`。完整记录见 [RGB24 采集倒像修复](CAPTURE_RGB24_ORIENTATION_2026-09-16.md)。
+
 ## 2026-09-15 采集卡直播窗口标题修复（第三方工具“识别不到 Veyra”）
 
 用户反馈除 OBS 外各平台直播工具无法识别“正在采集中的 Veyra”，且顺序敏感：先抓到窗口再开采集卡正常，先开采集卡再抓就抓不到。实机取证确认根因是 Veyra 自己：采集卡来源 `capture:`/`capture2:` 连接串被当文件名写进主窗口标题，实测标题长 776 字符（`Veyra — capture2:<十六进制设备路径>:...`），空闲/播放文件时为正常短名；直播伴侣日志把该标题截断到 259 字符后参与来源命名，其包内前端以 `${exe} ${title}` 命名来源。同场会话的 mediasdk_server 日志显示“采集卡已运行再添加 game 来源”的 hook 通路实际成功（`Load Shared Texture Success, size: 842 x 494`、`OnAutoSwitchMode from Window to Game`、GameSource 连续 60 秒以上有数据），因此本轮不做换链/画面的猜测性改动。

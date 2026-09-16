@@ -42,6 +42,10 @@ public:
     // Owner-thread recovery of DirectShow audio pins; same video filter retained.
     void recoverAudio(float gain,unsigned syncMode,int offsetMs);
     bool setAudioGain(float); // call on the graph owner thread; never system volume
+    // Manual ingest flip for devices whose declared DIB orientation does not
+    // match the samples (RGB24 upside-down reports). Applies to the next
+    // sample; works for RGB and YUV without touching the device.
+    void setVerticalFlip(bool enabled);
     CaptureMetrics metrics()const;
     void videoPresented(double ptsMs,int64_t host100ns,int64_t arrival100ns);
     void videoReset(bool resetAudio=true);

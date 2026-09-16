@@ -70,6 +70,12 @@ struct EnhancementSettings {
     bool lowLatency=false; // preview only: NR before SR, opt-in
     NrRuntime nrRuntime=NrRuntime::Original;
     bool captureCompatible=false;
+    // Capture ingest only: flip the incoming frame vertically. Exists because
+    // some devices declare a DIB orientation that does not match their samples
+    // (RGB24 upside-down reports); the capture source asks for top-down first,
+    // this is the manual fallback when a driver still misreports. Applies to
+    // the next sample, so it is a live edit, not a graph rebuild.
+    bool captureFlipVertical=false;
     bool forceSdrPreview=false; // display only; retain actual HDR source metadata
     bool useHdrPreview(bool hdrInput,bool hdrDisplayActive)const{return hdrInput&&hdrDisplayActive&&!forceSdrPreview;}
     pipeline::SrTarget srTarget=pipeline::SrTarget::Uhd4K;
@@ -89,6 +95,9 @@ struct EnhancementSettings {
         video.revision=other.revision;
         video.audioSync=other.audioSync;
         video.audioOffsetMs=other.audioOffsetMs;
+        // Capture flip is applied per sample on the source's callback thread;
+        // toggling it must not rebuild the graph.
+        video.captureFlipVertical=other.captureFlipVertical;
         return video==other;
     }
     void rejectVideoRequest(const EnhancementSettings& attempted,const EnhancementSettings& previous) {
