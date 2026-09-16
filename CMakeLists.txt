@@ -465,6 +465,7 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
     src/source/NativeCaptureSink.cpp
     src/source/MediaFileSource.cpp
     src/source/CaptureCardSource.cpp
+    src/source/CaptureCompressedDecoder.cpp
     src/source/WasapiAudioInput.cpp
   )
   veyra_apply_warnings(veyra_sources)
@@ -475,7 +476,7 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_include_directories(veyra_sources PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_link_libraries(veyra_sources PUBLIC veyra_pipeline veyra_media veyra_base)
-  target_link_libraries(veyra_sources PRIVATE ${FFMPEG_LIBRARIES} strmiids ole32 oleaut32)
+  target_link_libraries(veyra_sources PRIVATE ${FFMPEG_LIBRARIES} strmiids ole32 oleaut32 d3d12 dxgi)
 
   if(VEYRA_ENABLE_REMOTEPLAY)
     set(VEYRA_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -584,6 +585,11 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
   target_link_libraries(veyra_fg_admission_tests PRIVATE veyra_engine)
   target_compile_features(veyra_capture_color_tests PRIVATE cxx_std_20)
   target_link_libraries(veyra_capture_color_tests PRIVATE veyra_sources)
+  add_executable(veyra_capture_compressed_tests tests/unit/CaptureCompressedDecoderTests.cpp)
+  target_compile_features(veyra_capture_compressed_tests PRIVATE cxx_std_20)
+  target_compile_definitions(veyra_capture_compressed_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_include_directories(veyra_capture_compressed_tests PRIVATE ${FFMPEG_INCLUDE_DIRS})
+  target_link_libraries(veyra_capture_compressed_tests PRIVATE veyra_sources veyra_gfx ${FFMPEG_LIBRARIES})
   add_executable(veyra_yuy2_color_tests tests/integration/Yuy2ColorTests.cpp)
   target_compile_features(veyra_yuy2_color_tests PRIVATE cxx_std_20)
   target_link_libraries(veyra_yuy2_color_tests PRIVATE veyra_engine)

@@ -6,6 +6,7 @@
 #include "veyra/source/CaptureBuffer.h"
 #include "veyra/source/CaptureFormatRank.h"
 #include "veyra/source/CaptureCodec.h"
+#include "veyra/source/CaptureCompressedDecoder.h"
 #include "veyra/pipeline/ColorMetadata.h"
 #include "veyra/Log.h"
 #include "veyra/sink/AudioFormat.h"
@@ -16,11 +17,12 @@
 #include <dvdmedia.h>
 #include <ks.h>
 #include <ksmedia.h>
+#include <d3d12.h>
 #include <wrl/client.h>
 extern "C" {
 #include <libavcodec/avcodec.h>
-#include <libswscale/swscale.h>
 }
+#include <vector>
 #include <algorithm>
 #include <deque>
 #include <thread>
@@ -47,6 +49,81 @@ struct __declspec(uuid("6B652FFF-11FE-4FCE-92AD-0266B5D7C78F")) ISampleGrabber:I
 const CLSID SampleGrabberClass={0xc1f400a0,0x3f08,0x11d3,{0x9f,0x0b,0x00,0x60,0x08,0x03,0x9e,0x37}};
 const CLSID NullRendererClass={0xc1f400a4,0x3f08,0x11d3,{0x9f,0x0b,0x00,0x60,0x08,0x03,0x9e,0x37}};
 void freeType(AM_MEDIA_TYPE* t,bool pointer=true){if(!t)return;CoTaskMemFree(t->pbFormat);if(t->pUnk)t->pUnk->Release();if(pointer)CoTaskMemFree(t);}
+// MPEG2VIDEOINFO carries the codec's sequence header (SPS/PPS) for compressed
+// capture formats. Drivers are inconsistent: some store Annex-B with start
+// codes, some store 4-byte length-prefixed NAL units, some an
+// AVCDecoderConfigurationRecord / HEVCDecoderConfigurationRecord. Normalize
+// everything to the Annex-B form the FFmpeg decoders consume. An empty result
+// means the caller relies on the bitstream's in-band parameter sets, and a
+// decoder that still cannot start falls back to the RGB32 compatibility path.
+std::vector<uint8_t> captureCompressedExtradata(const AM_MEDIA_TYPE& type,CaptureCodec codec){
+    std::vector<uint8_t> result;
+    if(codec==CaptureCodec::None||codec==CaptureCodec::Mjpeg)return result;
+    if(type.formattype!=FORMAT_MPEG2Video||!type.pbFormat||type.cbFormat<sizeof(MPEG2VIDEOINFO))return result;
+    const auto& info=*reinterpret_cast<const MPEG2VIDEOINFO*>(type.pbFormat);
+    const size_t bytes=size_t(info.cbSequenceHeader);
+    if(bytes<4||bytes>256*1024)return result;
+    if(offsetof(MPEG2VIDEOINFO,dwSequenceHeader)+bytes>size_t(type.cbFormat))return result;
+    const uint8_t* data=reinterpret_cast<const uint8_t*>(info.dwSequenceHeader);
+    const auto appendNal=[&result](const uint8_t* nal,size_t length){
+        result.insert(result.end(),{0,0,0,1});
+        result.insert(result.end(),nal,nal+length);
+    };
+    // Already Annex-B (start code with 3 or 4 bytes).
+    if(data[0]==0&&data[1]==0&&(data[2]==1||(data[2]==0&&data[3]==1))){result.assign(data,data+bytes);return result;}
+    // AVCDecoderConfigurationRecord: version 1, SPS/PPS length-prefixed lists.
+    if(codec==CaptureCodec::H264&&data[0]==1&&bytes>=7){
+        size_t offset=5;
+        const unsigned spsCount=data[offset++]&0x1f;
+        for(unsigned i=0;i<spsCount;++i){
+            if(offset+2>bytes)return {};
+            const size_t length=(size_t(data[offset])<<8)|data[offset+1];offset+=2;
+            if(!length||offset+length>bytes)return {};
+            appendNal(data+offset,length);offset+=length;
+        }
+        if(offset>=bytes)return {};
+        const unsigned ppsCount=data[offset++];
+        for(unsigned i=0;i<ppsCount;++i){
+            if(offset+2>bytes)return {};
+            const size_t length=(size_t(data[offset])<<8)|data[offset+1];offset+=2;
+            if(!length||offset+length>bytes)return {};
+            appendNal(data+offset,length);offset+=length;
+        }
+        return result;
+    }
+    // HEVCDecoderConfigurationRecord: version 1, array of NAL units.
+    if(codec==CaptureCodec::Hevc&&data[0]==1&&bytes>=23){
+        const unsigned arrayCount=data[22];
+        size_t offset=23;
+        for(unsigned i=0;i<arrayCount;++i){
+            if(offset+3>bytes)return {};
+            const unsigned nalType=data[offset]&0x3f;++offset;
+            const unsigned count=(unsigned(data[offset])<<8)|data[offset+1];offset+=2;
+            for(unsigned j=0;j<count;++j){
+                if(offset+2>bytes)return {};
+                const size_t length=(size_t(data[offset])<<8)|data[offset+1];offset+=2;
+                if(!length||offset+length>bytes)return {};
+                // Keep VPS(32)/SPS(33)/PPS(34) only; other arrays are optional.
+                if(nalType==32||nalType==33||nalType==34)appendNal(data+offset,length);
+                offset+=length;
+            }
+        }
+        return result;
+    }
+    // Consecutive 4-byte length-prefixed NAL units.
+    std::vector<uint8_t> converted;
+    size_t offset=0;
+    while(offset+4<=bytes){
+        const size_t length=(size_t(data[offset])<<24)|(size_t(data[offset+1])<<16)|(size_t(data[offset+2])<<8)|size_t(data[offset+3]);
+        offset+=4;
+        if(!length||offset+length>bytes)return {};
+        converted.insert(converted.end(),{0,0,0,1});
+        converted.insert(converted.end(),data+offset,data+offset+length);
+        offset+=length;
+    }
+    if(offset!=bytes||converted.empty())return {};
+    return converted;
+}
 std::wstring propertyString(IMoniker* moniker,LPCOLESTR property){
     if(!moniker)return {};
     ComPtr<IPropertyBag> bag;VARIANT value;VariantInit(&value);std::wstring result;
@@ -159,8 +236,12 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
     // Decoding happens on the DirectShow callback thread for now (one decoder);
     // a bounded parallel decode queue is a later refinement.
     bool compressedPath=false;CaptureCodec codec=CaptureCodec::None;
-    AVCodecContext* decoder=nullptr;SwsContext* sws=nullptr;AVFrame* decoded=nullptr;
+    CaptureCompressedDecoder compressedDecoder;
+    ID3D12Device* decodeDevice=nullptr;ID3D12CommandQueue* decodeQueue=nullptr;
     uint64_t compressedDecoded=0,compressedErrors=0;
+    // D3D12VA frames are decoder-owned surfaces, so they travel through their
+    // own mailbox slot instead of the preallocated NV12 buffer.
+    AVFrame* pendingHardware=nullptr;AVFrame* hardwareRead=nullptr;bool pendingIsHardware=false;
     // Decode worker: keeps the DirectShow callback cheap (payload copy only)
     // and lets the decode overlap with graph work. The worker owns workerFrame
     // and swaps it into the mailbox once a frame is ready.
@@ -176,8 +257,9 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
     SourceInfo info;CaptureMediaLayout layout;Clock::time_point lastFrame;
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id,void** pp)override{if(!pp)return E_POINTER;*pp=nullptr;if(id==IID_IUnknown||id==__uuidof(ISampleGrabberCB)){*pp=static_cast<ISampleGrabberCB*>(this);AddRef();return S_OK;}return E_NOINTERFACE;}
     ULONG STDMETHODCALLTYPE AddRef()override{return ++refs;}ULONG STDMETHODCALLTYPE Release()override{return --refs;}
-    // Decode worker loop: pop a compressed payload, decode it into the worker
-    // frame (no source lock held), then swap it into the mailbox.
+    // Decode worker loop: pop a compressed payload, decode it with our own
+    // backend (software MJPEG / D3D12VA for H.264/HEVC/AV1/VP9), then hand the
+    // result to the mailbox. No source lock is held during decoding.
     void decodeLoop(){
         for(;;){
             CompressedSample sample;
@@ -187,37 +269,33 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
                 if(decodeStop&&compressedQueue.empty())return;
                 sample=std::move(compressedQueue.front());compressedQueue.pop_front();
             }
-            AVPacket* packet=av_packet_alloc();if(!packet){++compressedErrors;continue;}
-            if(av_new_packet(packet,int(sample.payload.size()))<0){av_packet_free(&packet);++compressedErrors;continue;}
-            std::memcpy(packet->data,sample.payload.data(),sample.payload.size());
-            const int send=avcodec_send_packet(decoder,packet);av_packet_free(&packet);
-            if(send<0){++compressedErrors;continue;}
-            if(avcodec_receive_frame(decoder,decoded)<0){++compressedErrors;continue;}
-            // MJPEG decodes to the deprecated full-range YUVJ formats; map them
-            // to standard formats and pin the range explicitly instead of
-            // letting swscale guess (and spam a warning every frame).
-            AVPixelFormat srcFormat=AVPixelFormat(decoded->format);
-            if(srcFormat==AV_PIX_FMT_YUVJ422P)srcFormat=AV_PIX_FMT_YUV422P;
-            else if(srcFormat==AV_PIX_FMT_YUVJ420P)srcFormat=AV_PIX_FMT_YUV420P;
-            else if(srcFormat==AV_PIX_FMT_YUVJ444P)srcFormat=AV_PIX_FMT_YUV444P;
-            sws=sws_getCachedContext(sws,decoded->width,decoded->height,srcFormat,
-                int(layout.width),int(layout.height),AV_PIX_FMT_NV12,SWS_BILINEAR,nullptr,nullptr,nullptr);
-            if(!sws){av_frame_unref(decoded);++compressedErrors;continue;}
-            const int* coefficients=sws_getCoefficients(decoded->colorspace==AVCOL_SPC_BT709?SWS_CS_ITU709:SWS_CS_ITU601);
-            sws_setColorspaceDetails(sws,coefficients,1,coefficients,1,0,1<<16,1<<16);
-            uint8_t* dst[4]={workerFrame->data[0],workerFrame->data[1],nullptr,nullptr};
-            const int dstStride[4]={workerFrame->linesize[0],workerFrame->linesize[1],0,0};
-            sws_scale(sws,decoded->data,decoded->linesize,0,decoded->height,dst,dstStride);
-            av_frame_unref(decoded);
-            ++compressedDecoded;
+            AVFrame* decodedFrame=nullptr;bool hardware=false;
+            const bool produced=compressedDecoder.decode(sample.payload.data(),sample.payload.size(),
+                int64_t(sample.time*1e7),workerFrame,&decodedFrame,hardware);
+            if(!produced){
+                // A decoder that needs more input before it can emit a frame is
+                // normal for the first payload; a real error is not.
+                if(!compressedDecoder.waitingForInput())++compressedErrors;
+                continue;
+            }
             {
                 std::lock_guard lock(mutex);
-                if(pending)++dropped;              // mailbox semantics: newest wins
-                std::swap(pendingFrame,workerFrame);
+                if(hardware){
+                    AVFrame* cloned=av_frame_clone(decodedFrame);
+                    if(!cloned){++compressedErrors;continue;}
+                    if(pending)++dropped;          // mailbox semantics: newest wins
+                    if(pendingHardware)av_frame_free(&pendingHardware);
+                    pendingHardware=cloned;
+                }else{
+                    if(pending)++dropped;
+                    std::swap(pendingFrame,workerFrame);
+                }
+                pendingIsHardware=hardware;
                 pending=true;pendingTime=sample.time;pendingArrival=sample.arrival;
                 pendingDuration=captureDuration(sample.start,sample.end,sample.completeTime,nominalDuration100ns);
                 pendingDiscontinuity=sample.bad;
-                if((compressedDecoded%600)==0)log::info("capture-decode",std::format("decoded={} errors={} queueDrops={} (decode worker)",compressedDecoded,compressedErrors,compressedDropped));
+                ++compressedDecoded;
+                if((compressedDecoded%600)==0)log::info("capture-decode",std::format("decoded={} errors={} queueDrops={} backend={} (decode worker)",compressedDecoded,compressedErrors,compressedDropped,compressedDecoder.backendName()));
             }
             wake.notify_one();
         }
@@ -235,8 +313,8 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
             else {
                 // Copy directly into our bounded mailbox; read() swaps frames
                 // under this lock, so the frame consumed by the GPU is untouched.
-                // Compressed MJPEG payloads are decoded into the same NV12
-                // mailbox frame instead of being expanded by the system graph.
+                // Compressed payloads are decoded by our own backend instead of
+                // being expanded by the system graph's decoder/color converter.
                 if(compressedPath){
                     // MPEG chain: the callback only copies the compressed
                     // payload; the decode worker produces the NV12 frame.
@@ -400,20 +478,11 @@ bool CaptureCardSource::configure(const SourceOpenDesc& desc){close();p_->lastAu
     const bool direct=nativeSupported&&!desc.legacyCaptureRgbForDiagnostic;
     const CaptureCodec codec=captureCodecOf(native->subtype);
     unsigned compressedWidth=0,compressedHeight=0;int64_t compressedDuration=0;
-    bool compressedPath=false;
-    if(!direct&&!nativeSupported&&codec==CaptureCodec::Mjpeg&&!desc.legacyCaptureRgbForDiagnostic){
-        // MPEG chain stage 2: MJPEG bypasses the system decoder stack entirely;
-        // our own decoder turns each payload into an NV12 mailbox frame. Any
-        // failure below falls back to the RGB32 compatibility path.
-        const AVCodec* avcodec=avcodec_find_decoder(AV_CODEC_ID_MJPEG);
-        p.decoder=avcodec?avcodec_alloc_context3(avcodec):nullptr;
-        p.decoded=av_frame_alloc();
-        if(p.decoder&&p.decoded&&avcodec_open2(p.decoder,avcodec,nullptr)>=0){compressedPath=true;p.compressedPath=true;p.codec=codec;}
-        else{
-            if(p.decoded)av_frame_free(&p.decoded);if(p.decoder)avcodec_free_context(&p.decoder);
-            log::warn("capture-decode","MJPEG decoder unavailable; keeping the RGB32 compatibility path");
-        }
-    }
+    // MPEG chain: every compressed subtype (MJPEG/H.264/HEVC/AV1/VP9) now
+    // bypasses the system decoder stack; our own backend decodes it. Any
+    // failure below falls back to the RGB32 compatibility path.
+    const bool compressedPath=!direct&&!nativeSupported&&codec!=CaptureCodec::None&&!desc.legacyCaptureRgbForDiagnostic;
+    if(compressedPath){p.compressedPath=true;p.codec=codec;}
     AM_MEDIA_TYPE connected{};
     if(compressedPath){
         ComPtr<IPin> input,output;
@@ -427,6 +496,18 @@ bool CaptureCardSource::configure(const SourceOpenDesc& desc){close();p_->lastAu
             if(connected.formattype==FORMAT_VideoInfo2&&connected.cbFormat>=sizeof(VIDEOINFOHEADER2)){const auto& v=*reinterpret_cast<const VIDEOINFOHEADER2*>(connected.pbFormat);compressedWidth=unsigned(v.bmiHeader.biWidth);compressedHeight=unsigned(std::abs(int64_t(v.bmiHeader.biHeight)));compressedDuration=int64_t(v.AvgTimePerFrame);}
             else if(connected.formattype==FORMAT_VideoInfo&&connected.cbFormat>=sizeof(VIDEOINFOHEADER)){const auto& v=*reinterpret_cast<const VIDEOINFOHEADER*>(connected.pbFormat);compressedWidth=unsigned(v.bmiHeader.biWidth);compressedHeight=unsigned(std::abs(int64_t(v.bmiHeader.biHeight)));compressedDuration=int64_t(v.AvgTimePerFrame);}
             if(!compressedWidth||!compressedHeight||compressedWidth%2||compressedHeight%2){log::warn("capture-decode","compressed dimensions unusable; falling back to the RGB32 compatibility path");hr=VFW_E_INVALIDMEDIATYPE;}
+        }
+        if(SUCCEEDED(hr)){
+            const auto extradata=captureCompressedExtradata(*native,codec);
+            if(!p.compressedDecoder.open(codec,compressedWidth,compressedHeight,extradata.data(),extradata.size(),
+                static_cast<ID3D12Device*>(desc.d3d12Device),static_cast<ID3D12CommandQueue*>(desc.d3d12Queue))){
+                log::warn("capture-decode",std::format("no usable decoder for codec={}; falling back to the RGB32 compatibility path",captureCodecKey(codec)));
+                hr=VFW_E_INVALIDMEDIATYPE;
+            }else{
+                // Keep the shared device/queue alive for the decode worker.
+                if(desc.d3d12Device){p.decodeDevice=static_cast<ID3D12Device*>(desc.d3d12Device);p.decodeDevice->AddRef();}
+                if(desc.d3d12Queue){p.decodeQueue=static_cast<ID3D12CommandQueue*>(desc.d3d12Queue);p.decodeQueue->AddRef();}
+            }
         }
         log::info("capture-decode",std::format("compressed ConnectDirect codec={} subtype=0x{:08X} size={}x{} hr=0x{:08X}",captureCodecKey(codec),native->subtype.Data1,compressedWidth,compressedHeight,uint32_t(hr)));
         if(FAILED(hr)){log::warn("capture-decode","compressed direct connect failed; retrying the RGB32 compatibility path");SourceOpenDesc retry=desc;retry.legacyCaptureRgbForDiagnostic=true;return configure(retry);}
@@ -475,9 +556,16 @@ bool CaptureCardSource::configure(const SourceOpenDesc& desc){close();p_->lastAu
         p.layout.duration=compressedDuration;
         AVFrame probe{};probe.format=AV_PIX_FMT_NV12;probe.width=int(p.layout.width);probe.height=int(p.layout.height);
         p.layout.color=pipeline::resolveFrameColor(probe);
-        p.layout.color.range=pipeline::ColorRange::Full;
-        p.layout.color.transfer=pipeline::TransferFunction::SRGB;
-        p.layout.color.preserveSdrCodeValues=true;
+        if(codec==CaptureCodec::Mjpeg){
+            // JPEG planes are full-range by definition and our MJPEG software
+            // decoder emits full-range NV12 (the pre-MPEG colour contract).
+            p.layout.color.range=pipeline::ColorRange::Full;
+            p.layout.color.transfer=pipeline::TransferFunction::SRGB;
+            p.layout.color.preserveSdrCodeValues=true;
+        }
+        // Compressed video keeps the standard limited-range NV12 contract as
+        // its declared fallback; the bitstream's own VUI metadata overrides it
+        // per frame through resolveFrameColor().
         p.layout.color.rangeAssumed=p.layout.color.matrixAssumed=p.layout.color.transferAssumed=true;
         layoutValid=true;
     }else{
@@ -527,7 +615,7 @@ bool CaptureCardSource::configure(const SourceOpenDesc& desc){close();p_->lastAu
         p.workerFrame->format=AV_PIX_FMT_NV12;p.workerFrame->width=int(p.layout.width);p.workerFrame->height=int(p.layout.height);
         if(av_frame_get_buffer(p.workerFrame,32)<0)return false;
         p.decodeStop=false;p.decodeThread=std::thread([&p]{p.decodeLoop();});
-        log::info("capture-decode",std::format("decode worker started queue={} (single decode thread; the parallel pool is a later refinement)",p.compressedQueueLimit));
+        log::info("capture-decode",std::format("decode worker started queue={} backend={} (single decode thread; the parallel pool is a later refinement)",p.compressedQueueLimit,p.compressedDecoder.backendName()));
     }
     p.configured=true;
     reconnectDesc_=desc;reconnectInfo_=p.info;reconnectFormat_.clear();
@@ -827,12 +915,20 @@ SourceReadStatus CaptureCardSource::read(pipeline::FramePacket& packet,const AVF
 SourceReadStatus CaptureCardSource::tryRead(pipeline::FramePacket& packet,const AVFrame** frame){return readWithWait(packet,frame,0);}
 SourceReadStatus CaptureCardSource::readWithWait(pipeline::FramePacket& packet,const AVFrame** frame,unsigned milliseconds){auto& p=*p_;*frame=nullptr;if(!p.info.opened)return SourceReadStatus::Error;
     long code=0;LONG_PTR a=0,b=0;while(p.events&&p.events->GetEvent(&code,&a,&b,0)==S_OK){if(code==EC_DEVICE_LOST||code==EC_ERRORABORT)log::warn("capture-reconnect",std::format("DirectShow event={} detail=0x{:X}",code,uint64_t(a)));p.events->FreeEventParams(code,a,b);if(code==EC_DEVICE_LOST||code==EC_ERRORABORT)return SourceReadStatus::Error;}
-    double time=0;uint32_t flags=0;uint64_t sequence=0;pipeline::Rational duration;
+    double time=0;uint32_t flags=0;uint64_t sequence=0;pipeline::Rational duration;AVFrame* delivered=nullptr;AVFrame* expiredHardware=nullptr;
     {
         std::unique_lock lock(p.mutex);if(milliseconds)p.wake.wait_for(lock,std::chrono::milliseconds(milliseconds),[&]{return p.pending||p.callbackError;});
         if(p.callbackError)return SourceReadStatus::Error;
         if(!p.pending)return Impl::Clock::now()-p.lastFrame>std::chrono::seconds(3)?SourceReadStatus::Error:SourceReadStatus::Waiting;
-        std::swap(p.frame,p.pendingFrame);p.pending=false;time=p.pendingTime;p.readArrival=p.pendingArrival;
+        if(p.pendingIsHardware){
+            // D3D12VA surfaces cannot be copied into the preallocated NV12
+            // buffer; the read slot owns the cloned frame and the previous one
+            // is released after the lock is dropped.
+            expiredHardware=p.hardwareRead;p.hardwareRead=p.pendingHardware;p.pendingHardware=nullptr;delivered=p.hardwareRead;
+        }else{
+            std::swap(p.frame,p.pendingFrame);delivered=p.frame;
+        }
+        p.pending=false;time=p.pendingTime;p.readArrival=p.pendingArrival;
         duration=p.pendingDuration;
         p.readAgeMs=std::chrono::duration<double,std::milli>(Impl::Clock::now()-p.readArrival).count();
         if(!p.sequence)flags|=static_cast<uint32_t>(pipeline::FrameFlagBits::Open);
@@ -841,10 +937,20 @@ SourceReadStatus CaptureCardSource::readWithWait(pipeline::FramePacket& packet,c
         if(p.forceDiscontinuity){flags|=static_cast<uint32_t>(pipeline::FrameFlagBits::Discontinuity);p.forceDiscontinuity=false;}
         p.lastDrop=p.dropped;p.lastPts=time;++p.sequence;sequence=p.received;
     }
-    p.frame->pts=static_cast<int64_t>(time*10000000);p.frame->duration=duration.isUnknown()?0:duration.to100ns();p.frame->time_base={1,10000000};packet={};packet.pts={p.frame->pts,10000000};packet.duration=duration;packet.colorInfo=p.info.color;packet.sourceKind=pipeline::SourceKind::CaptureCard;packet.sequence=sequence;packet.flags=flags;packet.sourceEpoch=1;
+    if(expiredHardware)av_frame_free(&expiredHardware);
+    if(delivered==nullptr)return SourceReadStatus::Error;
+    auto colorInfo=p.info.color;
+    if(p.compressedPath){
+        // Compressed video carries its own VUI metadata; the negotiated layout
+        // stays the declared fallback. D3D12VA surfaces report NV12 by
+        // contract (the capture ingress contract is 8-bit for this path).
+        colorInfo=pipeline::resolveFrameColor(*delivered,p.layout.color);
+        if(delivered->format==AV_PIX_FMT_D3D12&&colorInfo.pixelFormat==pipeline::SourcePixelFormat::Unknown)colorInfo.pixelFormat=pipeline::SourcePixelFormat::NV12;
+    }
+    delivered->pts=static_cast<int64_t>(time*10000000);delivered->duration=duration.isUnknown()?0:duration.to100ns();delivered->time_base={1,10000000};packet={};packet.pts={delivered->pts,10000000};packet.duration=duration;packet.colorInfo=colorInfo;packet.sourceKind=pipeline::SourceKind::CaptureCard;packet.sequence=sequence;packet.flags=flags;packet.sourceEpoch=1;
     packet.sequence+=receivedOffset_;packet.sourceEpoch=epoch_;
     packet.arrivalHost100ns=std::chrono::duration_cast<std::chrono::nanoseconds>(p.readArrival.time_since_epoch()).count()/100;
-    *frame=p.frame;p.lastFrame=Impl::Clock::now();return SourceReadStatus::Frame;
+    *frame=delivered;p.lastFrame=Impl::Clock::now();return SourceReadStatus::Frame;
 }
 void CaptureCardSource::close()noexcept{
     auto& p=*p_;if(p.control){const HRESULT hr=p.control->Stop();if(FAILED(hr))log::error("capture-close",std::format("Stop failed hr=0x{:08X}; releasing graph",uint32_t(hr)));}if(p.grab){const HRESULT hr=p.grab->SetCallback(nullptr,0);if(FAILED(hr))log::error("capture-close",std::format("detach callback hr=0x{:08X}",uint32_t(hr)));}
@@ -855,8 +961,10 @@ void CaptureCardSource::close()noexcept{
     if(p.decodeThread.joinable()){{std::lock_guard lock(p.mutex);p.decodeStop=true;p.compressedQueue.clear();}p.decodeWake.notify_all();p.decodeThread.join();}
     if(p.workerFrame)av_frame_free(&p.workerFrame);
     av_frame_free(&p.frame);av_frame_free(&p.pendingFrame);
-    if(p.decoded)av_frame_free(&p.decoded);if(p.decoder)avcodec_free_context(&p.decoder);if(p.sws)sws_freeContext(p.sws);
-    p.sws=nullptr;p.compressedPath=false;p.codec=CaptureCodec::None;p.compressedDecoded=p.compressedErrors=0;
+    if(p.pendingHardware)av_frame_free(&p.pendingHardware);if(p.hardwareRead)av_frame_free(&p.hardwareRead);
+    p.compressedDecoder.close();
+    if(p.decodeDevice){p.decodeDevice->Release();p.decodeDevice=nullptr;}if(p.decodeQueue){p.decodeQueue->Release();p.decodeQueue=nullptr;}
+    p.pendingIsHardware=false;p.compressedPath=false;p.codec=CaptureCodec::None;p.compressedDecoded=p.compressedErrors=0;
     p.info={};
     p.sequence=p.received=p.dropped=p.lastDrop=0;p.pending=p.callbackError=p.configured=p.forceDiscontinuity=false;p.lastPts=p.readAgeMs=0;
 }

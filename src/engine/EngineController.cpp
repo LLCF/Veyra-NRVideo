@@ -187,12 +187,13 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 {std::lock_guard lock(mutex_);desired_.multiplier=1;snapshot_.image=true;snapshot_.desired=desired_;}
             }else{
                 source::SourceOpenDesc od;od.path=path;
-                // Files use the same shared D3D12 device as the graph. The
-                // source performs a capability check and falls back to
-                // software before returning its first frame; capture/PS5
-                // retain their own decode contracts.
-                od.preferHardwareDecode=!isCapture;
-                if(od.preferHardwareDecode){od.d3d12Device=ctx.device();od.d3d12Queue=ctx.directQueue();}
+                // Files use the same shared D3D12 device as the graph. Capture
+                // uses it for the compressed-payload decoder (H.264/HEVC/AV1/
+                // VP9 through D3D12VA; MJPEG stays on the software path inside
+                // CaptureCompressedDecoder). Each source performs its own
+                // capability check and records its fallback.
+                od.preferHardwareDecode=true;
+                od.d3d12Device=ctx.device();od.d3d12Queue=ctx.directQueue();
                 // Diagnostic uses the production graph/presenter to validate
                 // D3D12VA imports without needing a paired PS5 or credentials.
                 if(!isCapture&&GetEnvironmentVariableW(L"VEYRA_TEST_FILE_HW_DECODE",nullptr,0)){
