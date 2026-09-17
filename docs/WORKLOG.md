@@ -1,5 +1,45 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-17 色彩页 P1：T3 色彩页 UI 框架（风琴折叠 + 滑块/数值框 + 一键还原）
+
+`apps/veyra/SettingsWindow.cpp` 的第 2 页（原预设页位置）现在是色彩页：
+
+- **总开关**（id 800，默认关）：勾选/取消直接进 `ColorSettings::enabled`，走重建路径；
+  关闭时链路不存在（零开销），文案与帮助都写明；
+- **一键还原（801）+ 撤销还原（802）**：还原把所有色彩参数归零、保留总开关状态，并把还原前
+  的整组数值留一次撤销机会；
+- **风琴折叠**：`layoutColorPage()` 在 `arrange()` 里顺序排版，折叠的组直接跳过自己的行，
+  行高/隐藏状态都进 `items`，因此滚动、DPI、Tab 顺序沿用现有机制；组头文案带 ▾/▸；
+- **参数行**：每个参数 = 标签 + 数值框（可直接输入）+ 滑轨；滑块拖动与输入框回车都即时生效，
+  首次改动会自动打开总开关（与 NR/超分开关的习惯一致）；数值越界会拒绝并回显上次有效值；
+- **折叠状态持久化**：`ui-preferences.v1` schema v3 → **v4**，行尾追加 `colourFoldMask`；
+  v1–v3 旧文件仍可读。顺带修掉一个隐患：AppShell 保存 UI 偏好时会覆盖面板写入的折叠位，
+  现在保存前先把该字段从文件读回来再写；
+- 新增帮助文本（800/801/802）。
+
+**真机 UI 验收（新烟测 `--smoke-color`，已加入 `scripts/gates/delivery.ps1`）**
+
+```
+[color-ui-test] page2 masterPresent=1 defaultOff=true step=1
+[color-ui-test] master switch applied
+[color-ui-test] exposure 1.00 reached the engine through the panel
+[color-ui-test] one-click reset returned the grade to neutral
+[color-ui-test] undo restored the pre-reset values
+[color-ui-test] fold collapsed=true persisted=true mask=1 geometryOk=true step=6
+[color-ui-test] unfolded and master off; colour chain back to the zero-cost default
+```
+
+烟测覆盖：总开关默认关 → 打开后进入引擎 → 数值框输入的曝光值到达引擎 → 一键还原回中性 →
+撤销还原找回原值 → 折叠后下一组位置上移且折叠位落盘 → 收尾把开关关回默认。exit=0。
+
+**回归**：`veyra_ui_contract_tests` exit 0（含 v3/音频页偏好回归）；`veyra_repair_contract_tests` 191/0；
+`veyra_repair_preset_tests` exit 0；`veyra_color_grade_tests` 23/23；`veyra_color_grade_gpu_tests` exit 0；
+`scripts/gates/delivery.ps1` → **DELIVERY SHORT GATE PASS**
+（`logs/delivery/81ef6ff6cc9944489793fcd523d0dbb7/result.json`，本次起包含 color-page 用例）。
+
+**未做（T4 起）**：曲线/混色器/颜色分级/校准四组的控件与 shader 动词、分组眼睛（需要在
+`ColorSettings` 里加每组的 bypass 位，schema 再升一版）、`.cube` 导入（T5）、HDR 标准处理（T6）。
+
 ## 2026-09-17 色彩页 P1：T2b-b 源头侧调色链接入 ingest（GPU 验收通过）
 
 按 v4 计划完成 GPU 接线：调色**不新增 pass**，而是接进现有的 ingest 派发（YUV→线性、

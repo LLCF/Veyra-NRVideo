@@ -1,6 +1,7 @@
 #include "SettingsWindow.h"
 #include "ui/Theme.h"
 #include "ui/SettingHelp.h"
+#include "ui/UiPreferenceStore.h"
 #include "veyra/engine/PresetStore.h"
 #include "veyra/RuntimePaths.h"
 #include "veyra/gfx/XessMfgUnlock.h"
@@ -9,6 +10,7 @@
 #include <sstream>
 #include <iomanip>
 #include <array>
+#include <cmath>
 namespace veyra::ui {
 namespace {
 HWND window=nullptr,body=nullptr;engine::EngineController* controller=nullptr;HFONT font=nullptr;
@@ -29,7 +31,7 @@ constexpr auto smoothMotionHelp=L"只用 Smooth Motion\n"
     L"• 面板 FPS、耗时、队列不包含驱动生成部分，不能据此判断驱动是否生效，也不要直接把 FPS 乘二。\n"
     L"• 驱动额外延迟未测量，音画同步需实测。截图、导出不含驱动生成的帧；直播录制是否捕获到它们也需另测。\n"
     L"• 功能可用性以 NVIDIA App、显卡和驱动支持为准。";
-struct Item{HWND h;int page,x,y,w,height;};std::vector<Item> items;
+struct Item{HWND h;int page,x,y,w,height;bool hidden=false;};std::vector<Item> items;
 HWND item(int id){for(auto& entry:items)if(GetDlgCtrlID(entry.h)==id)return entry.h;return nullptr;}
 LRESULT send(int id,UINT message,WPARAM w=0,LPARAM l=0){return SendMessageW(item(id),message,w,l);}
 void putText(int id,const wchar_t* value){setText(item(id),value);}
@@ -50,6 +52,106 @@ LRESULT CALLBACK bodyProc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
 
 const wchar_t* labels[]={L"模型强度",L"局部明暗",L"局部结构",L"肤质 · 未证实",L"风格 · 实验",L"自动遮罩 · 实验",L"UI修正 · 未证实",L"总变化强度",L"暗化变化",L"亮化变化",L"色彩变化",L"明度变化"};
 void loadStore(){if(!loaded){store.load();loaded=true;}}
+// ---------------------------------------------------------------------------
+// Colour page (plan v4). Sections collapse like an accordion; the rows are laid
+// out sequentially in layoutColorPage() so a collapsed section simply skips its
+// rows instead of relying on static y offsets. The fold mask is persisted in
+// ui-preferences.v1 with the rest of the UI state.
+// ---------------------------------------------------------------------------
+constexpr int kColorSections=2;   // 亮 / 颜色 (T4 adds 曲线/混色器/颜色分级/校准)
+void message(const std::wstring& text);
+bool submit(engine::EnhancementSettings s);
+uint32_t colorFoldMask=0;
+std::wstring colorSectionName(int section){return section==0?L"亮":L"颜色";}
+struct ColorParam{
+    int section;
+    const wchar_t* label;
+    float engine::ColorSettings::*field;
+    float min,max;
+};
+std::vector<ColorParam> colorParams;
+// id layout: master 800, reset 801, undo 802, header 810+s, label 830+i,
+// edit 850+i, slider 870+i.
+constexpr int colorLabelId(int i){return 830+i;}
+constexpr int colorEditId(int i){return 850+i;}
+constexpr int colorSliderId(int i){return 870+i;}
+engine::ColorSettings colourTarget(){
+    return (enhancementEnabled?controller->snapshot().desired:configuredSettings).color;
+}
+engine::ColorSettings colourUndo;
+bool colourUndoValid=false;
+int colorPageContentHeight=0;
+bool syncingColour=false;
+std::wstring windowText(HWND h){wchar_t buffer[256]{};GetWindowTextW(h,buffer,256);return buffer;}
+void loadColourFoldState(){
+    const auto preferences=veyra::ui::UiPreferenceStore(runtime::localDataDirectory()).load();
+    colorFoldMask=preferences.colourFoldMask;
+}
+void saveColourFoldState(){
+    veyra::ui::UiPreferenceStore store_(runtime::localDataDirectory());
+    auto preferences=store_.load();
+    preferences.colourFoldMask=colorFoldMask;
+    if(!store_.save(preferences,nullptr))veyra::log::warn("color-ui","fold state not saved");
+}
+void layoutColorPage(){
+    auto place=[&](int id,int y,int height,bool hidden){
+        for(auto& entry:items)if(GetDlgCtrlID(entry.h)==id){entry.y=y;entry.height=height;entry.hidden=hidden;return;}
+    };
+    int y=12;
+    place(800,y,36,false);y+=42;
+    place(801,y,32,false);place(802,y,32,false);y+=40;
+    for(int section=0;section<kColorSections;++section){
+        const bool collapsed=(colorFoldMask>>section)&1u;
+        place(810+section,y,32,false);
+        const auto title=std::format(L"{}  {}",collapsed?L"▸":L"▾",colorSectionName(section));
+        putText(810+section,title.c_str());
+        y+=38;
+        for(size_t i=0;i<colorParams.size();++i){
+            const auto& param=colorParams[i];
+            if(param.section!=section)continue;
+            place(colorLabelId(int(i)),y,24,collapsed);
+            place(colorEditId(int(i)),y-2,26,collapsed);
+            place(colorSliderId(int(i)),y+24,16,collapsed);
+            if(!collapsed)y+=46;
+        }
+        y+=8;
+    }
+    colorPageContentHeight=y+12;
+}
+void syncColorControls(){
+    syncingColour=true;
+    const auto colour=colourTarget();
+    check(800,colour.enabled?BST_CHECKED:BST_UNCHECKED);
+    for(size_t i=0;i<colorParams.size();++i){
+        const float value=colour.*(colorParams[i].field);
+        const auto text=std::format(L"{:.2f}",value);
+        if(auto edit=item(colorEditId(int(i))))if(windowText(edit)!=text)putText(colorEditId(int(i)),text.c_str());
+        if(auto slider=item(colorSliderId(int(i)))){
+            const int scaled=int(std::lround(value*100.0f));
+            if(SendMessageW(slider,TBM_GETPOS,0,0)!=scaled)SendMessageW(slider,TBM_SETPOS,TRUE,LPARAM(scaled));
+        }
+    }
+    syncingColour=false;
+}
+bool applyColour(const engine::ColorSettings& colour,bool autoEnable){
+    auto settings=enhancementEnabled?controller->snapshot().desired:configuredSettings;
+    const auto previous=settings.color;
+    settings.color=colour;
+    if(autoEnable)settings.color.enabled=true;
+    if(!(settings.color==previous)&&!submit(settings))return false;
+    return true;
+}
+bool colourFieldEdited(int index,float value){
+    if(index<0||size_t(index)>=colorParams.size())return false;
+    auto colour=colourTarget();
+    if(!std::isfinite(value)||value<colorParams[size_t(index)].min||value>colorParams[size_t(index)].max){
+        message(L"数值超出范围；仍使用上次有效值");syncColorControls();return false;
+    }
+    colour.*(colorParams[size_t(index)].field)=value;
+    if(!applyColour(colour,true)){syncColorControls();return false;}
+    syncColorControls();
+    return true;
+}
 void message(const std::wstring& text){putText(401,text.c_str());}
 bool submit(engine::EnhancementSettings s){if(!apply(s)){dirty=true;message(L"总增强正在切换；本次修改未接受，请稍后重试。");return false;}dirty=false;return true;}
 void syncProtection(const engine::ProtectionSettings& protection){
@@ -120,6 +222,7 @@ void populate(engine::EnhancementSettings s){
     EnableWindow(item(204),s.opticalFlowBackend==engine::OpticalFlowBackend::Nvidia);
     EnableWindow(item(215),s.opticalFlowBackend==engine::OpticalFlowBackend::AmdFidelityFx);
     displayedRevision=s.revision;displayedSettings=s;populating=false;dirty=false;
+    syncColorControls();
 }
 bool read(engine::EnhancementSettings& s,bool allPages=false){s=enhancementEnabled?controller->snapshot().desired:configuredSettings;float v[12]{};for(int i=0;i<12;++i){if(i>=4&&i<=6){v[i]=float(i==4?s.model.style:i==5?s.model.autoMask:s.model.uiCorrection);continue;}wchar_t b[64]{};GetWindowTextW(item(100+i),b,64);wchar_t* end=nullptr;v[i]=wcstof(b,&end);if(end==b||*end||!std::isfinite(v[i])){message(L"请输入完整的有限数值；未提交设置");return false;}}
     for(int i=4;i<7;++i)if(v[i]!=std::floor(v[i])||v[i]<0||v[i]>(i==4?2:1)){message(L"风格/遮罩/UI修正必须为整数");return false;}
@@ -192,15 +295,17 @@ LRESULT CALLBACK scrollOnly(HWND h,UINT msg,WPARAM wp,LPARAM lp,UINT_PTR id,DWOR
 void arrange(){
     if(!window||!body)return;RECT r{};GetClientRect(window,&r);int width=MulDiv(r.right,96,veyra::ui::layoutDpi(window)),height=MulDiv(r.bottom,96,veyra::ui::layoutDpi(window));
     const int sticky=128,viewport=std::max(1,height-sticky);contentHeight=0;
+    if(page==2)layoutColorPage();
     int helpHeight=0;
     if(smoothMotionHelpExpanded){auto dc=GetDC(window);auto old=SelectObject(dc,font);RECT textRect{0,0,dip(window,std::max(1,width-24)),0};DrawTextW(dc,smoothMotionHelp,-1,&textRect,DT_CALCRECT|DT_WORDBREAK|DT_NOPREFIX);SelectObject(dc,old);ReleaseDC(window,dc);helpHeight=MulDiv(textRect.bottom,96,layoutDpi(window))+16;}
     const auto helpOffset=[&](const Item& entry){const auto id=GetDlgCtrlID(entry.h);return entry.page==1&&(id==1114||id==205||id==1110)?helpHeight:0;};
     for(auto& entry:items){if(GetDlgCtrlID(entry.h)==1120)entry.height=helpHeight;
-        if(entry.page==page&&(GetDlgCtrlID(entry.h)!=1120||smoothMotionHelpExpanded)){wchar_t cls[32]{};GetClassNameW(entry.h,cls,32);contentHeight=std::max(contentHeight,entry.y+helpOffset(entry)+(_wcsicmp(cls,L"COMBOBOX")==0?36:entry.height)+12);}}
+        if(entry.page==page&&!entry.hidden&&(GetDlgCtrlID(entry.h)!=1120||smoothMotionHelpExpanded)){wchar_t cls[32]{};GetClassNameW(entry.h,cls,32);contentHeight=std::max(contentHeight,entry.y+helpOffset(entry)+(_wcsicmp(cls,L"COMBOBOX")==0?36:entry.height)+12);}}
+    if(page==2)contentHeight=std::max(contentHeight,colorPageContentHeight);
     scroll=std::clamp(scroll,0,std::max(0,contentHeight-viewport));
     SetWindowPos(body,nullptr,0,dip(window,sticky),r.right,dip(window,viewport),SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOREDRAW);
     auto batch=BeginDeferWindowPos(int(items.size()));
-    for(auto& entry:items){bool fixed=entry.page==-1,visible=(entry.page==page||fixed)&&(GetDlgCtrlID(entry.h)!=1120||smoothMotionHelpExpanded);int w=entry.w<0?width-entry.x-12:entry.w;int y=fixed?(GetDlgCtrlID(entry.h)==400?0:(GetDlgCtrlID(entry.h)==211||GetDlgCtrlID(entry.h)==219)?86:42):entry.y+helpOffset(entry)-scroll;
+    for(auto& entry:items){bool fixed=entry.page==-1,visible=!entry.hidden&&(entry.page==page||fixed)&&(GetDlgCtrlID(entry.h)!=1120||smoothMotionHelpExpanded);int w=entry.w<0?width-entry.x-12:entry.w;int y=fixed?(GetDlgCtrlID(entry.h)==400?0:(GetDlgCtrlID(entry.h)==211||GetDlgCtrlID(entry.h)==219)?86:42):entry.y+helpOffset(entry)-scroll;
         if(fixed){SetWindowPos(entry.h,nullptr,dip(window,entry.x),dip(window,y),dip(window,std::max(1,w)),dip(window,42),SWP_NOACTIVATE|SWP_NOZORDER|SWP_NOREDRAW);continue;}batch=DeferWindowPos(batch,entry.h,nullptr,dip(window,entry.x),dip(window,y),dip(window,std::max(1,w)),dip(window,entry.height),SWP_NOACTIVATE|SWP_NOZORDER|SWP_NOREDRAW|SWP_NOCOPYBITS|(visible?SWP_SHOWWINDOW:SWP_HIDEWINDOW));}
     EndDeferWindowPos(batch);RedrawWindow(body,nullptr,nullptr,RDW_INVALIDATE|RDW_ALLCHILDREN);InvalidateRect(window,nullptr,FALSE);
 }
@@ -216,6 +321,41 @@ LRESULT CALLBACK proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
     if(msg==WM_COMMAND&&!populating&&((LOWORD(wp)==216&&HIWORD(wp)==CBN_SELCHANGE)||(LOWORD(wp)==217&&HIWORD(wp)==EN_CHANGE))){liveField(LOWORD(wp));return 0;}
     if(msg==WM_COMMAND&&!populating&&LOWORD(wp)==222&&HIWORD(wp)==EN_CHANGE){liveField(222);return 0;}
     if(msg==WM_COMMAND&&!populating&&LOWORD(wp)==222&&HIWORD(wp)==EN_KILLFOCUS){populate(enhancementEnabled?controller->snapshot().desired:configuredSettings);return 0;}
+    // --- colour page (plan v4) ---------------------------------------------
+    if(msg==WM_COMMAND&&LOWORD(wp)==800&&HIWORD(wp)==BN_CLICKED){
+        auto settings=enhancementEnabled?controller->snapshot().desired:configuredSettings;
+        settings.color.enabled=SendMessageW(item(800),BM_GETCHECK,0,0)==BST_CHECKED;
+        if(!submit(settings)){syncColorControls();return 0;}
+        message(settings.color.enabled?L"调色已开启：链路在所有效果器之前，会有一点额外开销。":L"调色已关闭：这条链完全不存在，零开销。");
+        return 0;
+    }
+    if(msg==WM_COMMAND&&(LOWORD(wp)==801||LOWORD(wp)==802)&&HIWORD(wp)==BN_CLICKED){
+        if(LOWORD(wp)==801){
+            colourUndo=colourTarget();colourUndoValid=true;
+            auto neutral=engine::ColorSettings{};neutral.enabled=true;
+            if(applyColour(neutral,false))message(L"已还原为中性；可以点“撤销还原”找回上一组数值。");
+        }else if(colourUndoValid){
+            if(applyColour(colourUndo,false))message(L"已恢复还原前的数值。");
+        }else message(L"没有可撤销的还原。");
+        syncColorControls();arrange();return 0;
+    }
+    if(msg==WM_COMMAND&&LOWORD(wp)>=810&&LOWORD(wp)<810+kColorSections&&HIWORD(wp)==BN_CLICKED){
+        const int section=LOWORD(wp)-810;
+        colorFoldMask^=1u<<section;
+        saveColourFoldState();
+        arrange();
+        return 0;
+    }
+    if(msg==WM_COMMAND&&!populating&&!syncingColour&&LOWORD(wp)>=colorEditId(0)&&LOWORD(wp)<colorEditId(0)+20&&HIWORD(wp)==EN_CHANGE){
+        const int index=LOWORD(wp)-colorEditId(0);
+        if(index<int(colorParams.size())){
+            wchar_t buffer[64]{};GetWindowTextW(item(LOWORD(wp)),buffer,64);
+            wchar_t* end=nullptr;const float value=wcstof(buffer,&end);
+            if(end==buffer||*end||!std::isfinite(value))message(L"数值未完整；仍使用上次有效值");
+            else colourFieldEdited(index,value);
+        }
+        return 0;
+    }
     if(msg==WM_COMMAND&&!populating&&((LOWORD(wp)==209&&HIWORD(wp)==CBN_SELCHANGE)||(LOWORD(wp)==215&&HIWORD(wp)==BN_CLICKED))){liveField(LOWORD(wp));return 0;}
     switch(msg){
 case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.clear();smoothMotionHelpExpanded=false;
@@ -256,6 +396,34 @@ case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.
     // Page 2 is the colour page. The old preset page (ids 300/301/310-315,
     // statics 1105/1106) was deleted on purpose on 2026-09-17: named colour
     // presets replace it and carry only look parameters, never NR/SR/FG.
+    loadColourFoldState();
+    add(L"BUTTON",L"调色总开关（关闭时这条链路不存在，零开销）",800,BS_AUTOCHECKBOX|WS_TABSTOP,2,12,12,-1,36);
+    button(L"一键还原（回到中性）",801,2,12,56,200);button(L"撤销还原",802,2,216,56,120);
+    {
+        struct Definition{int section;const wchar_t* label;float engine::ColorSettings::*field;float min,max;};
+        const Definition definitions[]={
+            {0,L"曝光（EV）",&engine::ColorSettings::exposure,-5,5},
+            {0,L"对比度",&engine::ColorSettings::contrast,-100,100},
+            {0,L"高光",&engine::ColorSettings::highlights,-100,100},
+            {0,L"阴影",&engine::ColorSettings::shadows,-100,100},
+            {0,L"白色",&engine::ColorSettings::whites,-100,100},
+            {0,L"黑色",&engine::ColorSettings::blacks,-100,100},
+            {1,L"色温（相对）",&engine::ColorSettings::temperature,-100,100},
+            {1,L"色调",&engine::ColorSettings::tint,-100,100},
+            {1,L"自然饱和度",&engine::ColorSettings::vibrance,-100,100},
+            {1,L"饱和度",&engine::ColorSettings::saturation,-100,100},
+        };
+        for(const auto& definition:definitions)colorParams.push_back({definition.section,definition.label,definition.field,definition.min,definition.max});
+        for(int section=0;section<kColorSections;++section)add(L"BUTTON",L"",810+section,BS_PUSHBUTTON|WS_TABSTOP,2,12,12,-1,32);
+        for(size_t i=0;i<colorParams.size();++i){
+            const auto& param=colorParams[i];
+            add(L"STATIC",param.label,colorLabelId(int(i)),0,2,12,0,180,24);
+            add(L"EDIT",L"0",colorEditId(int(i)),ES_AUTOHSCROLL|ES_RIGHT|WS_TABSTOP,2,202,0,-1,26);
+            auto slider=add(TRACKBAR_CLASSW,L"",colorSliderId(int(i)),TBS_HORZ|TBS_NOTICKS|WS_TABSTOP,2,12,0,-1,16);
+            SendMessageW(slider,TBM_SETRANGE,TRUE,MAKELPARAM(int(std::lround(param.min*100.0f)),int(std::lround(param.max*100.0f))));
+            SetPropW(item(colorEditId(int(i))),L"veyra.tip",HANDLE(L"可以直接输入数字，回车生效；拖动滑块即时生效。"));
+        }
+    }
     add(L"STATIC",L"原生画质导出",1107,0,3,12,12,-1,32);combo(500,3,60,{L"H.264 · MP4",L"HEVC · MP4"});send(500,CB_SETCURSEL,0,0);
     add(L"STATIC",L"冻结启动时整套参数；NR按原生尺寸处理。保留兼容音轨。VFR不改写为CFR；字幕不烧录。",1108,0,3,12,108,-1,94);
     button(L"选择位置并导出视频",501,3,12,212);marked(item(501));button(L"保存当前图片 / 视频帧",502,3,12,256);
@@ -341,10 +509,14 @@ case WM_COMMAND:{const int id=LOWORD(wp);if(!populating&&((id>=202&&id<=205||id=
     else if(id>=501&&id<=505)SendMessageW(GetParent(h),WM_APP+41,id,id==501?send(500,CB_GETCURSEL,0,0):id==505?checked(505):0);
     return 0;}
 case WM_HSCROLL:{int id=GetDlgCtrlID(reinterpret_cast<HWND>(lp));if(id>=600&&id<612){int index=id-600;float v=float(SendMessageW(reinterpret_cast<HWND>(lp),TBM_GETPOS,0,0))/(index>=4&&index<=6?1:100);if(index==3&&v<0)v=-1;std::wostringstream o;o<<std::setprecision(4)<<v;putText(100+index,o.str().c_str());}
+    else if(id>=colorSliderId(0)&&id<colorSliderId(0)+40){
+        const int index=id-colorSliderId(0);
+        if(index<int(colorParams.size()))colourFieldEdited(index,float(SendMessageW(reinterpret_cast<HWND>(lp),TBM_GETPOS,0,0))/100.0f);
+    }
     else if(id==622){// Feather slider: the edit box owns the value, its EN_CHANGE applies it.
         const int value=std::clamp(int(SendMessageW(reinterpret_cast<HWND>(lp),TBM_GETPOS,0,0)),0,64);putText(222,std::to_wstring(value).c_str());}
     return 0;}
-case WM_TIMER:{auto s=controller->snapshot();syncProtection(enhancementEnabled?s.desired.protection:configuredSettings.protection);if(enhancementEnabled&&!dirty&&displayedSettings!=s.desired)populate(s.desired);check(200,enhancementEnabled&&s.desired.nr?BST_CHECKED:BST_UNCHECKED);check(201,enhancementEnabled&&s.desired.sr?BST_CHECKED:BST_UNCHECKED);std::wostringstream o;if(!s.running&&!s.frames&&s.transport!=engine::TransportState::Opening)o<<L"未打开媒体 · 设置待启用\n";else{
+case WM_TIMER:{auto s=controller->snapshot();syncProtection(enhancementEnabled?s.desired.protection:configuredSettings.protection);if(enhancementEnabled&&!dirty&&displayedSettings!=s.desired)populate(s.desired);syncColorControls();check(200,enhancementEnabled&&s.desired.nr?BST_CHECKED:BST_UNCHECKED);check(201,enhancementEnabled&&s.desired.sr?BST_CHECKED:BST_UNCHECKED);std::wostringstream o;if(!s.running&&!s.frames&&s.transport!=engine::TransportState::Opening)o<<L"未打开媒体 · 设置待启用\n";else{
     o<<L"期望版本 "<<s.desired.revision<<L" / 已应用 "<<s.applied.revision<<(s.applying?L" · 应用中":L"");
     const wchar_t* backend=s.applied.frameGenerationBackend==engine::FrameGenerationBackend::XeSS?L"XeSS":s.applied.frameGenerationBackend==engine::FrameGenerationBackend::Fsr?L"AMD FSR":L"DLSS";
     o<<L"\n"<<backend<<L" · "<<(s.applied.multiplier<=1?L"补帧关闭":s.fgActive?L"补帧运行":L"等待有效补帧");

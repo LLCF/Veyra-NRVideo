@@ -13,6 +13,8 @@ struct UiPreferences {
     // and the dual-language switch.
     bool subtitleOutline=true,subtitleBackground=false,subtitleSecondLanguage=false;
     int subtitleMargin=0,subtitleFont=0;
+    // v4: colour-page accordion fold mask (one bit per section).
+    uint32_t colourFoldMask=0;
 };
 class UiPreferenceStore {
     std::filesystem::path folder_;
@@ -24,7 +26,7 @@ public:
         // inspector index 4 is the audio page (selectInspector(4)), so the valid
         // range is 0..4. A narrower bound here silently discarded every saved
         // window size, volume and subtitle style for users who last sat on it.
-        if(!(file>>magic>>version>>read.volume>>mute>>sub>>read.width>>read.height>>read.x>>read.y>>pos>>read.inspector>>read.subtitleSize)||magic!="VEYRA_UI"||(version<1||version>3)||!std::isfinite(read.volume)||read.volume<0||read.volume>1||mute<0||mute>1||sub<0||sub>1||pos<0||pos>1||read.width<720||read.width>10000||read.height<540||read.height>10000||abs(int64_t(read.x))>100000||abs(int64_t(read.y))>100000||read.inspector<0||read.inspector>4||read.subtitleSize<16||read.subtitleSize>56){corrupt_=true;return result;}
+        if(!(file>>magic>>version>>read.volume>>mute>>sub>>read.width>>read.height>>read.x>>read.y>>pos>>read.inspector>>read.subtitleSize)||magic!="VEYRA_UI"||(version<1||version>4)||!std::isfinite(read.volume)||read.volume<0||read.volume>1||mute<0||mute>1||sub<0||sub>1||pos<0||pos>1||read.width<720||read.width>10000||read.height<540||read.height>10000||abs(int64_t(read.x))>100000||abs(int64_t(read.y))>100000||read.inspector<0||read.inspector>4||read.subtitleSize<16||read.subtitleSize>56){corrupt_=true;return result;}
         if(version==2&&(!(file>>read.inspectorWidth)||read.inspectorWidth<296||read.inspectorWidth>420)){corrupt_=true;return result;}
         if(version>=3){
             int outline=0,background=0,second=0;
@@ -33,12 +35,16 @@ public:
             // 3 file was rejected as corrupt and all UI preferences were lost.
             if(!(file>>read.inspectorWidth>>outline>>background>>second>>read.subtitleMargin>>read.subtitleFont)||read.inspectorWidth<296||read.inspectorWidth>420||outline<0||outline>1||background<0||background>1||second<0||second>1||read.subtitleMargin<0||read.subtitleMargin>240||read.subtitleFont<0||read.subtitleFont>5){corrupt_=true;return result;}
             read.subtitleOutline=outline!=0;read.subtitleBackground=background!=0;read.subtitleSecondLanguage=second!=0;
-        }file>>std::ws;if(!file.eof()){corrupt_=true;return result;}read.muted=mute;read.subtitles=sub;read.positioned=pos;return read;
+        }
+        // v4 appends the colour-page fold mask *after* the v3 subtitle block, so
+        // it must be read here - reading it earlier shifted every following field.
+        if(version>=4&&!(file>>read.colourFoldMask)){corrupt_=true;return result;}
+        file>>std::ws;if(!file.eof()){corrupt_=true;return result;}read.muted=mute;read.subtitles=sub;read.positioned=pos;return read;
     }
     engine::EnhancementSettings startup(engine::EnhancementSettings fallback){engine::PresetStore last(folder_/"last-applied.v1");if(!last.load()||last.entries().empty())return fallback;return last.entries().front().settings;}
     bool save(const UiPreferences& p,const engine::EnhancementSettings* applied){
         bool ok=true;std::filesystem::create_directories(folder_);if(applied){engine::PresetStore last(folder_/"last-applied.v1");ok=last.load()&&last.put(L"Last applied",*applied,true);}
-        if(corrupt_)return false;std::ostringstream out;out<<"VEYRA_UI 3\n"<<p.volume<<' '<<p.muted<<' '<<p.subtitles<<' '<<p.width<<' '<<p.height<<' '<<p.x<<' '<<p.y<<' '<<p.positioned<<' '<<p.inspector<<' '<<p.subtitleSize<<' '<<p.inspectorWidth<<' '<<p.subtitleOutline<<' '<<p.subtitleBackground<<' '<<p.subtitleSecondLanguage<<' '<<p.subtitleMargin<<' '<<p.subtitleFont<<'\n';
+        if(corrupt_)return false;std::ostringstream out;out<<"VEYRA_UI 4\n"<<p.volume<<' '<<p.muted<<' '<<p.subtitles<<' '<<p.width<<' '<<p.height<<' '<<p.x<<' '<<p.y<<' '<<p.positioned<<' '<<p.inspector<<' '<<p.subtitleSize<<' '<<p.inspectorWidth<<' '<<p.subtitleOutline<<' '<<p.subtitleBackground<<' '<<p.subtitleSecondLanguage<<' '<<p.subtitleMargin<<' '<<p.subtitleFont<<' '<<p.colourFoldMask<<'\n';
         auto target=folder_/"ui-preferences.v1",tmp=folder_/(L"ui-preferences.tmp-"+std::to_wstring(GetCurrentProcessId()));auto data=out.str();HANDLE file=CreateFileW(tmp.c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);if(file==INVALID_HANDLE_VALUE)return false;DWORD written=0;bool saved=WriteFile(file,data.data(),DWORD(data.size()),&written,nullptr)&&written==data.size()&&FlushFileBuffers(file);CloseHandle(file);if(saved)saved=MoveFileExW(tmp.c_str(),target.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE;return ok&&saved;
     }
 };

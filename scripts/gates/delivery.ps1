@@ -55,6 +55,9 @@ try{
     $log=Get-Content "$dir/player.stdout.log" -Raw
     Check player-sync ($log -match 'smoke frames=(\d+).*generated=(\d+).*failed=false.*absLatenessP95Ms=([\d.]+)' -and [int]$Matches[1] -gt 60 -and [int]$Matches[2] -gt 0 -and [double]$Matches[3] -le 50) 'real-time profile 4K ingress, generated frames, observed abs lateness P95 <=50ms'
     Run controls $PlayerExe @($clip1080,'--nr','--realtime','--smoke-seconds','6','--smoke-controls','--smoke-save',"$dir/snapshot.jpg") 20
+    # Colour page (T3): master switch, slider -> engine wiring, one-click reset
+    # with undo, accordion folding and its ui-preferences persistence.
+    Run color-page $PlayerExe @($clip1080,'--smoke-color','--smoke-seconds','12') 25
     $controlLog=Get-Content "$dir/controls.stdout.log" -Raw
     Check paused-seek ($controlLog -match 'seek done' -and $controlLog -match 'controlsStep=4' -and (Test-Path "$dir/snapshot.jpg")) 'pause / seek while paused / resume / real WIC JPEG'
     Run image $PlayerExe @("$dir/enhanced.png",'--nr','--smoke-seconds','3') 15
