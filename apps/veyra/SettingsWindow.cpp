@@ -239,6 +239,8 @@ void layoutColorPage(){
         for(auto& entry:items)if(GetDlgCtrlID(entry.h)==id){entry.y=y;entry.height=height;entry.hidden=hidden;if(x>=0)entry.x=x;if(w!=-2)entry.w=w;return;}
     };
     int y=12;
+    // Sticky-header bookkeeping (see the section loop below).
+    int previousHeaderId=-1,previousHeaderY=0;
     place(800,y,36,false);y+=42;
     // Preset toolbar: which look, a name to save under, and the actions.
     place(803,y,200,false);place(804,y,180,false);y+=38;
@@ -247,8 +249,16 @@ void layoutColorPage(){
     place(821,y,32,false);y+=42;
     for(int section=0;section<kColorSections;++section){
         const bool collapsed=(colorFoldMask>>section)&1u;
-        place(810+section,y,32,false);
-        place(colorSectionEyeId(section),y+3,26,false,bodyWidthDip-40,26);
+        // Sticky section headers (Lightroom does this too): a header never
+        // scrolls under the top edge of the viewport - it is clamped to the
+        // visible top and pushed up by the next header that reaches it. Without
+        // the clamp a scrolled header was cut in half ("字只剩一半").
+        int headerY=y;
+        if(headerY<scroll)headerY=scroll;
+        if(previousHeaderId>=0)place(previousHeaderId,std::min(previousHeaderY,headerY-36),36,false);
+        place(810+section,headerY,36,false);
+        place(colorSectionEyeId(section),headerY+5,26,false,bodyWidthDip-40,26);
+        previousHeaderId=810+section;previousHeaderY=headerY;
         const auto title=std::format(L"{}  {}",collapsed?L"▸":L"▾",colorSectionName(section));
         putText(810+section,title.c_str());
         y+=38;
@@ -706,16 +716,13 @@ void registerToneCurveClass(){
                 const int index=std::clamp(colourCurveDragPoint,0,curve.count-1);
                 colourCurveDragPoint=index;
                 const float y=std::clamp(float(canvas.bottom-cursor.y)/float(std::max<int>(1,canvas.bottom-canvas.top)),0.0f,1.0f);
-                // Endpoints keep their x (they are the black/white points) but
-                // must move vertically - Lightroom lets you pull them up or down
-                // to set the black and white output levels.
-                if(index==0)curve.points[0]={curve.points[0].x,y};
-                else if(index==curve.count-1)curve.points[std::size_t(index)]={curve.points[std::size_t(index)].x,y};
-                else{
-                    const float x=std::clamp(float(cursor.x-canvas.left)/float(std::max<int>(1,canvas.right-canvas.left)),
-                        curve.points[std::size_t(index-1)].x+0.01f,curve.points[std::size_t(index+1)].x-0.01f);
-                    curve.points[std::size_t(index)]={x,y};
-                }
+                // Endpoints move freely too (Lightroom's black/white points can
+                // be pulled inward), they are only bounded by their neighbour so
+                // the control points stay sorted left to right.
+                const float rawX=float(cursor.x-canvas.left)/float(std::max<int>(1,canvas.right-canvas.left));
+                const float lower=index>0?curve.points[std::size_t(index-1)].x+0.01f:0.0f;
+                const float upper=index<curve.count-1?curve.points[std::size_t(index+1)].x-0.01f:1.0f;
+                curve.points[std::size_t(index)]={std::clamp(rawX,lower,upper),y};
                 applyColour(colour,true,false);
             }else if(msg==WM_LBUTTONUP){
                 ReleaseCapture();

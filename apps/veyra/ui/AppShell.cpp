@@ -970,9 +970,11 @@ else if(colorStep==73){
     auto edit=colourControl(1300);
     const bool beforeVisible=edit&&IsWindowVisible(edit);
     const bool beforeMask=(preferences.load().colourFoldMask&1u)!=0u;
-    RECT before{};GetWindowRect(colourControl(811),&before);
+    // The section header is sticky now, so the geometry probe follows a real row
+    // of the next section instead (its first parameter label).
+    RECT before{};GetWindowRect(colourControl(1206),&before);
     SendMessageW(colourControl(810),BM_CLICK,0,0);
-    RECT after{};GetWindowRect(colourControl(811),&after);
+    RECT after{};GetWindowRect(colourControl(1206),&after);
     const bool afterVisible=edit&&IsWindowVisible(edit);
     const auto persistedPreferences=preferences.load();
     const bool afterMask=(persistedPreferences.colourFoldMask&1u)!=0u;
