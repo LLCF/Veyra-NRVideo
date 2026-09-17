@@ -32,6 +32,7 @@ std::array<float,3> applyMatrix(const veyra::pipeline::ColorGradeTables& t,std::
 }
 int main(){
     using veyra::engine::ColorSettings;
+    using veyra::engine::ColorCurve;
     using veyra::pipeline::ColorGradeTables;
 
     // 1. Off, and on-but-neutral, are both visual no-ops.
@@ -174,6 +175,35 @@ int main(){
             "bypassing 曲线 bakes exactly the same table as resetting those curves");
         check(ColorGradeTables::bake(curve).curve!=ColorGradeTables::bake(curvesReset).curve,
             "the point curve still changes the table when it is not bypassed");
+    }
+    // 12. Point curves are curves, not polylines: the bake uses a monotone cubic
+    // (Fritsch-Carlson) spline, so it is smooth, monotone and never overshoots.
+    {
+        ColorCurve sCurve;
+        sCurve.count=3;sCurve.points[0]={0,0};sCurve.points[1]={0.5f,0.25f};sCurve.points[2]={1,1};
+        const auto spline=veyra::pipeline::ColorGradeTables::curveValue(sCurve,0.25f);
+        const float linear=0.125f;
+        check(std::abs(spline-linear)>0.004f,"the point curve interpolates smoothly instead of straight segments");
+        bool monotone=true,bounded=true;float previous=-1;
+        for(int i=0;i<=200;++i){
+            const float x=float(i)/200.0f;
+            const float y=veyra::pipeline::ColorGradeTables::curveValue(sCurve,x);
+            monotone&=y+1e-5f>=previous;previous=y;
+            bounded&=y>=-1e-5f&&y<=1.0f+1e-5f;
+        }
+        check(monotone&&bounded,"the spline stays monotone and inside the unit square (no ringing)");
+        ColorCurve identity;   // two points must stay exactly the ramp
+        bool straight=true;
+        for(int i=0;i<=100;++i){const float x=float(i)/100.0f;straight&=std::abs(veyra::pipeline::ColorGradeTables::curveValue(identity,x)-x)<2e-3f;}
+        check(straight,"a two-point curve is still the identity ramp");
+        ColorCurve strong;strong.count=4;strong.points[0]={0,0};strong.points[1]={0.3f,0.1f};
+        strong.points[2]={0.7f,0.4f};strong.points[3]={1,1};
+        const auto baked=ColorGradeTables::bake([&]{ColorSettings c;c.enabled=true;c.curves[0]=strong;return c;}());
+        const int mid=kN/2;
+        const float tableMid=curveAt(baked,mid,0);
+        const float tableX=float(mid)/float(kN-1);
+        check(std::abs(tableMid-veyra::pipeline::ColorGradeTables::curveValue(strong,tableX))<1e-5f,
+            "the baked table samples the same spline the UI draws");
     }
     if(failures){std::printf("FAIL: colour grade bake (%d checks)\n",failures);return 1;}
     std::printf("PASS: colour grade bake tables (identity, white balance, tone, curves, mixer, grading, lut)\n");

@@ -49,17 +49,59 @@ float smoothstepf(float edge0,float edge1,float x){
 // Piecewise-linear point curve on the 0..1 tonal domain (P1 cut; the data model
 // already stores up to eight points, so a monotone cubic can replace this later
 // without touching the format).
-float pointCurve(const engine::ColorCurve& curve,float x){
-    if(curve.count<2)return x;
-    for(int i=0;i<curve.count-1;++i){
-        const auto& a=curve.points[std::size_t(i)];
-        const auto& b=curve.points[std::size_t(i+1)];
-        if(x<=b.x||i==curve.count-2){
-            const float t=std::clamp((x-a.x)/std::max(1e-6f,b.x-a.x),0.0f,1.0f);
-            return a.y+(b.y-a.y)*t;
+// Monotone cubic Hermite (Fritsch-Carlson) tangents. A tone curve must pass
+// through every control point, be C1-smooth, and never overshoot or invert -
+// which is exactly what this construction guarantees. Piecewise-linear (the
+// previous behaviour) produced visible corners; a plain Catmull-Rom can ring
+// past the control points and invert a strong S-curve.
+void curveTangents(const engine::ColorCurve& curve,std::array<float,engine::kColorCurvePoints>& slope){
+    const int count=std::clamp(curve.count,0,int(engine::kColorCurvePoints));
+    std::array<float,engine::kColorCurvePoints> secant{};
+    for(int i=0;i<count-1;++i){
+        const float dx=std::max(1e-6f,curve.points[std::size_t(i+1)].x-curve.points[std::size_t(i)].x);
+        secant[std::size_t(i)]=(curve.points[std::size_t(i+1)].y-curve.points[std::size_t(i)].y)/dx;
+    }
+    if(count<2)return;
+    slope[0]=secant[0];
+    for(int i=1;i<count-1;++i){
+        const float previous=secant[std::size_t(i-1)],next=secant[std::size_t(i)];
+        // A sign change (or a flat neighbour) is a local extremum: flatten it so
+        // the spline cannot bulge past the point the user placed.
+        slope[std::size_t(i)]=previous*next<=0.0f?0.0f:(previous+next)*0.5f;
+    }
+    slope[std::size_t(count-1)]=secant[std::size_t(count-2)];
+    for(int i=0;i<count-1;++i){
+        if(secant[std::size_t(i)]==0.0f){slope[std::size_t(i)]=0.0f;slope[std::size_t(i+1)]=0.0f;continue;}
+        const float a=slope[std::size_t(i)]/secant[std::size_t(i)];
+        const float b=slope[std::size_t(i+1)]/secant[std::size_t(i)];
+        const float magnitude=std::sqrt(a*a+b*b);
+        if(magnitude>3.0f){
+            const float scale=3.0f/magnitude;
+            slope[std::size_t(i)]=scale*a*secant[std::size_t(i)];
+            slope[std::size_t(i+1)]=scale*b*secant[std::size_t(i)];
         }
     }
-    return x;
+}
+float pointCurve(const engine::ColorCurve& curve,float x){
+    const int count=std::clamp(curve.count,0,int(engine::kColorCurvePoints));
+    if(count<2)return x;
+    if(x<=curve.points[0].x)return curve.points[0].y;
+    if(x>=curve.points[std::size_t(count-1)].x)return curve.points[std::size_t(count-1)].y;
+    std::array<float,engine::kColorCurvePoints> slope{};
+    curveTangents(curve,slope);
+    for(int i=0;i<count-1;++i){
+        const auto& a=curve.points[std::size_t(i)];
+        const auto& b=curve.points[std::size_t(i+1)];
+        if(x<=b.x){
+            const float dx=std::max(1e-6f,b.x-a.x);
+            const float t=std::clamp((x-a.x)/dx,0.0f,1.0f);
+            const float t2=t*t,t3=t2*t;
+            const float h00=2.0f*t3-3.0f*t2+1.0f,h10=t3-2.0f*t2+t;
+            const float h01=-2.0f*t3+3.0f*t2,h11=t3-t2;
+            return h00*a.y+h10*dx*slope[std::size_t(i)]+h01*b.y+h11*dx*slope[std::size_t(i+1)];
+        }
+    }
+    return curve.points[std::size_t(count-1)].y;
 }
 // Parametric regions: the three splitters divide the tonal range and each region
 // slider shifts its own band (Lightroom-style).

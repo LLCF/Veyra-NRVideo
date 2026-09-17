@@ -1,5 +1,59 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-17 修复：点曲线是折线不是曲线（UI 与烘焙一起换成单调三次样条）
+
+用户指着截图问“曲线为什么是直角”。他说得对，而且问题比 UI 更深一层：
+
+- UI 只是把 `curveValue()` 的采样点直连成折线；
+- 而 **`pointCurve()` 本身就是分段线性插值** → 烘焙进 1024 项表的也是折线 → 画面效果同样是硬角。
+
+修法：把 `pointCurve()` 换成 **单调三次 Hermite（Fritsch–Carlson）**：
+
+- 过每一个控制点、C1 连续（没有直角）；
+- 切线的 Fritsch–Carlson 限幅保证**单调、不越界、不过冲**——普通 Catmull-Rom 在强 S 曲线上会冲过
+  控制点甚至局部反转，那在这类工具里属于事故；
+- 烘焙与 UI 走同一个 `pointCurve()`，预览和实际处理自动一致（已由测试守住）。
+
+测试：CPU 新增 4 条断言（不是直线段、200 点扫描下单调且有界、两点曲线仍是精确恒等、
+烘焙表与 UI 在**同一 x**（`i/(N-1)`）上逐值一致）。回归：`veyra_color_grade_tests`、
+`veyra_color_grade_gpu_tests`、`--smoke-color` 全 exit 0；`scripts/gates/delivery.ps1` →
+**DELIVERY SHORT GATE PASS**（`logs/delivery/ca89dfb6c9b8416999307a81f5aaa752/result.json`）。
+
+## 2026-09-17 诊断：HEVC 文件打不开 + 导出中止（未改产品代码）
+
+用户报两件事：`IMAX.Laser.Pre.Show.New.2160P.DDP5.1.Atmos-ZhiLuan.mkv` 打不开；另一台机器上
+连续两次导出跑到一半中止（`C:\Users\123\Desktop\导出失败\`）。
+
+**结论一（打不开）**：与文件无关。本机 RTX 5070 + 驱动 32.0.16.1656（616.56）上
+**HEVC + D3D12VA 硬解整体失效**：第一个 picture 就失败并把 Veyra 的共享 D3D12 设备打成
+`hr=0x887A0005`（device removed）；`MediaFileSource` 的软解回退仍在同一台已死设备上建图，
+所以会话直接退出。证据链：
+
+- 用户日志 `E:\App\Veyra-1.3.2beta4-win64-portable\logs\veyra-app.log:3072-3088`：
+  `d3d12va decoder opened codec=hevc 3840x2024` → `send_packet failed code=-22` →
+  软解首帧 OK → `gpu-timestamp query heap hr=0x887A0005` / `upload buffer alloc failed hr=0x887A0005`。
+- 文件本身没问题：软解全片 12 秒零告警；D3D11VA 62 帧 0 错误；DXVA2 正常。
+- 换文件、换分辨率、换编码器同样复现：本机 NVENC 现编的 720p / 2024p / 2160p HEVC 走
+  `-hwaccel d3d12va` 全部 `exit=-22`；H.264+D3D12VA 正常。
+- **Veyra 本体复现**（一次性 6 秒，`--smoke-seconds 6`，未写偏好）：换成 1280x720 HEVC 后
+  `smoke frames=0 generated=0 failed=true`、exit=1，日志与用户现场逐行同形。
+
+**结论二（导出中止）**：源文件第 10467 个源帧的时间戳比 CFR 网格整整晚一帧
+（`pts=348.9333 expected=348.9 deviationMs=33.333`），中段跳变按 `CfrTimeline` 设计硬拒绝
+（只有尾部 3 帧豁免），导出主动停止并保留 partial。前 120 帧抽样完全符合 30/1，说明不是
+量化抖动而是一个缺失的网格槽位；两份 worker 日志没有任何解码错误，所以更可能是源文件自身
+丢帧，但**需要源文件才能定案**。
+
+**附带发现**：9/16 那 5 份 worker 是**另一类**失败——`nvEncOpenEncodeSessionEx` 三档
+apiVersion 全被拒（`status=15`），旧版（1.3.0）没有 fallback 所以当场失败；9/17 版靠
+`VideoEncoderFactory` 的 MF MFT 兜底继续跑。MF 路径在 `bitrateMbps=0` 时不设 MeanBitRate，
+实际码率由 MFT 默认值决定，属降级，已记录。
+
+产物：`docs/DIAG_HEVC_D3D12VA_AND_EXPORT_CFR_2026-09-17.md`；
+证据日志（gitignore 内）`logs/diag-20260917-hevc-d3d12va/`。
+**本轮只做诊断，未改任何产品代码，未发布。**下一步待用户选：驱动回滚/换机验证，或先做
+"失败即弃设备 + HEVC 硬解能力探测"的修复。
+
 ## 2026-09-17 紧急修复：色彩参数不是实时的（要开关 NR 才生效）
 
 用户上手验收第一条就抓到：拖一堆滑块画面**完全没反应**，必须开关 NR 才应用，之后继续调又不动。
