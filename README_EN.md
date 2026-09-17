@@ -14,7 +14,24 @@ English | [简体中文](README.md)
 
 A Windows video player and capture-card enhancement tool. Play videos, process images, and preview capture devices with optional super resolution, NR enhancement, and frame generation.
 
-[Download 1.3.0 Portable](https://github.com/Likely7/Veyra-NRVideo/releases/tag/v1.3.0) · [Release Notes](docs/RELEASE_NOTES_1.3.0.md) · [Report an Issue](https://github.com/Likely7/Veyra-NRVideo/issues)
+[Download 1.4.0 Portable](https://github.com/Likely7/Veyra-NRVideo/releases/tag/v1.4.0) · [Release Notes](docs/RELEASE_NOTES_1.4.0.md) · [Report an Issue](https://github.com/Likely7/Veyra-NRVideo/issues)
+
+## 1.4.0 Update
+
+**New colour page**: a full-float grading chain that runs *before* every effect stage (zero cost while the master switch is off). The panel follows Lightroom's layout and feel: gradient rails, a point-curve editor with draggable control points (monotone cubic spline, both black/white points free to move), four colour-grading wheels, an 8-colour mixer strip with a black & white switch, `.cube` LUTs with an input-space check, named colour presets with `.vpcolor` import/export, undo/redo, hold-to-see-original, and a per-section "eye" that temporarily disables a group. Everything is graded in linear light with output dithering to avoid banding; HDR is graded in the linear domain, before tone mapping.
+
+**Fixes**: HEVC-in-MKV files that would not open (new D3D11VA hardware path), failed exports caused by whole-slot frame gaps (an honest repeat of the previous frame), colour parameters that were not live (or did not refresh while paused), a `.cube` load crash, exports that ignored the grade, PS5 streaming connect failures, capture formats that stalled after two frames, capture windows that streaming tools could not find, silent Dolby/DTS capture, AVerMedia 5.1 passthrough and 40+ more - itemised in the [release notes](docs/RELEASE_NOTES_1.4.0.md).
+
+**Removed**: the AMD FSR *frame-generation* entry in the panel (switching back to DLSS was easy to get stuck on and the result was mediocre); the engine backend stays.
+
+<p align="center"><img src="docs/images/1.4.0/mjpeg-latency.png" alt="MJPEG capture chain before/after" width="900"></p>
+<p align="center"><small>MJPEG capture chain, two-minute real-hardware runs: 1080p60 processCpu 1.987 to 0.364-0.375 ms (-81%), 4K18 6.218 to 0.912-0.936 ms (-85%)</small></p>
+
+<p align="center"><img src="docs/images/1.4.0/native-latency.png" alt="Native (YUY2/NV12/RGB) capture chain before/after" width="900"></p>
+<p align="center"><small>Native capture chain: 1080p60 P95 unchanged, 4K18 P95 -7.5% and processCpu -8.7%, zero drops on both sides.</small></p>
+
+<p align="center"><img src="docs/images/1.4.0/colour-latency.png" alt="Colour chain on/off latency" width="900"></p>
+<p align="center"><small>Colour chain on/off (YUY2 1080p60 capture, two minutes each): +0.037 ms GPU per frame, no measurable software latency change, 60 fps and zero drops in both.</small></p>
 
 ## 1.3.0 Update
 
@@ -162,3 +179,14 @@ The capture panel also offers **Convert to SDR display**, off by default. It con
 Thanks to [Magpie Experimental](https://github.com/SAOG0721/Magpie/tree/experimental) for research insights into NR residual composition, optical flow, and enhancement pipelines; to [chiaki-ng](https://github.com/streetpea/chiaki-ng) for the PS5 streaming foundation; and to [XeSS-GPU-Motion](https://github.com/gggz114514-oss/XeSS-GPU-Motion) for its GPU DIS optical-flow implementation.
 
 See [Third-Party Notices](THIRD_PARTY_NOTICES.md) for other dependencies, sources, and licenses.
+
+## Support and feedback
+
+If this project helped you, you can buy the author a coffee (WeChat QR below). For bugs, or to get beta builds first, join the group.
+
+<p align="center">
+  <img src="docs/images/1.4.0/donate-wechat.jpg" alt="WeChat donation" width="220">
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="docs/images/1.4.0/community-group.jpg" alt="Veyra community group / bug reports / beta builds" width="220">
+</p>
+<p align="center"><small>Left: WeChat donation (voluntary; no feature is ever gated behind it) - Right: Veyra community group for bug reports and beta builds.</small></p>

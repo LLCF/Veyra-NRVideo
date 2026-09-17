@@ -13,7 +13,24 @@
 
 Windows 视频播放器与采集卡增强工具。支持视频、图片、采集卡实时预览和 PS5 局域网串流，可组合使用超分辨率、NR 画面增强与补帧。
 
-[下载 1.3.0 免安装版](https://github.com/Likely7/Veyra-NRVideo/releases/tag/v1.3.0) · [更新记录](docs/RELEASE_NOTES_1.3.0.md) · [反馈问题](https://github.com/Likely7/Veyra-NRVideo/issues)
+[下载 1.4.0 免安装版](https://github.com/Likely7/Veyra-NRVideo/releases/tag/v1.4.0) · [更新记录](docs/RELEASE_NOTES_1.4.0.md) · [反馈问题](https://github.com/Likely7/Veyra-NRVideo/issues)
+
+## 1.4.0 更新
+
+**新增色彩页**：一条全浮点、位于所有效果器之前的调色链（总开关关闭时零开销）。面板按 Lightroom 的观感与手感做：渐变色轨、可拖控制点的曲线（单调三次样条，两端黑/白场点可自由拖）、四个颜色分级色轮、混色器 8 色点条 + 黑白开关、`.cube` LUT（含输入空间检查）、命名色彩预设与 `.vpcolor` 导入导出、撤销/重做、按住看原图，以及每个分组的“眼睛”临时停用。全链路线性光处理 + 输出抖动，避免色带；HDR 在线性域调色并在 tone mapping 之前生效。
+
+**修复**：IMAX/HEVC 的 MKV 打不开（新增 D3D11VA 硬解路径）、导出整槽缺帧失败（诚实补上一帧）、调色参数不实时/暂停时不刷新、载入 `.cube` 概率闪退、导出不应用调色、PS5 串流连不上、原生采集格式只剩 2 帧、采集卡窗口被第三方直播工具识别不到、杜比/DTS 采集无声、AVerMedia 5.1 直通等 40 余项，逐条见[更新说明](docs/RELEASE_NOTES_1.4.0.md)。
+
+**移除**：AMD FSR 补帧的界面入口（切回 DLSS 容易卡住、效果一般）；引擎后端保留。
+
+<p align="center"><img src="docs/images/1.4.0/mjpeg-latency.png" alt="MJPEG 采集链路优化前后（2 分钟真机复测）" width="900"></p>
+<p align="center"><small>MJPEG 压缩采集链路：2 分钟真机复测，1080p60 processCpu 1.987 → 0.364–0.375 ms（−81%），4K18 6.218 → 0.912–0.936 ms（−85%）</small></p>
+
+<p align="center"><img src="docs/images/1.4.0/native-latency.png" alt="YUY2 等原生格式采集链路优化前后" width="900"></p>
+<p align="center"><small>原生（YUY2/NV12/RGB）采集链路：1080p60 P95 持平，4K18 P95 −7.5%、processCpu −8.7%，两侧零丢帧</small></p>
+
+<p align="center"><img src="docs/images/1.4.0/colour-latency.png" alt="调色链路开启前后延迟对比" width="900"></p>
+<p align="center"><small>调色链路开/关（采集卡 YUY2 1080p60，各 2 分钟）：每帧多 0.037 ms GPU，软件侧延迟无可测变化，均满 60 fps 零丢帧</small></p>
 
 ## 1.3.0 更新
 
@@ -157,3 +174,14 @@ Veyra 原有源码采用 [GPLv3](LICENSE)；含串流的组合程序同时适用
 感谢 [Magpie Experimental](https://github.com/SAOG0721/Magpie/tree/experimental) 在 NR 残差合成、光流与增强处理链方面提供的研究启发；感谢 [chiaki-ng](https://github.com/streetpea/chiaki-ng) 提供 PS5 串流基础，以及 [XeSS-GPU-Motion](https://github.com/gggz114514-oss/XeSS-GPU-Motion) 的 GPU DIS 光流实现。
 
 其他依赖、来源与许可证见 [第三方说明](THIRD_PARTY_NOTICES.md)。
+
+## 支持与反馈
+
+如果这个项目帮到了你，可以请作者喝杯咖啡（微信扫码）；有问题或想第一时间拿到 beta 版，欢迎进群反馈。
+
+<p align="center">
+  <img src="docs/images/1.4.0/donate-wechat.jpg" alt="微信赞助" width="220">
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="docs/images/1.4.0/community-group.jpg" alt="Veyra 交流群 / bug 反馈 / beta 测试" width="220">
+</p>
+<p align="center"><small>左：微信赞助（自愿，不影响任何功能的可用性）　右：Veyra 交流群——bug 反馈与 beta 版本发布</small></p>

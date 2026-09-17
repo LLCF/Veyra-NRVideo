@@ -178,3 +178,24 @@
 采集卡格式在采集面板选择（YUY2/NV12 等）；导出在导出标签。任何一条不对，直接反馈具体文件名/格式/
 采集卡型号与日志（`logs/veyra-app.log`）。
 
+## 9. 实测对比图
+
+**MJPEG / 压缩采集链路（2 分钟真机复测，本机 ¥30 UVC，无增强）**
+
+![MJPEG 采集链路优化前后](images/1.4.0/mjpeg-latency.png)
+
+**YUY2 等原生格式采集链路（同一基线，各多次采样）**
+
+![原生采集链路优化前后](images/1.4.0/native-latency.png)
+
+**调色链路开启前后（采集卡 YUY2 1080p60，各 2 分钟）**
+
+![调色开启前后的延迟变化](images/1.4.0/colour-latency.png)
+
+## 10. 支持与反馈
+
+如果这个项目帮到了你，可以请作者喝杯咖啡（微信扫码，完全自愿，不影响任何功能）；
+有问题或想第一时间拿到 beta 版，欢迎进群。
+
+![微信赞助](images/1.4.0/donate-wechat.jpg) ![Veyra 交流群 / bug 反馈 / beta](images/1.4.0/community-group.jpg)
+
