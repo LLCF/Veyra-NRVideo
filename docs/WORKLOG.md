@@ -1,5 +1,39 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-17 1.4.0 正式发布到 GitHub（用户授权，已完成）
+
+**发布地址**：https://github.com/Likely7/Veyra-NRVideo/releases/tag/v1.4.0 （非草稿、非预发布）
+
+**源码**：`main` 推送 `fcd7469..890d200`（184 个文件），tag `v1.4.0` 已推送。
+**禁止上传项审计**：推送区间与 tag 树内 `.dll/.lib/.exe/.onnx/.bin/.pdb/.7z` 计数为 **0**；
+`runtime_local/`、`third_party_local/`、SDK/模型/抓帧/日志全部仍在 gitignore，未进入源码仓库。
+
+**Release 资产**（名字 / 大小）：
+
+| 资产 | 大小 | 说明 |
+| --- | --- | --- |
+| `Veyra-1.4.0-win64-portable.zip` | 448.2 MB（470,010,842 字节） | 免安装包，SHA256 `DFB8650E8E1B7B73902D9E136D21654691D69E0991F557DDAB054F76BB4CE7D6` |
+| `Veyra-1.4.0-FFmpeg-source.zip` | 22.2 MB | 对应源码（FFmpeg patched tree + vcpkg port + SPDX + 构建记录 + patches），SHA256 `A7CF151937EFA0CA7634ED4EF2F3AD662811BB54A96388669F1EF184BC29AF94`，LGPL 2.1+ |
+| `Veyra-1.4.0-RemotePlay-source.zip` | 137.1 MB | Chiaki 固定版本 + 补丁 + 依赖源码/notice，17,710 文件，SHA256 `1D69DDA5BB1AFA3B78E917569BF396338A338BF2184D4458C2F1E1D88CE881DF` |
+
+**Release 说明**：正文来自 `docs/RELEASE_BODY_1.4.0.md`（2105 字符），内嵌三张实测对比图
+（MJPEG / 原生格式 / 调色开关，均引用 tag `v1.4.0` 的 raw 地址，实测 HTTP 200）+ 赞助与交流群两张小图。
+仓库侧同步更新：`README.md` / `README_EN.md` 顶部改为 1.4.0（下载链接、更新摘要、三张对比图）并新增
+“支持与反馈 / Support and feedback”一节（微信赞助 + 交流群，图片 31 KB / 36 KB，宽度 220 显示）；
+`docs/RELEASE_NOTES_1.4.0.md` 追加图片与支持章节。
+
+**发布前已在本地验证**：全量编译 197/197；`delivery.ps1` PASS；`portable-smoke.ps1` 直接跑包内 EXE PASS；
+包内 `Veyra.exe` ProductVersion=1.4.0；`.zip.sha256` 与实测哈希一致；`gh release view` 三项资产齐全。
+
+**两点如实记录**：
+
+1. AVerMedia 5.1 直通、glass-to-glass 延迟、10bit P010/AMD/Intel 组合、IMAX 整段 72 秒播放仍未验证
+   （发布说明里已写明“已知边界”，没有当作已通过）。
+2. 文档口径不一致待修：`docs/BUILD.md` 与 `docs/RUNTIME_COMPONENTS_1.4.0.md` 说本包 FFmpeg
+   链接 dav1d 1.5.4，但 `package-ffmpeg-source.py` 从出货 DLL 读出的配置里**没有 `--enable-libdav1d`**，
+   所以对应源码里也没有 dav1d 源码树（脚本据此判定无需附带）。包内仍带 `dav1d.dll`。下一版要么把
+   FFmpeg 重新按 dav1d 链接、要么把文档改对——本轮只如实记录，没有改文档口径掩盖。
+
 ## 2026-09-17 1.4.0：移除 FSR 补帧入口 + 版本号 + 打包 + 分支审计（未推送/未发布）
 
 **产品的改动（仅这一处）**：把 **AMD FSR 补帧的界面入口删掉**（用户：切回 DLSS 容易卡住、效果一般）。
