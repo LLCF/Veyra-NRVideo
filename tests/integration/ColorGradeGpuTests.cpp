@@ -12,6 +12,10 @@
 #include "veyra/sink/ImageExportSink.h"
 #include "veyra/engine/EnhancementSettings.h"
 #include "veyra/engine/ColorSettings.h"
+#include "veyra/RuntimePaths.h"
+#include "veyra/engine/ColorLut.h"
+#include <filesystem>
+#include <fstream>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -58,6 +62,19 @@ struct Graph {
         gd.sourceWidth=gd.sourceHeight=gd.workWidth=gd.workHeight=kSize;
         gd.rgbInput=true;gd.stillImage=true;gd.noFeatures=true;gd.enableNr=false;gd.enableSr=false;gd.enableFg=false;
         gd.color.enabled=colorEnabled;
+        return g.initialize(gd)&&g.createViews();
+    }
+    bool startWithLut(const std::wstring& lutName){
+        gfx::DeviceContextDesc device;Status st;
+        if(!ctx.initialize(device,st)||!ring.initialize(ctx.device(),ctx.directQueue(),ctx.fence(),ctx.fenceEvent(),4,st))return false;
+        up=true;
+        pipeline::EnhanceGraphDesc gd;
+        gd.sourceWidth=gd.sourceHeight=gd.workWidth=gd.workHeight=kSize;
+        gd.rgbInput=true;gd.stillImage=true;gd.noFeatures=true;gd.enableNr=false;gd.enableSr=false;gd.enableFg=false;
+        gd.color.enabled=true;
+        if(!gd.color.setLutName(lutName))return false;
+        gd.color.lutStrength=100.0f;
+        gd.color.lutInputSpace=engine::ColorSettings::kLutInputSrgb;
         return g.initialize(gd)&&g.createViews();
     }
     bool apply(const engine::EnhancementSettings& settings){return g.applySettings(settings);}
@@ -136,6 +153,30 @@ int wmain(){
             const auto pixel=center(graded);
             check(ok&&pixel.r>pixel.b+10,"mid-tone grading wheel tints mid grey towards red");
         }
+    }
+    // 3. A real .cube file, imported into runtime_local/luts and resolved by name
+    // when the graph is built - the same path the UI importer uses.
+    {
+        const engine::ColorLutStore store(veyra::runtime::localDataDirectory());
+        std::error_code ec;std::filesystem::create_directories(store.folder(),ec);
+        const auto source=store.folder()/L"gpu-probe-halve.cube";
+        {
+            std::ofstream file(source,std::ios::binary);
+            file<<"TITLE \"halve\"\nLUT_3D_SIZE 2\n";
+            for(int b=0;b<2;++b)for(int g=0;g<2;++g)for(int r=0;r<2;++r)
+                file<<(r*0.5f)<<" "<<(g*0.5f)<<" "<<(b*0.5f)<<"\n";
+        }
+        Frame frame,reference;
+        sink::RgbaImage baseline,graded;
+        bool ok=frame.make(188,188,188)&&reference.make(188,188,188);
+        if(ok){
+            Graph plain,withLut;
+            ok=plain.start(true)&&plain.render(reference,baseline);
+            if(ok)ok=withLut.startWithLut(L"gpu-probe-halve.cube")&&withLut.render(frame,graded);
+        }
+        check(ok,"a .cube imported into runtime_local/luts resolves when the graph is built");
+        if(ok)check(center(graded).r<center(baseline).r-20,"the imported halving LUT darkens the frame through the 3D sampler");
+        std::filesystem::remove(source,ec);
     }
     if(failures){std::printf("FAIL: colour grade GPU contract (%d checks)\n",failures);return 1;}
     std::printf("PASS: colour grade GPU contract (off/neutral identity, exposure, curve, saturation, hue)\n");

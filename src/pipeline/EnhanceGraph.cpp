@@ -7,6 +7,7 @@
 // views are created last. Per-frame execution uses the shared command slot
 // ring (NR evaluates on a fresh list - snippet constraint).
 #include "veyra/pipeline/EnhanceGraph.h"
+#include "veyra/engine/ColorLut.h"
 
 #include <algorithm>
 #include <bit>
@@ -354,6 +355,19 @@ bool EnhanceGraph::createResources()
     if(colorActive_){
         if(!createColorResources())return false;
         refreshColorTables();
+        // Load the optional .cube the settings reference; a LUT that cannot be
+        // resolved disables the lookup instead of sampling a placeholder.
+        if(desc_.color.hasLut()){
+            engine::ColorLutData lut;
+            const engine::ColorLutStore store(runtime::localDataDirectory());
+            if(store.resolve(desc_.color.lutNameString(),lut)&&lut.valid()&&setColorLut(lut.rgb.data(),unsigned(lut.size))){
+                veyra::log::info("color-grade",std::format("lut loaded name={} size={}",std::string(desc_.color.lutNameString().begin(),desc_.color.lutNameString().end()),lut.size));
+            }else{
+                desc_.color.lutStrength=0.0f;
+                refreshColorTables();
+                veyra::log::warn("color-grade","referenced lut unavailable; colour grade continues without it");
+            }
+        }
         veyra::log::info("color-grade",std::format("stage enabled tables={}/{}/{} lutInputSpace={} lut={}",
             ColorGradeTables::kCurveEntries,ColorGradeTables::kHueEntries,ColorGradeTables::kLumEntries,
             desc_.color.lutInputSpace,desc_.color.hasLut()?1:0));
@@ -1850,6 +1864,9 @@ bool EnhanceGraph::applySettings(const engine::EnhancementSettings& s){
     // The colour master switch changes the graph shape (tables + shader branch)
     // and must rebuild; every other colour field is a live uniform update.
     if(s.color.enabled!=desc_.color.enabled)return false;
+    // Switching the referenced .cube re-stages a descriptor, which needs the
+    // queue drained: treat it as a rebuild (parameters stay live).
+    if(s.color.lutNameString()!=desc_.color.lutNameString())return false;
     if(!(s.color==desc_.color)){desc_.color=s.color;refreshColorTables();}
     desc_.contentRate=s.content;desc_.model=s.model;desc_.residual=s.residual;desc_.protection=s.protection;desc_.settingsRevision=s.revision;
     desc_.fgMultiplier=std::max(2u,s.multiplier);desc_.enableNvofStandalone=s.nr&&!desc_.stillImage;nvofStandalone_=desc_.enableNvofStandalone;

@@ -1,5 +1,37 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-17 色彩页 P1：T5-a `.cube` 解析、导入与引擎侧解析（GPU 验收通过）
+
+新增 `include/veyra/engine/ColorLut.h` + `src/engine/ColorLut.cpp`（放在 `veyra_base`，供
+pipeline 与设置/导入路径共用）：
+
+- **解析**：Adobe Cube LUT Specification 1.0 —— `TITLE` / `LUT_1D_SIZE` / `LUT_3D_SIZE` /
+  `DOMAIN_MIN` / `DOMAIN_MAX` / `#` 注释 / 数值行；行数与尺寸必须一致、数值必须有限、
+  多余列与非法尺寸一律**拒绝**（不做静默截断）；1D LUT 展开成 32³ 供 shader 单一路径采样；
+  DOMAIN 语义按规范处理（网格已覆盖声明的域，shader 的 0..1 坐标直接映射到该域）；
+- **存储**：`ColorLutStore` 管理 `runtime_local/luts/*.cube`，`importFile()` 校验后复制，
+  并在 `luts/manifest.v1` 追加（名字、尺寸、字节数、SHA-256）；`resolve()` 按名字解析，
+  名字里带路径分隔符直接拒绝；导出作业与 UI 解析同一个目录；
+- **引擎接线**：`EnhanceGraph` 建立图时按 `ColorSettings::lutName` 解析并上传 3D 纹理；
+  解析失败时**关掉 LUT 强度并写警告**，不允许采样占位纹理；切换 LUT 名字走重建（要重挂
+  描述符），其余色彩参数仍是实时更新；`EngineController` 的重建条件已加入 LUT 名字。
+
+**测试**
+
+- `veyra_color_lut_tests`（CPU，18 项）：2³/33³ 解析与红分量最快序、行数/尺寸/NaN/多余列拒绝、
+  1D→3D 展开、DOMAIN 语义、导入/列举/解析、manifest、坏文件拒绝、路径穿越拒绝 → exit 0；
+- `veyra_color_grade_gpu_tests` 新增两条（GPU，真文件）：
+  `a .cube imported into runtime_local/luts resolves when the graph is built`、
+  `the imported halving LUT darkens the frame through the 3D sampler` → exit 0（共 10 项）。
+
+**回归**：`veyra_ui_contract_tests` exit 0；`veyra_repair_contract_tests` 191/0；
+`veyra_repair_preset_tests` exit 0；`veyra_color_grade_tests` 23/23；
+`scripts/gates/delivery.ps1` → **DELIVERY SHORT GATE PASS**
+（`logs/delivery/1c657339eea649d69624b38cb282c2e8/result.json`）。
+
+**未做（T5-b / T6）**：色彩页里的 LUT 下拉、强度/输入空间行、`.cube` 导入按钮；
+命名色彩预设（保存/应用/删除）与 `.vpcolor` 导入导出；HDR 标准处理与三入口一致性验收。
+
 ## 2026-09-17 色彩页 P1：T4 面板填充（曲线 / 混色器 / 颜色分级 / 校准）
 
 色彩页从 2 组扩到 **6 组**：亮、颜色、曲线、混色器、颜色分级、校准。参数行 = 标签 +
