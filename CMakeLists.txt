@@ -471,6 +471,7 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
     src/source/NativeCaptureSink.cpp
     src/source/MediaFileSource.cpp
     src/source/CaptureCardSource.cpp
+    src/source/AverMediaAudioSwitch.cpp
     src/source/CaptureCompressedDecoder.cpp
     src/source/WasapiAudioInput.cpp
   )
@@ -568,6 +569,10 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
   target_compile_features(veyra_audio_timeline_tests PRIVATE cxx_std_20)
   target_link_libraries(veyra_audio_timeline_tests PRIVATE veyra_sinks)
   add_executable(veyra_capture_audio_tests tests/integration/CaptureAudioTests.cpp)
+  add_executable(veyra_avermedia_switch_tests tests/unit/AverMediaAudioSwitchTests.cpp)
+  target_compile_features(veyra_avermedia_switch_tests PRIVATE cxx_std_20)
+  target_compile_definitions(veyra_avermedia_switch_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+  target_link_libraries(veyra_avermedia_switch_tests PRIVATE veyra_sources)
   if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavcodec/avcodec.h")
     add_executable(veyra_bitstream_audio_test tools/bitstream_audio_test/main.cpp)
     target_compile_features(veyra_bitstream_audio_test PRIVATE cxx_std_20)

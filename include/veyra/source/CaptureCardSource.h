@@ -67,6 +67,9 @@ public:
     void close()noexcept override;
 private:
     bool connectDirectShowAudio(const SourceOpenDesc&);
+    // AVerMedia capture cards need their installed vendor component to arm
+    // non-PCM (Dolby/DTS) passthrough before the audio pin is negotiated.
+    bool applyVendorAudioSwitch(const std::wstring& audioName,const std::wstring& audioPath);
     SourceReadStatus readWithWait(pipeline::FramePacket&,const AVFrame**,unsigned milliseconds);
     struct Impl;std::unique_ptr<Impl> p_;
     SourceOpenDesc reconnectDesc_;
