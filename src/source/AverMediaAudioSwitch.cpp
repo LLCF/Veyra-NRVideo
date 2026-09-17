@@ -6,7 +6,9 @@
 #include <setupapi.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <format>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -102,6 +104,47 @@ constexpr const char* kExportOpenerSwitch = "?SwitchDeviceThenDetectAudioFormat@
 constexpr const char* kExportOpenerIsNonPcm = "?IsAudioFormatNonPcm@DeviceOpener@AVerMedia@@QEBA_NXZ";
 constexpr const char* kExportOpenerStartChecking = "?StartChecking@DeviceOpener@AVerMedia@@QEAAXXZ";
 constexpr const char* kExportOpenerStopChecking = "?StopChecking@DeviceOpener@AVerMedia@@QEAAXXZ";
+// Static log sinks of the component. Plain function pointers (not
+// std::function), so installing them crosses no C++ ABI that could bite us.
+// Their own plugin installs the same four before it calls anything else.
+constexpr const char* kExportSetDebugHandler = "?setDebugHandler@LogHelper@@YAXP6AXPEBDPEAD@Z@Z";
+constexpr const char* kExportSetErrorHandler = "?setErrorHandler@LogHelper@@YAXP6AXPEBDPEAD@Z@Z";
+constexpr const char* kExportSetInfoHandler = "?setInfoHandler@LogHelper@@YAXP6AXPEBDPEAD@Z@Z";
+constexpr const char* kExportSetWarningHandler = "?setWarningHandler@LogHelper@@YAXP6AXPEBDPEAD@Z@Z";
+
+// The component prints its diagnostics through these; without them the reason a
+// switch failed stays invisible (the 2026-09-17 run only ever showed our own
+// "card not reached" line). Signature matches their void(const char*, va_list).
+void vendorLogSink(const char* format, char* args) noexcept {
+    if (format == nullptr) return;
+    char buffer[1024] = {};
+    try {
+        if (args != nullptr) vsnprintf(buffer, sizeof(buffer), format, args);
+        else snprintf(buffer, sizeof(buffer), "%s", format);
+    } catch (...) {
+        return;
+    }
+    veyra::log::info("capture-audio-vendor", std::string("vendor: ") + buffer);
+}
+
+using SetVendorLogHandler = void (*)(void (*)(const char*, char*));
+
+// DeviceOpener's own sink: the documented way their plugin collects these
+// messages ("SetLogHandler" with a std::function<void(int,const char*)>).
+// std::wstring already crossed this boundary correctly (the component read the
+// DeviceOpenerParam we built), and the call is guarded, so a surprise here is
+// reported instead of fatal.
+constexpr const char* kExportOpenerSetLogHandler =
+    "?SetLogHandler@DeviceOpener@AVerMedia@@QEAAXAEBV?$function@$$A6AXHPEBD@Z@std@@@Z";
+
+void vendorOpenerLog(int level, const char* message) noexcept {
+    if (message == nullptr) return;
+    try {
+        if (level == 1) veyra::log::warn("capture-audio-vendor", std::string("vendor: ") + message);
+        else veyra::log::info("capture-audio-vendor", std::string("vendor: ") + message);
+    } catch (...) {
+    }
+}
 
 // The chip reports this value while the HDMI source sends a compressed
 // (non-PCM) stream; their enable path refuses to switch for anything else.
@@ -215,9 +258,14 @@ struct AverMediaAudioSwitch::Impl {
         RawFn openerDtor = nullptr;
         RawFn setVendorSdk = nullptr;
         RawFn switchDevice = nullptr;
+        RawFn setLogHandler = nullptr;  // optional
         RawFn isNonPcm = nullptr;
         RawFn startChecking = nullptr;
         RawFn stopChecking = nullptr;
+        SetVendorLogHandler setDebugHandler = nullptr;
+        SetVendorLogHandler setErrorHandler = nullptr;
+        SetVendorLogHandler setInfoHandler = nullptr;
+        SetVendorLogHandler setWarningHandler = nullptr;
         bool complete() const {
             return vendorCtor && vendorDtor && initialize && uninitialize && closePort && getAudioFormat &&
                    openerCtor && openerDtor && setVendorSdk && switchDevice && isNonPcm &&
@@ -238,6 +286,7 @@ struct AverMediaAudioSwitch::Impl {
     bool openerConstructed = false;
     bool sdkInitialized = false;
     bool checking = false;
+    std::wstring lastAppliedPath;
 
     void* sdk() noexcept { return sdkStorage.raw(); }
     void* opener() noexcept { return openerStorage.raw(); }
@@ -255,6 +304,7 @@ struct AverMediaAudioSwitch::Impl {
             {kExportOpenerDtor, &exports.openerDtor},
             {kExportOpenerSetVendorSdk, &exports.setVendorSdk},
             {kExportOpenerSwitch, &exports.switchDevice},
+            {kExportOpenerSetLogHandler, &exports.setLogHandler},
             {kExportOpenerIsNonPcm, &exports.isNonPcm},
             {kExportOpenerStartChecking, &exports.startChecking},
             {kExportOpenerStopChecking, &exports.stopChecking},
@@ -262,12 +312,31 @@ struct AverMediaAudioSwitch::Impl {
         for (const Entry& entry : entries) {
             FARPROC address = GetProcAddress(avtModule, entry.name);
             if (address == nullptr) {
+                // The log sink is optional: keep working with components that
+                // do not export it, we just lose their internal trace.
+                if (entry.target == &exports.setLogHandler) continue;
                 status.detail = std::format("missing export {}", entry.name);
                 return false;
             }
             *entry.target = reinterpret_cast<RawFn>(address);
         }
         return true;
+    }
+
+    // Log sinks are optional: an older component without them must still load.
+    void installLogSinks() {
+        const struct { const char* name; SetVendorLogHandler* slot; } sinks[] = {
+            {kExportSetDebugHandler, &exports.setDebugHandler},
+            {kExportSetErrorHandler, &exports.setErrorHandler},
+            {kExportSetInfoHandler, &exports.setInfoHandler},
+            {kExportSetWarningHandler, &exports.setWarningHandler},
+        };
+        for (const auto& sink : sinks) {
+            const FARPROC address = GetProcAddress(avtModule, sink.name);
+            if (address == nullptr) continue;
+            *sink.slot = reinterpret_cast<SetVendorLogHandler>(address);
+            (*sink.slot)(vendorLogSink);
+        }
     }
 
     bool loadComponent() {
@@ -301,6 +370,10 @@ struct AverMediaAudioSwitch::Impl {
             if (qtModule != nullptr) { FreeLibrary(qtModule); qtModule = nullptr; }
             return false;
         }
+        // Do this before anything else calls into the component: from here on
+        // its own diagnostics land in the Veyra log instead of a console the
+        // GUI process does not have.
+        installLogSinks();
         return true;
     }
 };
@@ -442,7 +515,7 @@ const AverMediaUsbFunction* AverMediaAudioSwitch::pickAudioFunction(const std::v
 
 bool AverMediaAudioSwitch::apply(const std::wstring& deviceName, const std::wstring& devicePath) {
     auto& impl = *p_;
-    if (impl.sdkInitialized && !devicePath.empty()) {
+    if (impl.sdkInitialized && !devicePath.empty() && devicePath == impl.lastAppliedPath) {
         // Already armed (for example after an audio reconnect); the vendor
         // monitor thread keeps the mode applied, so refreshing the status is
         // enough. This deliberately avoids a second setDevice/setPort cycle.
@@ -471,6 +544,11 @@ bool AverMediaAudioSwitch::apply(const std::wstring& deviceName, const std::wstr
             impl.status.state = AverMediaSwitchState::Failed;
             return false;
         }
+        // Their own plugin sleeps one second after initialize() before it
+        // touches the device; without it the SDK is not ready yet and
+        // setDevice/getAudioFormat fail ("card not reached"). Same one second
+        // on teardown, between closePort and uninitialize.
+        Sleep(1000);
         impl.sdkInitialized = true;
         impl.status.sdkReady = true;
     }
@@ -487,6 +565,15 @@ bool AverMediaAudioSwitch::apply(const std::wstring& deviceName, const std::wstr
             impl.status.detail = "SetVendorSdk failed: " + error;
             impl.status.state = AverMediaSwitchState::Failed;
             return false;
+        }
+        if (impl.exports.setLogHandler != nullptr) {
+            std::function<void(int, const char*)> sink = vendorOpenerLog;
+            RawCall attachLog{impl.exports.setLogHandler, impl.opener(), &sink};
+            std::string logError;
+            if (!callVendor(attachLog, logError)) {
+                // Losing the trace is not fatal, but say so.
+                log::warn("capture-audio-vendor", std::string("component log sink could not be attached: ") + logError);
+            }
         }
     }
     VendorDeviceOpenerParam param{deviceName, devicePath};
@@ -515,6 +602,7 @@ bool AverMediaAudioSwitch::apply(const std::wstring& deviceName, const std::wstr
     impl.status.detail = std::format("chipAudioFormat={}{}", chipFormat,
         chipFormat == kChipFormatNonPcm ? " (non-PCM/Dolby)" : " (PCM)");
     impl.status.state = AverMediaSwitchState::Switched;
+    impl.lastAppliedPath = devicePath;
     startMonitoring();
     return true;
 }
@@ -533,6 +621,7 @@ void AverMediaAudioSwitch::stop() noexcept {
             RawCall close{impl.exports.closePort, impl.sdk()};
             std::string error;
             callVendor(close, error);
+            Sleep(1000);  // matches the component's own unload sequence
             RawCall uninitialize{impl.exports.uninitialize, impl.sdk()};
             callVendor(uninitialize, error);
             impl.sdkInitialized = false;
