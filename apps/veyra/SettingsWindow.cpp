@@ -147,6 +147,10 @@ int colourMixerBand=0;   // 0..7, the eight colour ranges
 // which control point is being dragged.
 constexpr int colorCurveCanvasId=850,colorCurveChannelId=851,colorCurveResetId=855;
 constexpr const wchar_t* kColorCurveClass=L"VeyraToneCurve";
+// Per-section bypass "eye" (plan T3). One small owner-drawn control per section,
+// sitting at the right end of its header row.
+constexpr int colorSectionEyeId(int section){return 860+section;}
+constexpr const wchar_t* kColorEyeClass=L"VeyraColorEye";
 int colourCurveChannel=0;
 int colourCurveDragPoint=-1;
 constexpr int kColorMaxParams=100;
@@ -243,6 +247,7 @@ void layoutColorPage(){
     for(int section=0;section<kColorSections;++section){
         const bool collapsed=(colorFoldMask>>section)&1u;
         place(810+section,y,32,false);
+        place(colorSectionEyeId(section),y+3,26,false,bodyWidthDip-40,26);
         const auto title=std::format(L"{}  {}",collapsed?L"▸":L"▾",colorSectionName(section));
         putText(810+section,title.c_str());
         y+=38;
@@ -315,6 +320,7 @@ void syncColorControls(){
     if(auto bands=item(colorBandsId))InvalidateRect(bands,nullptr,FALSE);
     if(auto canvas=item(colorCurveCanvasId))InvalidateRect(canvas,nullptr,FALSE);
     for(int channel=0;channel<4;++channel)if(auto tab=item(colorCurveChannelId+channel))selected(tab,channel==colourCurveChannel);
+    for(int section=0;section<kColorSections;++section)if(auto eye=item(colorSectionEyeId(section)))InvalidateRect(eye,nullptr,FALSE);
     for(int zone=0;zone<engine::kColorGradingZones;++zone)if(auto wheel=item(colorWheelId(zone)))InvalidateRect(wheel,nullptr,FALSE);
     syncingColour=false;
 }
@@ -722,6 +728,61 @@ void registerToneCurveClass(){
             return 0;
         }
         if(msg==WM_SETCURSOR){SetCursor(LoadCursorW(nullptr,IDC_CROSS));return TRUE;}
+        return DefWindowProcW(h,msg,wp,lp);
+    };
+    RegisterClassW(&classDescription);
+}
+// Section bypass eye: open = active, struck through + dimmed = bypassed.
+void paintSectionEye(HWND h,HDC dc,RECT r){
+    const int section=GetDlgCtrlID(h)-colorSectionEyeId(0);
+    const bool bypassed=(colourTarget().groupBypassMask&(1u<<unsigned(std::max(0,section))))!=0;
+    fillSurface(dc,r,h);
+    AlphaGraphics drawing(dc);
+    auto& graphics=drawing.get();
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    const float centreX=float(r.right-r.left)*0.5f,centreY=float(r.bottom-r.top)*0.5f;
+    const float halfWidth=float(std::min(r.right-r.left,r.bottom-r.top))*0.38f,halfHeight=halfWidth*0.58f;
+    const COLORREF tint=bypassed?RGB(96,99,104):RGB(214,218,224);
+    Gdiplus::Pen outline(color(tint),1.6f);
+    Gdiplus::GraphicsPath path;
+    path.AddBezier(centreX-halfWidth,centreY,centreX-halfWidth*0.35f,centreY-halfHeight,
+                   centreX+halfWidth*0.35f,centreY-halfHeight,centreX+halfWidth,centreY);
+    path.AddBezier(centreX+halfWidth,centreY,centreX+halfWidth*0.35f,centreY+halfHeight,
+                   centreX-halfWidth*0.35f,centreY+halfHeight,centreX-halfWidth,centreY);
+    path.CloseFigure();
+    graphics.DrawPath(&outline,&path);
+    Gdiplus::SolidBrush pupil(color(tint));
+    const float pupilRadius=halfHeight*0.55f;
+    graphics.FillEllipse(&pupil,centreX-pupilRadius,centreY-pupilRadius,pupilRadius*2,pupilRadius*2);
+    if(bypassed){
+        Gdiplus::Pen strike(color(RGB(230,122,49)),1.8f);
+        graphics.DrawLine(&strike,centreX-halfWidth,centreY+halfHeight*1.15f,centreX+halfWidth,centreY-halfHeight*1.15f);
+    }
+}
+void registerSectionEyeClass(){
+    static bool registered=false;
+    if(registered)return;
+    registered=true;
+    WNDCLASSW classDescription{};
+    classDescription.hInstance=GetModuleHandleW(nullptr);
+    classDescription.lpszClassName=kColorEyeClass;
+    classDescription.hCursor=LoadCursorW(nullptr,IDC_HAND);
+    classDescription.lpfnWndProc=[](HWND h,UINT msg,WPARAM wp,LPARAM lp)->LRESULT{
+        if(msg==WM_ERASEBKGND)return 1;
+        if(msg==WM_PAINT||msg==WM_PRINTCLIENT){PaintBuffer paint(h,reinterpret_cast<HDC>(wp));paintSectionEye(h,paint.dc,paint.rect);return 0;}
+        if(msg==WM_LBUTTONDOWN){
+            const int section=GetDlgCtrlID(h)-colorSectionEyeId(0);
+            auto colour=colourTarget();
+            colour.groupBypassMask^=1u<<unsigned(std::max(0,section));
+            if(applyColour(colour,true)){
+                veyra::log::info("color-ui",std::format("section bypass section={} mask={}",section,colour.groupBypassMask));
+                message(colour.groupBypassMask&(1u<<unsigned(section))
+                    ?std::format(L"“{}”这一组已临时停用（数值保留，取消勾选即恢复）。",colorSectionName(section))
+                    :std::format(L"“{}”这一组已启用。",colorSectionName(section)));
+            }
+            syncColorControls();
+            return 0;
+        }
         return DefWindowProcW(h,msg,wp,lp);
     };
     RegisterClassW(&classDescription);
@@ -1310,6 +1371,11 @@ case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.
         add(kColorCurveClass,L"",colorCurveCanvasId,WS_TABSTOP,2,12,0,-1,260);
         SetPropW(item(colorCurveCanvasId),L"veyra.tip",HANDLE(L"左键在网格上点一下加点、拖动移动；双击控制点删除（两个端点保留）；“拉平”恢复恒等曲线。"));
         for(int section=0;section<kColorSections;++section)add(L"BUTTON",L"",810+section,BS_PUSHBUTTON|WS_TABSTOP,2,12,12,-1,32);
+        registerSectionEyeClass();
+        for(int section=0;section<kColorSections;++section){
+            add(kColorEyeClass,L"",colorSectionEyeId(section),0,2,12,12,26,26);
+            SetPropW(item(colorSectionEyeId(section)),L"veyra.tip",HANDLE(L"点一下临时停用这一组（数值保留），再点恢复：用来对比某一组到底起了什么作用。"));
+        }
         // Preset toolbar.
         combo(803,2,0,{});add(L"EDIT",L"",804,ES_AUTOHSCROLL|WS_TABSTOP,2,12,0,-1,26);send(804,EM_SETLIMITTEXT,48,0);
         button(L"保存预设",805,2,12,0,96);button(L"应用",806,2,12,0,80);button(L"删除",807,2,12,0,80);
@@ -1477,6 +1543,7 @@ bool settingsColorWheelTestBarPoint(int zone,float luminance,POINT& out){
 int colourWheelControlId(int zone){return colorWheelId(zone);}
 int colourBandsControlId(){return colorBandsId;}
 int colourCurveCanvasControlId(){return colorCurveCanvasId;}
+int colourSectionEyeControlId(int section){return colorSectionEyeId(std::clamp(section,0,kColorSections-1));}
 void settingsColorSectionForTest(int section,bool expanded){
     if(section<0||section>=kColorSections)return;
     if(expanded)colorFoldMask&=~(1u<<section);

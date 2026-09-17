@@ -909,7 +909,25 @@ else if(colorStep==68){
 // Hold the curve view steady for a moment: acceptance screenshots and a human
 // can actually see the editor before the fold checks scroll the page.
 else if(colorStep==69&&elapsed>9000){colorStep=70;}
+// Section bypass eyes (plan T3): one click stops a group from affecting the
+// picture while its numbers stay in the panel.
 else if(colorStep==70){
+    veyra::ui::settingsColorScrollToTest(veyra::ui::colourSectionEyeControlId(0));
+    if(auto eye=colourControl(veyra::ui::colourSectionEyeControlId(0)))SendMessageW(eye,WM_LBUTTONDOWN,0,MAKELPARAM(4,4));
+    colorStep=71;
+}
+else if(colorStep==71){
+    const bool bypassed=(colourSnapshot.desired.color.groupBypassMask&1u)!=0u;
+    veyra::log::info("color-ui-test",std::format("section eye bypass pass={} mask={}",bypassed,colourSnapshot.desired.color.groupBypassMask));
+    if(auto eye=colourControl(veyra::ui::colourSectionEyeControlId(0)))SendMessageW(eye,WM_LBUTTONDOWN,0,MAKELPARAM(4,4));
+    colorStep=bypassed?72:-1;
+}
+else if(colorStep==72){
+    const bool restored=(colourSnapshot.desired.color.groupBypassMask&1u)==0u;
+    veyra::log::info("color-ui-test",std::format("section eye restore pass={} mask={}",restored,colourSnapshot.desired.color.groupBypassMask));
+    colorStep=restored?73:-1;
+}
+else if(colorStep==73){
     auto edit=colourControl(1300);
     const bool beforeVisible=edit&&IsWindowVisible(edit);
     const bool beforeMask=(preferences.load().colourFoldMask&1u)!=0u;

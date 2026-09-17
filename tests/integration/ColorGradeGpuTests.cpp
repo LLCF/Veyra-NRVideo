@@ -207,6 +207,22 @@ int wmain(){
                     std::format("turning the black and white mixer off restores the colour image (applied={} r={} g={} b={})",applied,back.r,back.g,back.b));
             }
         }
+        {
+            // Section bypass ("分组眼睛"): stopping the 亮 group must render
+            // exactly like the ungraded reference while the numbers stay stored.
+            engine::EnhancementSettings lit;lit.color.enabled=true;lit.color.exposure=1.0f;lit.color.contrast=-40.0f;
+            sink::RgbaImage graded,bypassed;
+            // A fresh default settings object differs from this graph in a
+            // non-colour field, so the reference keeps the accepted payload and
+            // only resets the colour block (enabled but neutral = identity).
+            auto reference=lit;reference.color=engine::ColorSettings{};reference.color.enabled=true;
+            const bool referenced=graph.apply(reference)&&graph.render(neutral,graded);
+            auto off=lit;off.color.groupBypassMask=1u<<0;
+            const bool ignored=graph.apply(off)&&graph.render(neutral,bypassed);
+            check(referenced&&ignored&&!graded.pixels.empty()&&graded.pixels==bypassed.pixels,
+                "bypassing the 亮 group renders exactly like the ungraded reference");
+            check(off.color.exposure==1.0f,"the bypassed group keeps its stored numbers");
+        }
     }
     // 3. Output dither (plan section 4.1): a smooth ramp pushed through a
     // compressing grade must not turn into long flat plateaus at the 8-bit

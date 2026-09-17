@@ -154,6 +154,27 @@ int main(){
         ColorSettings plain;s.enabled=true;
         check(ColorGradeTables::bake(plain).hue[std::size_t(greenIndex)*4+3]==0.0f,"identity bake leaves the B&W column at zero");
     }
+    // 11. Per-section bypass ("分组眼睛"): bypassing a group must bake as if that
+    // group were neutral while leaving the other groups alone.
+    {
+        ColorSettings s;s.enabled=true;s.exposure=1.0f;s.saturation=-100.0f;
+        const auto full=ColorGradeTables::bake(s);
+        check(!full.identity,"a real grade clears the identity flag");
+        auto lightOnly=s;lightOnly.groupBypassMask=1u<<0;      // 亮 bypassed
+        const auto withoutLight=ColorGradeTables::bake(lightOnly);
+        check(withoutLight.exposure==0.0f,"bypassing 亮 removes its exposure from the bake");
+        check(withoutLight.saturation==-100.0f,"bypassing 亮 leaves the 颜色 section alone");
+        check(!withoutLight.identity,"a bypassed section still leaves the rest of the grade active");
+        auto colOnly=s;colOnly.groupBypassMask=(1u<<0)|(1u<<1);
+        check(ColorGradeTables::bake(colOnly).identity,"bypassing every used section bakes back to identity");
+        auto curve=s;curve.curves[1].count=3;curve.curves[1].points[1]={0.5f,0.8f};
+        auto curvesOff=curve;curvesOff.groupBypassMask=1u<<2;
+        auto curvesReset=curve;curvesReset.curves[1].reset();
+        check(ColorGradeTables::bake(curvesOff).curve==ColorGradeTables::bake(curvesReset).curve,
+            "bypassing 曲线 bakes exactly the same table as resetting those curves");
+        check(ColorGradeTables::bake(curve).curve!=ColorGradeTables::bake(curvesReset).curve,
+            "the point curve still changes the table when it is not bypassed");
+    }
     if(failures){std::printf("FAIL: colour grade bake (%d checks)\n",failures);return 1;}
     std::printf("PASS: colour grade bake tables (identity, white balance, tone, curves, mixer, grading, lut)\n");
     return 0;

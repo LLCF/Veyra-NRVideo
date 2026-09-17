@@ -86,6 +86,29 @@ float ColorGradeTables::decodeLog(float encoded){
 
 float ColorGradeTables::curveValue(const engine::ColorCurve& curve,float x){return pointCurve(curve,std::clamp(x,0.0f,1.0f));}
 ColorGradeTables ColorGradeTables::bake(const engine::ColorSettings& s){
+    // Per-section bypass ("分组眼睛"): a bypassed section is baked as if its
+    // parameters were neutral, so the user can A/B one group without losing the
+    // numbers they dialled in. Cheap, exact and no shader branch is needed.
+    const auto bypassed=[&](int section){return (s.groupBypassMask&(1u<<unsigned(section)))!=0;};
+    if(s.groupBypassMask){
+        auto masked=s;
+        if(bypassed(0)){masked.exposure=masked.contrast=masked.highlights=masked.shadows=masked.whites=masked.blacks=0;}
+        if(bypassed(1)){masked.temperature=masked.tint=masked.vibrance=masked.saturation=0;}
+        if(bypassed(2)){
+            masked.paramHighlights=masked.paramLights=masked.paramDarks=masked.paramShadows=0;
+            masked.splitHighlights=masked.splitMidtones=masked.splitShadows=0;
+            for(auto& curve:masked.curves)curve.reset();
+        }
+        if(bypassed(3)){
+            masked.mixerHue.fill(0);masked.mixerSaturation.fill(0);masked.mixerLuminance.fill(0);
+            masked.blackWhite=false;masked.blackWhiteMix.fill(0);
+        }
+        if(bypassed(4)){for(auto& wheel:masked.grading)wheel={};masked.gradingBlending=50;masked.gradingBalance=0;}
+        if(bypassed(5)){masked.calibrationShadowTint=0;masked.calibrationHue.fill(0);masked.calibrationSaturation.fill(0);}
+        if(bypassed(6)){masked.lutStrength=0;}
+        masked.groupBypassMask=0;   // the recursion must not bypass again
+        return bake(masked);
+    }
     ColorGradeTables out;
     out.exposure=s.exposure;
     out.saturation=s.saturation;

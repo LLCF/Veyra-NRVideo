@@ -1,5 +1,33 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-17 色彩页 P1/T3 收口：分组“眼睛”bypass + schema v19
+
+方案 T3 要求的“分组眼睛”落地，并且是**真 bypass**（不只是隐藏 UI）：
+
+- 模型：`ColorSettings` 新增 `groupBypassMask`（一位一组：亮/颜色/曲线/混色器/颜色分级/校准/LUT）；
+  **预设 schema v18 → v19**（写在颜色块内、LUT 引用之后，v18 老文件按 `version` 跳过该字段照常读）；
+  `.vpcolor` 与 `runtime_local/color-looks.v1` 文件版本 1 → 2（v1 仍可读，写 2）；
+- 烘焙：`ColorGradeTables::bake()` 先把被 bypass 的组按“中性值”复制一份再烘焙，
+  所以**数值全部保留**、只是这一组不参与画面，且无需给 shader 加分支；
+- UI：每个分组标题右侧一个自绘“眼睛”（`VeyraColorEye`，id 860..866）：睁眼=生效、斜杠+橙色=已停用，
+  点一下切换并即时生效（不重建管线）；
+- 烟测覆盖：点眼睛 → `mask=1`，再点 → `mask=0`；
+- **像素级验证**（`veyra_color_grade_gpu_tests` 新增两条）：把“亮”组停用后，
+  渲染结果与“未调色参考帧”**逐字节一致**，同时 `off.color.exposure==1.0`（数值确实还在）。
+
+顺带修掉期间引入的一个递归（bypass 分支里 `bake(masked)` 忘记清 mask → 栈溢出），
+以及测试里两处 `auto x=s;` 后误改 `s` 的复制粘贴错误。
+
+**验证**：`veyra_color_grade_tests`、`veyra_color_grade_gpu_tests`、`veyra_color_look_tests`、
+`veyra_color_lut_tests`、`veyra_hdr_color_tests`、`veyra_ui_contract_tests`、
+`veyra_repair_preset_tests`（含 v18→v19 迁移与损坏保护）、`veyra_repair_contract_tests 191/0` 全 exit 0；
+`--smoke-color` exit 0；`scripts/gates/delivery.ps1` → **DELIVERY SHORT GATE PASS**
+（`logs/delivery/4651417ba2ca4c35b0eceb894059d936/result.json`）。
+真机截图：`logs/color/ui-preview-eyes2.png`（分组眼睛 + 曲线通道按钮同屏）。
+
+**至此 UI 四批（渐变轨道/四色轮/混色器色点条/曲线编辑器）+ 眼睛全部落地**；
+剩余可选项：分区图标、字号与间距抛光。
+
 ## 2026-09-17 色彩页 UI：真曲线编辑器 + 面板默认更宽（专业型第四批）
 
 - **曲线编辑器**（自绘控件 `VeyraToneCurve`，id 850）：网格画布 + 对角参考线 + 四条通道曲线

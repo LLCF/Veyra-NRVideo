@@ -32,4 +32,5 @@ bool settingsCurveTestPoint(float x,float y,POINT& out);
 // Expand/collapse one colour section (acceptance code needs the target section
 // unfolded regardless of what the previous run persisted).
 void settingsColorSectionForTest(int section,bool expanded);
+int colourSectionEyeControlId(int section);
 }
