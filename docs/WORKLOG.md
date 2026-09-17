@@ -1,5 +1,41 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-17 色彩页 P1：T4 面板填充（曲线 / 混色器 / 颜色分级 / 校准）
+
+色彩页从 2 组扩到 **6 组**：亮、颜色、曲线、混色器、颜色分级、校准。参数行 = 标签 +
+数值框 + 滑轨，全部走同一套 `ColorParam` 描述（标量用成员指针，数组类用 target+index）：
+
+- 曲线：参数曲线 4 个（高光/亮色调/暗色调/阴影）+ 3 个范围分割；
+- 混色器：8 个色相带 ×（色相/饱和度/明亮度）+ 黑白混色 8 个（共 32 行）；
+- 颜色分级：4 个区域（阴影/中间调/高光/全局）×（色相 0–360/饱和度/明亮度）+ 混合 + 平衡；
+- 校准：阴影色调 + 红/绿/蓝原色 ×（色相/饱和度）。
+
+布局与折叠沿用 T3 的 `layoutColorPage()`（顺序排版、折叠跳过行），控件 id 段整体迁到
+1200/1300/1400 段以免与增强页冲突；新增测试钩子 `colourParamEditId(label)`，验收按*名字*
+取控件而不是写死下标。P2 的空间类动词（纹理/清晰度/去朦胧）**没有**放进面板——shader 还没实现，
+放上去只会是假按钮。
+
+**GPU 动词验收（`veyra_color_grade_gpu_tests` 新增两条）**
+
+```
+PASS green mixer saturation raises the green separation
+PASS mid-tone grading wheel tints mid grey towards red
+PASS: colour grade GPU contract (off/neutral identity, exposure, curve, saturation, hue)   exit=0
+```
+
+**真机 UI 验收（`--smoke-color` 扩展）**：新增一步把"混合"行改成 77 并确认进入引擎 ——
+`[color-ui-test] T4 the colour grading row reached the engine`；其余步骤（总开关默认关 →
+曝光到引擎 → 一键还原 → 撤销还原 → 折叠落盘 → 收尾关回默认）全部保持 exit=0。
+
+**回归**：`veyra_ui_contract_tests` exit 0；`veyra_repair_contract_tests` 191/0；
+`veyra_repair_preset_tests` exit 0；`veyra_color_grade_tests` 23/23；
+`scripts/gates/delivery.ps1` → **DELIVERY SHORT GATE PASS**
+（`logs/delivery/716cf4d8a4fb4c53aaffc74674e26019/result.json`）。
+
+**未做（T5/T6 起）**：`.cube` 导入与命名色彩预设（含导入导出）、分组眼睛（需要每组 bypass 位）、
+点曲线编辑器（现在只有参数曲线与分割）、黑白开关（现在只有黑白混色数值）、HDR 标准处理与
+三入口一致性验收。
+
 ## 2026-09-17 色彩页 P1：T3 色彩页 UI 框架（风琴折叠 + 滑块/数值框 + 一键还原）
 
 `apps/veyra/SettingsWindow.cpp` 的第 2 页（原预设页位置）现在是色彩页：

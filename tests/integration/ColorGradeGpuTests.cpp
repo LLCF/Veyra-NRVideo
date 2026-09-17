@@ -96,9 +96,10 @@ int wmain(){
             std::printf("FAIL baseline render\n");return 1;
         }
         const auto neutralPixel=center(a);
+        Pixel neutralGrass{};
         {
             if(!graph.render(grass,d)){std::printf("FAIL colour render\n");return 1;}
-            const auto coloured=center(d);
+            const auto coloured=center(d);neutralGrass=coloured;
             check(coloured.g>coloured.r&&coloured.g>coloured.b,"a green input stays green through the neutral grade");
         }
         {
@@ -117,6 +118,23 @@ int wmain(){
             if(!graph.apply(s)||!graph.render(desaturated,e)){std::printf("FAIL saturation render\n");return 1;}
             const auto pixel=center(e);
             check(std::abs(pixel.r-pixel.g)<=2&&std::abs(pixel.g-pixel.b)<=2,"saturation -100 collapses the frame to grey");
+        }
+        {
+            // T4 verbs: the hue table (mixer) and the luminance table (grading).
+            engine::EnhancementSettings s;s.color.enabled=true;s.color.mixerSaturation[3]=100.0f;
+            sink::RgbaImage mixed;
+            const bool ok=graph.apply(s)&&graph.render(grass,mixed);
+            const auto pixel=center(mixed);
+            check(ok&&(pixel.g-std::max(pixel.r,pixel.b))>(neutralGrass.g-std::max(neutralGrass.r,neutralGrass.b)),
+                "green mixer saturation raises the green separation");
+        }
+        {
+            engine::EnhancementSettings s;s.color.enabled=true;
+            s.color.grading[1]={0,100,0};
+            sink::RgbaImage graded;
+            const bool ok=graph.apply(s)&&graph.render(neutral,graded);
+            const auto pixel=center(graded);
+            check(ok&&pixel.r>pixel.b+10,"mid-tone grading wheel tints mid grey towards red");
         }
     }
     if(failures){std::printf("FAIL: colour grade GPU contract (%d checks)\n",failures);return 1;}

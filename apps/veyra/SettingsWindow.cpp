@@ -58,23 +58,69 @@ void loadStore(){if(!loaded){store.load();loaded=true;}}
 // rows instead of relying on static y offsets. The fold mask is persisted in
 // ui-preferences.v1 with the rest of the UI state.
 // ---------------------------------------------------------------------------
-constexpr int kColorSections=2;   // 亮 / 颜色 (T4 adds 曲线/混色器/颜色分级/校准)
+constexpr int kColorSections=6;
 void message(const std::wstring& text);
 bool submit(engine::EnhancementSettings s);
 uint32_t colorFoldMask=0;
-std::wstring colorSectionName(int section){return section==0?L"亮":L"颜色";}
+std::wstring colorSectionName(int section){
+    static const wchar_t* names[kColorSections]={L"亮",L"颜色",L"曲线",L"混色器",L"颜色分级",L"校准"};
+    return section>=0&&section<kColorSections?names[section]:L"色彩";
+}
+// Which field of ColorSettings a row edits. Scalars use the member pointer;
+// array-valued controls (mixer bands, grading wheels, calibration primaries)
+// use the target + index pair.
+enum class ColorTarget {
+    Scalar,MixerHue,MixerSaturation,MixerLuminance,BlackWhiteMix,
+    GradingHue,GradingSaturation,GradingLuminance,CalibrationHue,CalibrationSaturation
+};
 struct ColorParam{
     int section;
     const wchar_t* label;
-    float engine::ColorSettings::*field;
     float min,max;
+    ColorTarget target;
+    float engine::ColorSettings::*field;
+    int index;
+    float value(const engine::ColorSettings& colour)const{
+        switch(target){
+        case ColorTarget::MixerHue:return colour.mixerHue[std::size_t(index)];
+        case ColorTarget::MixerSaturation:return colour.mixerSaturation[std::size_t(index)];
+        case ColorTarget::MixerLuminance:return colour.mixerLuminance[std::size_t(index)];
+        case ColorTarget::BlackWhiteMix:return colour.blackWhiteMix[std::size_t(index)];
+        case ColorTarget::GradingHue:return colour.grading[std::size_t(index)].hue;
+        case ColorTarget::GradingSaturation:return colour.grading[std::size_t(index)].saturation;
+        case ColorTarget::GradingLuminance:return colour.grading[std::size_t(index)].luminance;
+        case ColorTarget::CalibrationHue:return colour.calibrationHue[std::size_t(index)];
+        case ColorTarget::CalibrationSaturation:return colour.calibrationSaturation[std::size_t(index)];
+        case ColorTarget::Scalar:break;
+        }
+        return field?colour.*field:0.0f;
+    }
+    void set(engine::ColorSettings& colour,float v)const{
+        switch(target){
+        case ColorTarget::MixerHue:colour.mixerHue[std::size_t(index)]=v;return;
+        case ColorTarget::MixerSaturation:colour.mixerSaturation[std::size_t(index)]=v;return;
+        case ColorTarget::MixerLuminance:colour.mixerLuminance[std::size_t(index)]=v;return;
+        case ColorTarget::BlackWhiteMix:colour.blackWhiteMix[std::size_t(index)]=v;return;
+        case ColorTarget::GradingHue:colour.grading[std::size_t(index)].hue=v;return;
+        case ColorTarget::GradingSaturation:colour.grading[std::size_t(index)].saturation=v;return;
+        case ColorTarget::GradingLuminance:colour.grading[std::size_t(index)].luminance=v;return;
+        case ColorTarget::CalibrationHue:colour.calibrationHue[std::size_t(index)]=v;return;
+        case ColorTarget::CalibrationSaturation:colour.calibrationSaturation[std::size_t(index)]=v;return;
+        case ColorTarget::Scalar:break;
+        }
+        if(field)colour.*field=v;
+    }
 };
 std::vector<ColorParam> colorParams;
 // id layout: master 800, reset 801, undo 802, header 810+s, label 830+i,
 // edit 850+i, slider 870+i.
-constexpr int colorLabelId(int i){return 830+i;}
-constexpr int colorEditId(int i){return 850+i;}
-constexpr int colorSliderId(int i){return 870+i;}
+// The colour page owns 1200..1499: label/edit/slider per parameter, so the four
+// remaining sections (mixer 8x3, grading, calibration, curves) fit without
+// colliding with the enhancement page's ids.
+constexpr int colorLabelId(int i){return 1200+i;}
+constexpr int colorEditId(int i){return 1300+i;}
+constexpr int colorSliderId(int i){return 1400+i;}
+constexpr int kColorMaxParams=100;
 engine::ColorSettings colourTarget(){
     return (enhancementEnabled?controller->snapshot().desired:configuredSettings).color;
 }
@@ -123,7 +169,7 @@ void syncColorControls(){
     const auto colour=colourTarget();
     check(800,colour.enabled?BST_CHECKED:BST_UNCHECKED);
     for(size_t i=0;i<colorParams.size();++i){
-        const float value=colour.*(colorParams[i].field);
+        const float value=colorParams[i].value(colour);
         const auto text=std::format(L"{:.2f}",value);
         if(auto edit=item(colorEditId(int(i))))if(windowText(edit)!=text)putText(colorEditId(int(i)),text.c_str());
         if(auto slider=item(colorSliderId(int(i)))){
@@ -147,7 +193,7 @@ bool colourFieldEdited(int index,float value){
     if(!std::isfinite(value)||value<colorParams[size_t(index)].min||value>colorParams[size_t(index)].max){
         message(L"数值超出范围；仍使用上次有效值");syncColorControls();return false;
     }
-    colour.*(colorParams[size_t(index)].field)=value;
+    colorParams[size_t(index)].set(colour,value);
     if(!applyColour(colour,true)){syncColorControls();return false;}
     syncColorControls();
     return true;
@@ -346,7 +392,7 @@ LRESULT CALLBACK proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
         arrange();
         return 0;
     }
-    if(msg==WM_COMMAND&&!populating&&!syncingColour&&LOWORD(wp)>=colorEditId(0)&&LOWORD(wp)<colorEditId(0)+20&&HIWORD(wp)==EN_CHANGE){
+    if(msg==WM_COMMAND&&!populating&&!syncingColour&&LOWORD(wp)>=colorEditId(0)&&LOWORD(wp)<colorEditId(0)+kColorMaxParams&&HIWORD(wp)==EN_CHANGE){
         const int index=LOWORD(wp)-colorEditId(0);
         if(index<int(colorParams.size())){
             wchar_t buffer[64]{};GetWindowTextW(item(LOWORD(wp)),buffer,64);
@@ -412,8 +458,54 @@ case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.
             {1,L"色调",&engine::ColorSettings::tint,-100,100},
             {1,L"自然饱和度",&engine::ColorSettings::vibrance,-100,100},
             {1,L"饱和度",&engine::ColorSettings::saturation,-100,100},
+            {2,L"高光（参数曲线）",&engine::ColorSettings::paramHighlights,-100,100},
+            {2,L"亮色调（参数曲线）",&engine::ColorSettings::paramLights,-100,100},
+            {2,L"暗色调（参数曲线）",&engine::ColorSettings::paramDarks,-100,100},
+            {2,L"阴影（参数曲线）",&engine::ColorSettings::paramShadows,-100,100},
+            {2,L"高光范围分割",&engine::ColorSettings::splitHighlights,-100,100},
+            {2,L"中间调范围分割",&engine::ColorSettings::splitMidtones,-100,100},
+            {2,L"阴影范围分割",&engine::ColorSettings::splitShadows,-100,100},
         };
-        for(const auto& definition:definitions)colorParams.push_back({definition.section,definition.label,definition.field,definition.min,definition.max});
+        for(const auto& definition:definitions)
+            colorParams.push_back({definition.section,definition.label,definition.min,definition.max,ColorTarget::Scalar,definition.field,0});
+        // Composite labels are built once; reserve keeps the c_str() pointers
+        // stable for the lifetime of the panel.
+        static std::vector<std::wstring> colorLabelStorage;
+        colorLabelStorage.clear();colorLabelStorage.reserve(256);
+        auto composed=[&](const std::wstring& text){colorLabelStorage.push_back(text);return colorLabelStorage.back().c_str();};
+        // Mixer: eight hue bands, each with hue / saturation / luminance, then
+        // the same eight bands for the black & white mixer.
+        {
+            static const wchar_t* bands[engine::kColorMixerBands]={L"红色",L"橙色",L"黄色",L"绿色",L"浅绿色",L"蓝色",L"紫色",L"洋红"};
+            for(int band=0;band<engine::kColorMixerBands;++band){
+                colorParams.push_back({3,composed(std::wstring(bands[band])+L" · 色相"),-100,100,ColorTarget::MixerHue,nullptr,band});
+                colorParams.push_back({3,composed(std::wstring(bands[band])+L" · 饱和度"),-100,100,ColorTarget::MixerSaturation,nullptr,band});
+                colorParams.push_back({3,composed(std::wstring(bands[band])+L" · 明亮度"),-100,100,ColorTarget::MixerLuminance,nullptr,band});
+            }
+            for(int band=0;band<engine::kColorMixerBands;++band)
+                colorParams.push_back({3,composed(std::wstring(bands[band])+L" · 黑白"),-100,100,ColorTarget::BlackWhiteMix,nullptr,band});
+        }
+        // Colour grading: four zones with hue / saturation / luminance, plus the
+        // blending and balance controls.
+        {
+            static const wchar_t* zones[engine::kColorGradingZones]={L"阴影",L"中间调",L"高光",L"全局"};
+            for(int zone=0;zone<engine::kColorGradingZones;++zone){
+                colorParams.push_back({4,composed(std::wstring(zones[zone])+L" · 色相"),0,360,ColorTarget::GradingHue,nullptr,zone});
+                colorParams.push_back({4,composed(std::wstring(zones[zone])+L" · 饱和度"),0,100,ColorTarget::GradingSaturation,nullptr,zone});
+                colorParams.push_back({4,composed(std::wstring(zones[zone])+L" · 明亮度"),-100,100,ColorTarget::GradingLuminance,nullptr,zone});
+            }
+            colorParams.push_back({4,L"混合",0,100,ColorTarget::Scalar,&engine::ColorSettings::gradingBlending,0});
+            colorParams.push_back({4,L"平衡",-100,100,ColorTarget::Scalar,&engine::ColorSettings::gradingBalance,0});
+        }
+        // Calibration: shadow tint plus the three primaries.
+        {
+            colorParams.push_back({5,L"阴影色调",-100,100,ColorTarget::Scalar,&engine::ColorSettings::calibrationShadowTint,0});
+            static const wchar_t* primaries[3]={L"红原色",L"绿原色",L"蓝原色"};
+            for(int primary=0;primary<3;++primary){
+                colorParams.push_back({5,composed(std::wstring(primaries[primary])+L" · 色相"),-100,100,ColorTarget::CalibrationHue,nullptr,primary});
+                colorParams.push_back({5,composed(std::wstring(primaries[primary])+L" · 饱和度"),-100,100,ColorTarget::CalibrationSaturation,nullptr,primary});
+            }
+        }
         for(int section=0;section<kColorSections;++section)add(L"BUTTON",L"",810+section,BS_PUSHBUTTON|WS_TABSTOP,2,12,12,-1,32);
         for(size_t i=0;i<colorParams.size();++i){
             const auto& param=colorParams[i];
@@ -509,7 +601,7 @@ case WM_COMMAND:{const int id=LOWORD(wp);if(!populating&&((id>=202&&id<=205||id=
     else if(id>=501&&id<=505)SendMessageW(GetParent(h),WM_APP+41,id,id==501?send(500,CB_GETCURSEL,0,0):id==505?checked(505):0);
     return 0;}
 case WM_HSCROLL:{int id=GetDlgCtrlID(reinterpret_cast<HWND>(lp));if(id>=600&&id<612){int index=id-600;float v=float(SendMessageW(reinterpret_cast<HWND>(lp),TBM_GETPOS,0,0))/(index>=4&&index<=6?1:100);if(index==3&&v<0)v=-1;std::wostringstream o;o<<std::setprecision(4)<<v;putText(100+index,o.str().c_str());}
-    else if(id>=colorSliderId(0)&&id<colorSliderId(0)+40){
+    else if(id>=colorSliderId(0)&&id<colorSliderId(0)+kColorMaxParams){
         const int index=id-colorSliderId(0);
         if(index<int(colorParams.size()))colourFieldEdited(index,float(SendMessageW(reinterpret_cast<HWND>(lp),TBM_GETPOS,0,0))/100.0f);
     }
@@ -529,6 +621,11 @@ case WM_DESTROY:KillTimer(h,1);DeleteObject(font);window=nullptr;body=nullptr;it
 }
 engine::EnhancementSettings defaultSettings(){loadStore();return store.defaultSettings();}
 HWND settingsControlForTest(int id){return item(id);}
+int colourParamEditId(const wchar_t* label){
+    if(!label)return -1;
+    for(size_t i=0;i<colorParams.size();++i)if(std::wcscmp(colorParams[i].label,label)==0)return colorEditId(int(i));
+    return -1;
+}
 HWND createSettingsPanel(HWND parent,engine::EngineController& engine,std::function<bool(engine::EnhancementSettings)> callback){controller=&engine;apply=std::move(callback);WNDCLASSW wc{};wc.lpfnWndProc=proc;wc.hInstance=GetModuleHandleW(nullptr);wc.lpszClassName=L"VeyraInspector";wc.hbrBackground=panelBrush();wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);RegisterClassW(&wc);return CreateWindowExW(WS_EX_CONTROLPARENT,wc.lpszClassName,L"专业参数",WS_CHILD|WS_CLIPCHILDREN,0,0,328,500,parent,nullptr,wc.hInstance,nullptr);}
 void settingsVisibility(bool visible){if(window&&!visible&&IsChild(window,GetFocus()))SetFocus(GetParent(window));}
 void settingsPage(int value){if(window&&IsChild(window,GetFocus()))SetFocus(body);page=std::clamp(value,0,4);scroll=0;arrange();}

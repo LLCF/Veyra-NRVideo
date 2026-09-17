@@ -752,7 +752,7 @@ if(colorStep==0&&elapsed>1500){
 }else if(colorStep==1&&colourSnapshot.desired.color.enabled){colorStep=2;veyra::log::info("color-ui-test","master switch applied");}
 else if(colorStep==1){if(elapsed>2500)SendMessageW(colourControl(800),BM_CLICK,0,0);}
 else if(colorStep==2){
-    if(auto edit=colourControl(850))SetWindowTextW(edit,L"1.00");
+    if(auto edit=colourControl(1300))SetWindowTextW(edit,L"1.00");
     colorStep=(colourSnapshot.desired.color.exposure==1.0f)?3:(elapsed>4000?-1:2);
     if(colorStep==3)veyra::log::info("color-ui-test","exposure 1.00 reached the engine through the panel");
 }else if(colorStep==3){SendMessageW(colourControl(801),BM_CLICK,0,0);colorStep=30;}
@@ -763,8 +763,14 @@ else if(colorStep==30){colorStep=(colourSnapshot.desired.color.exposure==0.0f)?3
 else if(colorStep==31){SendMessageW(colourControl(802),BM_CLICK,0,0);colorStep=40;}
 else if(colorStep==40){colorStep=(colourSnapshot.desired.color.exposure==1.0f)?5:(elapsed>8000?-1:40);
     if(colorStep==5)veyra::log::info("color-ui-test","undo restored the pre-reset values");}
-else if(colorStep==5){
-    auto edit=colourControl(850);
+// T4 rows: the colour-grading "blending" slider belongs to a section that was
+// added after the first framework cut, so prove the composed rows reach the
+// engine too.
+else if(colorStep==5){const int editId=veyra::ui::colourParamEditId(L"混合");if(auto edit=colourControl(editId))SetWindowTextW(edit,L"77.00");colorStep=editId>0?50:-1;}
+else if(colorStep==50){colorStep=(colourSnapshot.desired.color.gradingBlending==77.0f)?51:(elapsed>9500?-1:50);
+    if(colorStep==51)veyra::log::info("color-ui-test","T4 the colour grading row reached the engine");}
+else if(colorStep==51){
+    auto edit=colourControl(1300);
     const bool beforeVisible=edit&&IsWindowVisible(edit);
     const bool beforeMask=(preferences.load().colourFoldMask&1u)!=0u;
     RECT before{};GetWindowRect(colourControl(811),&before);
