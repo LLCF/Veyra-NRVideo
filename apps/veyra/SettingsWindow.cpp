@@ -840,7 +840,6 @@ bool colourFieldEdited(int index,float value){
     syncColorControls();
     return true;
 }
-void settingsStatusSink(std::function<void(const std::wstring&)> sink){statusSink=std::move(sink);}
 void message(const std::wstring& text){if(statusSink)statusSink(text);else putText(401,text.c_str());}
 bool submit(engine::EnhancementSettings s){if(!apply(s)){dirty=true;message(L"总增强正在切换；本次修改未接受，请稍后重试。");return false;}dirty=false;return true;}
 void syncProtection(const engine::ProtectionSettings& protection){
@@ -1563,6 +1562,9 @@ case WM_DESTROY:KillTimer(h,1);DeleteObject(font);window=nullptr;body=nullptr;it
 }
 engine::EnhancementSettings defaultSettings(){loadStore();return store.defaultSettings();}
 HWND settingsControlForTest(int id){return item(id);}
+// Exported wrapper: the sink itself lives in this translation unit's anonymous
+// namespace, so the function has to be defined out here to link.
+void settingsStatusSink(std::function<void(const std::wstring&)> sink){statusSink=std::move(sink);}
 bool settingsColorWheelTestPoint(int zone,float hue,float saturation,POINT& out){
     const auto wheel=item(colorWheelId(zone));
     if(!wheel)return false;
