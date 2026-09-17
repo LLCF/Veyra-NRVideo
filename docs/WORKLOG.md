@@ -1,5 +1,41 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-17 合并到 main：色彩页 P1 + AVerMedia 5.1 + 导出/MKV 修复（本轮未推送）
+
+按用户指令把三条线合并进 main，**分支全部保留**，合并前存了 checkpoint tag：
+
+| 分支 | tip | checkpoint tag |
+| --- | --- | --- |
+| `codex/color-tab-p1-20260917` | `be11992` | `checkpoint/color-p1-branch-tip-20260917` |
+| `codex/avermedia-51-switch-20260917` | `c832cd6` | `checkpoint/avermedia-51-branch-tip-20260917` |
+| `codex/export-mkv-d3d11-repair-20260917`（原为**未提交的工作区改动**，本轮先落成提交 `b3052cc`） | `b3052cc` | `checkpoint/export-mkv-branch-tip-20260917` |
+| main（合并前） | `2406f81` | `checkpoint/pre-merge-to-main-20260917` |
+
+合并：`6c87c5c`（avermedia 分支，含色彩页 P1 全部 UI 返工）→ `23ce991`（导出/MKV 分支）。两次都无冲突。
+注意：MKV/导出那条线此前**只是工作区改动、从未提交**（是隔壁 Agent 留下的），本轮我先把它
+整个落成 `b3052cc` 再合并，避免"未提交的成果"留在工作区里丢。
+
+**我自己复验了什么**（不采信别人的"已验证"）：
+
+- 全量编译：**197/197 目标链接成功**（含 veyra.exe）；
+- `scripts/gates/delivery.ps1` → **DELIVERY SHORT GATE PASS**
+  （`logs/delivery/591912ea5e98495a828186efd0feb7b6/result.json`）；
+- `veyra_repair_contract_tests` **197 checks / 0 failures**（含 CFR 整槽缺口补帧策略的新断言）；
+- `veyra_iec61937_probe_tests` PASS；
+- **用户报的"IMAX MKV 打不开"我实机跑通了**：`veyra.exe "…\IMAX.Laser.Pre.Show.New.2160P.DDP5.1.Atmos-ZhiLuan.mkv" --smoke-seconds 12`
+  → exit 0，日志 `d3d11va decoder opened codec=hevc 3840x2024`、`D3D11VA decode active (NT-handle surfaces
+  shared to the D3D12 graph)`、`smoke frames=696 failed=false processedFps=60.00 absLatenessP95Ms=0.79`，
+  音轨 `startup prefill done bufferedMs=1002`。即：**这条路径我这边有真实证据**。
+
+**未验证（如实写）**：
+
+1. AVerMedia 5.1 直通（GC553G2/GC553PRO/GC575 的非 PCM 载波）——**手上没有对应采集卡**，
+   只有单元级探针测试通过；必须由持卡用户实测 Dolby/DTS 输出。
+2. 导出缺口补帧那条线的 10-bit P010、AMD/Intel 组合，以及 GUI 里"跑满整段 72 s IMAX 文件"的长时间播
+   放（我只跑了 12 s smoke）均未执行。
+
+**未推送、未发布、未替换便携包**——push/Release 需要用户在当前对话里单独授权。
+
 ## 2026-09-17 采集卡 YUY2 实测：调色链路开/关各 2 分钟延迟对比
 
 命令（同一张卡、同一格式、同一信号，各 120 s，窗口内 0 丢帧）：
