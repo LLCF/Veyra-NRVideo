@@ -1,5 +1,28 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-17 色彩页 P1：黑白混色器（T4 补完）+ 修“改了 shader 却不重编译”的构建漏洞
+
+**黑白混色器现在真的能用**。之前色彩页里那 8 条“黑白”滑块是**死控件**：模型、预设、UI 都在，
+但 `ColorGrade.hlsli` / `ColorGradeTables` 里根本没有 `blackWhite`，拖动毫无效果。现在：
+
+- 烘焙（`ColorGradeTables::bake`）：每条色相带的黑白权重按同一套带权重合成，写进**色相表未使用的
+  alpha 通道**（`t9` 的 a），不新增纹理/常量槽位；`flags.z` 标记黑白模式；
+- 着色器：黑白模式下画面转单色，每个色系按其权重把灰阶提亮/压暗（±100%，Lightroom 黑白混色器语义），
+  此时 HSL 混色行自然失效，和 LR 一致；
+- UI：混色器组新增“黑白混色器（把画面转成黑白）”开关（id 820），并把状态纳入 `syncColorControls()`；
+- 验收：CPU 断言 7 条（identity 清位、绿带权重、远带不受影响、打包 flags、关模式时权重仍保留、
+  identity 表 B&W 列为 0）+ GPU 4 条（真图渲染出单色、绿带把灰阶从 141 提到 174、
+  关掉后恢复 64/160/64 的彩色）+ 烟测新增两步（开关到引擎、绿带黑白行到引擎）。
+
+**构建漏洞（会影响以后所有人）**：`cmake/VeyraShaders.cmake` 的 dxc 依赖只列了 `.hlsl` 与两个固定
+`.hlsli`，**没有列 `ColorGrade.hlsli`**。后果：只改颜色核心头文件时 `.dxil` 不重编译，程序继续跑旧
+shader——第一次改黑白时就撞上了（改完没效果，差点误判为逻辑错误）。现在改为 `file(GLOB shaders/*.hlsli)`
+全量依赖 + `CMAKE_CONFIGURE_DEPENDS`，任何 `.hlsli` 改动都会触发重编译（已验证：本次 `RgbToLinear.dxil`
+从 8596 → 8720 字节并更新了时间戳）。
+
+**回归**：`veyra_color_grade_tests`（30 项）exit 0；`veyra_color_grade_gpu_tests`（14 项）exit 0；
+`veyra_color_lut_tests` / `veyra_color_look_tests` exit 0；`--smoke-color` **exit 0**（含新步骤）。
+
 ## 2026-09-17 色彩页 P1：HDR 导出的 MaxCLL/MaxFALL 兜底（原样带上 + 标注未更新）
 
 方案 §5.3 要求“能测就测；不能测时保留原值并标注未更新，不允许静默写入与实际不符的静态元数据”。

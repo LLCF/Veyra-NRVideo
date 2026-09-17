@@ -772,38 +772,55 @@ else if(colorStep==40){colorStep=(colourSnapshot.desired.color.exposure==1.0f)?5
 else if(colorStep==5){const int editId=veyra::ui::colourParamEditId(L"混合");if(auto edit=colourControl(editId))SetWindowTextW(edit,L"77.00");colorStep=editId>0?50:-1;}
 else if(colorStep==50){colorStep=(colourSnapshot.desired.color.gradingBlending==77.0f)?51:(elapsed>9500?-1:50);
     if(colorStep==51)veyra::log::info("color-ui-test","T4 the colour grading row reached the engine");}
+// Black & white mixer (T4): the switch must reach the engine and the per-band
+// row must then change the monochrome result instead of being an inert slider.
+else if(colorStep==51){
+    if(auto box=colourControl(820))SendMessageW(box,BM_CLICK,0,0);
+    colorStep=45;
+}
+else if(colorStep==45&&colourSnapshot.desired.color.blackWhite){colorStep=46;
+    veyra::log::info("color-ui-test","T4 the black and white mixer switch reached the engine");}
+else if(colorStep==45&&elapsed>11500){colorStep=-1;}
+else if(colorStep==46){
+    const int editId=veyra::ui::colourParamEditId(L"绿色 · 黑白");
+    if(auto edit=colourControl(editId))SetWindowTextW(edit,L"60.00");
+    colorStep=editId>0?47:-1;
+}
+else if(colorStep==47){
+    colorStep=(colourSnapshot.desired.color.blackWhiteMix[3]==60.0f)?52:(elapsed>12500?-1:47);
+    if(colorStep==52)veyra::log::info("color-ui-test","T4 the black and white band row reached the engine");}
 // Named colour presets: save the current look, clear a value, apply the preset,
 // then delete it - the same three actions the panel exposes.
-else if(colorStep==51){
+else if(colorStep==52){
     if(auto edit=colourControl(804))SetWindowTextW(edit,L"烟测预设");
     SendMessageW(colourControl(805),BM_CLICK,0,0);
-    colorStep=52;
+    colorStep=53;
 }
-else if(colorStep==52){
+else if(colorStep==53){
     veyra::engine::ColorLookStore store(veyra::runtime::localDataDirectory());
     store.load();
     const bool saved=!store.entries().empty()&&store.entries().back().name==L"烟测预设";
     if(auto edit=colourControl(1300))SetWindowTextW(edit,L"0.00");
-    colorStep=saved?53:-1;
+    colorStep=saved?54:-1;
     veyra::log::info("color-ui-test",std::format("preset saved={} count={} step={}",saved,store.entries().size(),colorStep));
 }
-else if(colorStep==53&&colourSnapshot.desired.color.exposure==0.0f){SendMessageW(colourControl(806),BM_CLICK,0,0);colorStep=54;}
-else if(colorStep==53&&elapsed>9000){
+else if(colorStep==54&&colourSnapshot.desired.color.exposure==0.0f){SendMessageW(colourControl(806),BM_CLICK,0,0);colorStep=55;}
+else if(colorStep==54&&elapsed>9000){
     veyra::log::info("color-ui-test",std::format("preset apply waiting: desiredExposure={:.3f} configuredExposure={:.3f} elapsed={}",
         colourSnapshot.desired.color.exposure,uiState.configured.color.exposure,elapsed));
     colorStep=-1;
 }
-else if(colorStep==54){colorStep=(colourSnapshot.desired.color.exposure==1.0f)?55:(elapsed>14000?-1:54);
-    if(colorStep==55)veyra::log::info("color-ui-test","preset applied: exposure came back through the engine");}
-else if(colorStep==55){SendMessageW(colourControl(807),BM_CLICK,0,0);colorStep=56;}
-else if(colorStep==56){
+else if(colorStep==55){colorStep=(colourSnapshot.desired.color.exposure==1.0f)?56:(elapsed>14000?-1:55);
+    if(colorStep==56)veyra::log::info("color-ui-test","preset applied: exposure came back through the engine");}
+else if(colorStep==56){SendMessageW(colourControl(807),BM_CLICK,0,0);colorStep=57;}
+else if(colorStep==57){
     veyra::engine::ColorLookStore store(veyra::runtime::localDataDirectory());
     store.load();
     const bool deleted=store.entries().empty();
-    colorStep=deleted?57:(elapsed>16000?-1:56);
-    if(colorStep==57)veyra::log::info("color-ui-test","preset deleted; colour page back to no stored looks");
+    colorStep=deleted?58:(elapsed>16000?-1:57);
+    if(colorStep==58)veyra::log::info("color-ui-test","preset deleted; colour page back to no stored looks");
 }
-else if(colorStep==57){
+else if(colorStep==58){
     auto edit=colourControl(1300);
     const bool beforeVisible=edit&&IsWindowVisible(edit);
     const bool beforeMask=(preferences.load().colourFoldMask&1u)!=0u;

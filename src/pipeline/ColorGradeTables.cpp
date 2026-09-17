@@ -91,6 +91,7 @@ ColorGradeTables ColorGradeTables::bake(const engine::ColorSettings& s){
     out.vibrance=s.vibrance;
     out.lutStrength=s.hasLut()?std::clamp(s.lutStrength/100.0f,0.0f,1.0f):0.0f;
     out.lutInputSpace=s.lutInputSpace;
+    out.blackWhite=s.blackWhite;
     if(!s.enabled||s.neutral()){
         for(int i=0;i<kCurveEntries;++i){
             const float t=float(i)/float(kCurveEntries-1);
@@ -147,7 +148,7 @@ ColorGradeTables ColorGradeTables::bake(const engine::ColorSettings& s){
     // --- hue response (mixer) --------------------------------------------
     for(int i=0;i<kHueEntries;++i){
         const float hue=360.0f*float(i)/float(kHueEntries-1);
-        float shift=0,sat=1,lum=1;
+        float shift=0,sat=1,lum=1,bw=0;
         constexpr float centres[engine::kColorMixerBands]={0,30,60,120,180,240,280,320};
         for(int b=0;b<engine::kColorMixerBands;++b){
             float d=std::abs(hue-centres[b]);
@@ -156,9 +157,14 @@ ColorGradeTables ColorGradeTables::bake(const engine::ColorSettings& s){
             shift+=w*s.mixerHue[std::size_t(b)]*0.3f;
             sat*=1.0f+w*s.mixerSaturation[std::size_t(b)]/100.0f;
             lum*=1.0f+w*s.mixerLuminance[std::size_t(b)]/100.0f;
+            // Black & white mixer: per-band lighten/darken of the monochrome
+            // result. The weight rides in the hue table's unused alpha channel
+            // so the shader keeps its existing table set (no extra SRV).
+            bw+=w*s.blackWhiteMix[std::size_t(b)];
         }
         const auto base=std::size_t(i)*4;
         out.hue[base]=shift;out.hue[base+1]=std::max(0.0f,sat);out.hue[base+2]=std::max(0.0f,lum);
+        out.hue[base+3]=std::clamp(bw,-100.0f,100.0f);
     }
 
     // --- luminance response (colour grading + shadow tint) ----------------

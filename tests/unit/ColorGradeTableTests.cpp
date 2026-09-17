@@ -130,6 +130,30 @@ int main(){
         const auto withLut=ColorGradeTables::bake(s);
         check(std::abs(withLut.lutStrength-0.75f)<1e-6f,"lut strength normalises to 0..1 when a lut is selected");
     }
+    // 10. Black & white mixer: the eight 黑白 rows must not be inert sliders.
+    // The per-band weight is baked into the hue table's alpha channel and the
+    // mode itself into the packed flags, so the shader needs no extra table.
+    {
+        ColorSettings s;s.enabled=true;s.blackWhite=true;s.blackWhiteMix[3]=60.0f;
+        const auto t=ColorGradeTables::bake(s);
+        const int greenIndex=int(120.0f/360.0f*float(kH-1)+0.5f);
+        const int redIndex=int(0.0f/360.0f*float(kH-1)+0.5f);
+        check(!t.identity,"enabling the black and white mixer clears the identity flag");
+        check(t.blackWhite,"the bake reports the black and white mode");
+        check(hueAt(t,greenIndex,3)>30.0f,"the green band lightens its grey in the B&W mix table");
+        check(std::abs(hueAt(t,redIndex,3))<20.0f,"a band far from the edited colour stays near its neutral grey");
+        float packed[20]{};
+        packColorGradeConstants(t,packed);
+        check(packed[18]>0.5f,"the packed flags tell the shader to run the monochrome path");
+        ColorSettings off=s;off.blackWhite=false;
+        const auto offTables=ColorGradeTables::bake(off);
+        float offPacked[20]{};
+        packColorGradeConstants(offTables,offPacked);
+        check(offPacked[18]<0.5f,"with the mixer off the monochrome path stays disabled even though weights are baked");
+        check(hueAt(offTables,greenIndex,3)>30.0f,"baked weights are kept so toggling the mode back on is instant");
+        ColorSettings plain;s.enabled=true;
+        check(ColorGradeTables::bake(plain).hue[std::size_t(greenIndex)*4+3]==0.0f,"identity bake leaves the B&W column at zero");
+    }
     if(failures){std::printf("FAIL: colour grade bake (%d checks)\n",failures);return 1;}
     std::printf("PASS: colour grade bake tables (identity, white balance, tone, curves, mixer, grading, lut)\n");
     return 0;

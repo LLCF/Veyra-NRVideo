@@ -27,6 +27,7 @@ struct ColorGradeTables {
     float saturation=0,vibrance=0;    // -100..100, applied in the shader
     float lutStrength=0;              // 0..1 (0 disables the 3D LUT lookup)
     int lutInputSpace=0;
+    bool blackWhite=false;            // monochrome mixer instead of the HSL mixer
     bool identity=true;               // master switch off or every parameter neutral
     static ColorGradeTables bake(const engine::ColorSettings& settings);
     // Exposed for the tests and for callers that need the same log mapping.
@@ -44,6 +45,8 @@ inline void packColorGradeConstants(const ColorGradeTables& t,float* out){
     out[12]=t.exposure;out[13]=t.saturation;out[14]=t.vibrance;out[15]=t.identity?0.0f:t.lutStrength;
     // "identity" covers both "master switch off" and "every parameter neutral":
     // in either case the shader must return the input untouched.
-    out[16]=t.identity?0.0f:1.0f;out[17]=float(t.identity?0:t.lutInputSpace);out[18]=0;out[19]=0;
+    // flags.w(z) = black & white mixer active. Its per-band weights live in the
+    // hue table's alpha channel, so no extra texture or constant slot is needed.
+    out[16]=t.identity?0.0f:1.0f;out[17]=float(t.identity?0:t.lutInputSpace);out[18]=t.blackWhite?1.0f:0.0f;out[19]=0;
 }
 } // namespace veyra::pipeline

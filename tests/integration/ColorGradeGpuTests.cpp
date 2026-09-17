@@ -153,6 +153,34 @@ int wmain(){
             const auto pixel=center(graded);
             check(ok&&pixel.r>pixel.b+10,"mid-tone grading wheel tints mid grey towards red");
         }
+        {
+            // T4 black & white mixer: the switch must actually produce a
+            // monochrome frame, and the per-band row must move that band's grey
+            // instead of being an inert slider.
+            engine::EnhancementSettings s;s.color.enabled=true;s.color.blackWhite=true;
+            sink::RgbaImage monoGreen,monoGreenLifted;
+            const bool monochrome=graph.apply(s)&&graph.render(grass,monoGreen)&&!monoGreen.pixels.empty();
+            check(monochrome,"the black and white mixer renders through the real graph");
+            if(monochrome){
+                const auto grey=center(monoGreen);
+                check(grey.r==grey.g&&grey.g==grey.b,"the black and white mixer collapses the frame to grey");
+                s.color.blackWhiteMix[3]=60.0f;
+                const bool lifted=graph.apply(s)&&graph.render(grass,monoGreenLifted)&&!monoGreenLifted.pixels.empty();
+                const auto liftedGrey=lifted?center(monoGreenLifted):Pixel{};
+                check(lifted&&liftedGrey.r==liftedGrey.g&&liftedGrey.g==liftedGrey.b&&liftedGrey.r>grey.r+8,
+                    std::format("the green band row lightens the green area's grey (neutral {} vs lifted {})",grey.r,liftedGrey.r));
+                // Same non-colour payload as the accepted call above, so only the
+                // colour block changes (a fresh default settings object carries a
+                // different multiplier/backend combination the graph rejects).
+                auto off=s;off.color=engine::ColorSettings{};off.color.enabled=true;
+                sink::RgbaImage colour;
+                const bool applied=graph.apply(off);
+                const bool rendered=applied&&graph.render(grass,colour)&&!colour.pixels.empty();
+                const auto back=rendered?center(colour):Pixel{};
+                check(rendered&&back.g>back.r+8,
+                    std::format("turning the black and white mixer off restores the colour image (applied={} r={} g={} b={})",applied,back.r,back.g,back.b));
+            }
+        }
     }
     // 3. A real .cube file, imported into runtime_local/luts and resolved by name
     // when the graph is built - the same path the UI importer uses.

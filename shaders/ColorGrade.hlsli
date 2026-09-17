@@ -180,7 +180,19 @@ float3 ColorGradeApply(float3 lin, ColorGradeParams p)
     // Hue mixer.
     const float3 hsv = RgbToHsv(rgb);
     const float4 hueResponse = ColorGradeHue(hsv.x / 360.0);
-    rgb = HsvToRgb(float3(hsv.x + hueResponse.r, saturate(hsv.y * hueResponse.g), max(hsv.z * hueResponse.b, 0.0)));
+    if (p.flags.z > 0.5)
+    {
+        // Black & white mixer: the frame becomes monochrome and each colour band
+        // lightens or darkens its own grey by up to +/-100% (Lightroom's B&W
+        // mixer semantics). The per-band weight rides in hueResponse.a.
+        const float luma = dot(rgb, float3(0.2126, 0.7152, 0.0722));
+        const float grey = max(0.0, luma * max(0.0, 1.0 + hueResponse.a * 0.01));
+        rgb = float3(grey, grey, grey);
+    }
+    else
+    {
+        rgb = HsvToRgb(float3(hsv.x + hueResponse.r, saturate(hsv.y * hueResponse.g), max(hsv.z * hueResponse.b, 0.0)));
+    }
 
     // Luminance-zone grading + calibration shadow tint.
     const float tone = saturate(ColorGradeEncodeLog(rgb).y);

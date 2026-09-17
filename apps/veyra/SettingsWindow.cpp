@@ -211,6 +211,10 @@ void layoutColorPage(){
             place(818,y,32,collapsed);y+=36;
             place(819,y,200,collapsed);y+=32;
         }
+        // The black & white mixer is a mode, not a slider: one switch in the
+        // mixer section turns the eight 黑白 rows on (HSL rows go inert, exactly
+        // like Lightroom's B&W panel).
+        if(section==3){place(820,y,220,collapsed);y+=32;}
         y+=8;
     }
     colorPageContentHeight=y+12;
@@ -229,6 +233,7 @@ void syncColorControls(){
         }
     }
     if(auto space=item(819))if(int(SendMessageW(space,CB_GETCURSEL,0,0))!=colour.lutInputSpace)SendMessageW(space,CB_SETCURSEL,WPARAM(colour.lutInputSpace),0);
+    check(820,colour.blackWhite?BST_CHECKED:BST_UNCHECKED);
     syncingColour=false;
 }
 bool applyColour(const engine::ColorSettings& colour,bool autoEnable){
@@ -459,6 +464,19 @@ LRESULT CALLBACK proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
         }else message(L"没有可撤销的还原。");
         syncColorControls();arrange();return 0;
     }
+    if(msg==WM_COMMAND&&LOWORD(wp)==820&&HIWORD(wp)==BN_CLICKED){
+        auto colour=colourTarget();
+        colour.blackWhite=SendMessageW(item(820),BM_GETCHECK,0,0)==BST_CHECKED;
+        if(!applyColour(colour,true)){
+            veyra::log::warn("color-ui","black and white mixer switch rejected");
+            syncColorControls();
+            return 0;
+        }
+        veyra::log::info("color-ui",std::format("black and white mixer={}",colour.blackWhite?1:0));
+        message(colour.blackWhite?L"黑白混色器已打开：下面八个“黑白”滑块控制各色系的灰阶明暗。":L"黑白混色器已关闭，回到 HSL 混色。");
+        syncColorControls();
+        return 0;
+    }
     if(msg==WM_COMMAND&&LOWORD(wp)>=810&&LOWORD(wp)<810+kColorSections&&HIWORD(wp)==BN_CLICKED){
         const int section=LOWORD(wp)-810;
         colorFoldMask^=1u<<section;
@@ -665,6 +683,8 @@ case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.
         // strength row is a normal parameter; the two combos are placed by
         // layoutColorPage().
         colorParams.push_back({6,L"LUT 强度",0,100,ColorTarget::Scalar,&engine::ColorSettings::lutStrength,0});
+        check(820,BST_UNCHECKED);add(L"BUTTON",L"黑白混色器（把画面转成黑白）",820,BS_AUTOCHECKBOX|WS_TABSTOP,3,12,0,-1,28);
+        SetPropW(item(820),L"veyra.tip",HANDLE(L"打开后画面变成黑白，下面八个“黑白”滑块控制各色系对应的灰阶明暗（和 Lightroom 的黑白混色器同一套语义）。"));
         for(int section=0;section<kColorSections;++section)add(L"BUTTON",L"",810+section,BS_PUSHBUTTON|WS_TABSTOP,2,12,12,-1,32);
         // Preset toolbar.
         combo(803,2,0,{});add(L"EDIT",L"",804,ES_AUTOHSCROLL|WS_TABSTOP,2,12,0,-1,26);send(804,EM_SETLIMITTEXT,48,0);
