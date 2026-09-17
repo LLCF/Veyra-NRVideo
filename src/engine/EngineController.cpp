@@ -733,6 +733,21 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                         finishReset(diagnostics::ResetOutcome::RolledBack);
                         std::lock_guard lock(mutex_);desired_.rejectVideoRequest(requested,previous);snapshot_.desired=desired_;snapshot_.rejectedRevision=requested.revision;snapshot_.applying=desired_!=previous;snapshot_.status=L"设置应用失败，已恢复上一套参数";snapshot_.backendWarning=requested.nrRuntime!=previous.nrRuntime?L"NR运行版本切换失败，已恢复上一套参数":requested.frameGenerationBackend==FrameGenerationBackend::XeSS?L"XeSS 未能启用，已恢复上一套参数":requested.frameGenerationBackend==FrameGenerationBackend::Fsr?L"AMD FSR 帧生成未能启用，已恢复上一套参数":L"后端切换失败，已恢复上一套参数";}
                 }
+                // Live uniform update. The revision identifies the graph *shape*
+                // (NR/SR/FG/resolution and the colour master switch); colour
+                // parameters keep the same revision on purpose, so they must be
+                // pushed into the running graph here - no rebuild, no history
+                // reset. Without this the panel only took effect after an
+                // unrelated rebuild (toggling NR): the "sliders do nothing" report.
+                if(requested.revision==previous.revision&&!(requested==previous)){
+                    if(graph.applySettings(requested)){
+                        options=PlayerOptions::from(requested);
+                        {std::lock_guard lock(mutex_);snapshot_.applied=options.snapshot();snapshot_.applying=desired_!=snapshot_.applied;}
+                        veyra::log::info("settings",std::format("live parameter update revision={} colourEnabled={} exposure={:.2f} contrast={:.2f} temperature={:.2f}",requested.revision,requested.color.enabled?1:0,requested.color.exposure,requested.color.contrast,requested.color.temperature));
+                    }else{
+                        std::lock_guard lock(mutex_);desired_.rejectVideoRequest(requested,previous);snapshot_.desired=desired_;snapshot_.applying=desired_!=previous;snapshot_.status=L"这套参数需要重建管线，已回到上一套数值";
+                    }
+                }
                 if(stop_)break;
                 double seek;{std::lock_guard lock(mutex_);seek=seekSeconds_.exchange(-1);if(seek>=0)activeSeekId=snapshot_.seekRequested;}
                 if(seek>=0&&!isImage&&!isCapture){

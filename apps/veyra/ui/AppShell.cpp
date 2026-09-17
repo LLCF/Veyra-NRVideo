@@ -63,6 +63,10 @@ veyra::engine::EnhancementSettings lastSuccessful,jobExpected;bool haveSuccessfu
 std::wstring smokeView;bool smokeViewApplied=false;
 std::wstring smokeDualOutput;bool smokeEmpty=false;DWORD modeGdiStart=0,modeHandlesStart=0;SIZE_T modePrivateStart=0;
 bool smokeDual=false,smokeDualPause=false,smokeMaster=false,smokeMasterReject=false,smokeAudio=false,smokeJob=false,smokeJobCancel=false,smokeJobExit=false,smokeColor=false;int dualStep=0,masterStep=0,audioStep=0,jobStep=0,colorStep=0;double pausedPosition=-1,jobPosition=0;uint64_t pausedFrames=0;ULONGLONG jobPauseTick=0;HANDLE workerMapping=nullptr;
+// Test/acceptance convenience: start in professional mode with the colour page
+// open, so a reviewer lands straight on the panel instead of hunting for it.
+bool openColourPageOnStart=false;
+uint64_t colourLiveRevision=0;
 void switchMode();void selectInspector(int);
 bool applySettings(veyra::engine::EnhancementSettings s){if(masterPendingRevision)return false;uiState.configured=s;if(uiState.enhanced)engine.requestSettings(s);else {auto effective=engine.snapshot().desired;if(effective.captureCompatible!=s.captureCompatible||effective.forceSdrPreview!=s.forceSdrPreview||effective.captureFlipVertical!=s.captureFlipVertical||effective.captureBuffer!=s.captureBuffer||!(effective.color==s.color)){effective.captureCompatible=s.captureCompatible;effective.forceSdrPreview=s.forceSdrPreview;effective.captureFlipVertical=s.captureFlipVertical;effective.captureBuffer=s.captureBuffer;effective.color=s.color;engine.requestSettings(effective);}veyra::log::info("ui-settings","enhancement off: draft saved; presentation setting applied independently");}veyra::ui::settingsEnabled(uiState.enhanced,uiState.configured);return true;}
 
@@ -618,7 +622,7 @@ if(wp==ControllerTimer){const auto state=engine.snapshot();if(state.remotePlay&&
 #endif
 {if(wp==TransitionTimer){transition.sample(GetTickCount64());if(!transition.running){endTransition();veyra::log::info("ui-transition","completed; final layout and swapchain resize released");}layout();return 0;}
 if(full&&fullControls&&!menuOpen&&!veyra::ui::popupSelectorOpen()&&!GetCapture()&&GetTickCount64()-pointerTick>1600){POINT p{};GetCursorPos(&p);ScreenToClient(hwnd,&p);RECT r{};GetClientRect(hwnd,&r);if(p.y<r.bottom-veyra::ui::dip(hwnd,98)||p.x<0||p.x>=r.right||p.y>=r.bottom){fullControls=false;layout();if(GetForegroundWindow()==hwnd)SetCursor(nullptr);veyra::log::info("ui-fullscreen","controls hidden; video and subtitles only");}}
-if(closing){if(engine.idle()&&!exportJob.poll().active()){KillTimer(hwnd,TelemetryTimer);DestroyWindow(hwnd);}return 0;}if(!autoInput.empty()){auto file=autoInput;autoInput.clear();openFile(file);startTick=GetTickCount64();if(subtitleRequestAutoAlign){subtitleRequestAutoAlign=false;startSubtitleAutoAlign();}}if(smokeControls&&startTick){const auto elapsed=GetTickCount64()-startTick;
+if(closing){if(engine.idle()&&!exportJob.poll().active()){KillTimer(hwnd,TelemetryTimer);DestroyWindow(hwnd);}return 0;}if(!autoInput.empty()){auto file=autoInput;autoInput.clear();openFile(file);startTick=GetTickCount64();if(subtitleRequestAutoAlign){subtitleRequestAutoAlign=false;startSubtitleAutoAlign();}if(openColourPageOnStart){openColourPageOnStart=false;if(uiState.mode==veyra::ui::Mode::Daily)switchMode();selectInspector(2);layout();}}if(smokeControls&&startTick){const auto elapsed=GetTickCount64()-startTick;
 if(smokeStep==0&&elapsed>2200){engine.pause(true);smokeStep=1;}
 if(smokeStep==1&&elapsed>2600){engine.seek(1.0);smokeStep=2;}
 if(smokeStep==2&&elapsed>3200){engine.pause(false);smokeStep=3;}
@@ -756,8 +760,24 @@ if(colorStep==0&&elapsed>1500){
 else if(colorStep==1){if(elapsed>2500)SendMessageW(colourControl(800),BM_CLICK,0,0);}
 else if(colorStep==2){
     if(auto edit=colourControl(1300))SetWindowTextW(edit,L"1.00");
-    colorStep=(colourSnapshot.desired.color.exposure==1.0f)?3:(elapsed>4000?-1:2);
-    if(colorStep==3)veyra::log::info("color-ui-test","exposure 1.00 reached the engine through the panel");
+    // The graph must actually receive it: `desired` alone is what let the
+    // "sliders do nothing until NR is toggled" bug ship.
+    colorStep=(colourSnapshot.desired.color.exposure==1.0f&&colourSnapshot.applied.color.exposure==1.0f)?9:(elapsed>5000?-1:2);
+    if(colorStep==9)veyra::log::info("color-ui-test",std::format("exposure 1.00 reached the engine and the running graph (applied, revision={})",colourSnapshot.applied.revision));
+}else if(colorStep==9){
+    // Second edit: same revision, so it must go through the live uniform path -
+    // no rebuild, no history reset, and the graph must show it.
+    colourLiveRevision=colourSnapshot.applied.revision;
+    if(auto edit=colourControl(1300))SetWindowTextW(edit,L"0.75");
+    colorStep=10;
+}else if(colorStep==10){
+    const bool live=colourSnapshot.applied.color.exposure==0.75f&&colourSnapshot.applied.revision==colourLiveRevision&&colourSnapshot.desired.color.exposure==0.75f;
+    colorStep=live?11:(elapsed>9000?-1:10);
+    if(colorStep==11)veyra::log::info("color-ui-test",std::format("live parameter update reached the graph without a rebuild (revision stays {})",colourLiveRevision));
+}else if(colorStep==11){
+    // Put the value back so the reset/undo expectations below stay meaningful.
+    if(auto edit=colourControl(1300))SetWindowTextW(edit,L"1.00");
+    colorStep=(colourSnapshot.desired.color.exposure==1.0f&&colourSnapshot.applied.color.exposure==1.0f)?3:(elapsed>11000?-1:11);
 }else if(colorStep==3){SendMessageW(colourControl(801),BM_CLICK,0,0);colorStep=30;}
 // The snapshot is taken once per tick, so the reset/undo results are observed on
 // the following tick instead of in the same one that clicked the button.
@@ -999,6 +1019,7 @@ int argc=0;auto argv=CommandLineToArgvW(GetCommandLineW(),&argc);for(int i=1;i<a
 // fused into the ingest dispatch, so this flag is how the graded cost is measured
 // against the grade-off baseline on the same clip.
 {int gradeArgc=0;auto gradeArgv=CommandLineToArgvW(GetCommandLineW(),&gradeArgc);for(int i=1;i<gradeArgc;++i){if(!wcsncmp(gradeArgv[i],L"--color-grade=",14)){initialOptions.settings.color.enabled=true;initialOptions.settings.color.exposure=float(_wtof(gradeArgv[i]+14));}}if(gradeArgv)LocalFree(gradeArgv);}
+{int pageArgc=0;auto pageArgv=CommandLineToArgvW(GetCommandLineW(),&pageArgc);for(int i=1;i<pageArgc;++i)if(!_wcsicmp(pageArgv[i],L"--colour-page"))openColourPageOnStart=true;if(pageArgv)LocalFree(pageArgv);}
 // The legacy argument clamp caps --fg-multiplier at 4X. Re-read the flag here so
 // 6X (and 2X/3X/4X) can be exercised from the command line for diagnostics and
 // smoke tests; the interactive UI uses the capability-driven list instead.

@@ -1,5 +1,31 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-17 紧急修复：色彩参数不是实时的（要开关 NR 才生效）
+
+用户上手验收第一条就抓到：拖一堆滑块画面**完全没反应**，必须开关 NR 才应用，之后继续调又不动。
+
+**根因（不是 shader，是引擎的实时更新路径缺失）**：`EngineController` 的渲染线程只在
+`requested.revision != previous.revision` 时才处理设置，而 `requestSettings()` 又按设计**故意**让
+“只改颜色参数”的请求保持同一个 revision（`sameVideoConfiguration()` 把颜色块从“图形结构”比较里排除，
+因为颜色是纯 uniform 更新、不该重建图）。两件事叠起来的结果：颜色改动被写进 `desired`，
+**渲染线程永远看不到**，直到某个真正改变图形结构的操作（开关 NR/SR/切分辨率）顺带把整套设置重放一遍。
+这也解释了为什么我之前的烟测没抓到——它断言的是 `desired`（引擎已收到）而不是 `applied`（图真的收到）。
+
+**修复**：在渲染线程的设置处理里补上**同 revision 的实时 uniform 更新**分支——
+`if(requested.revision==previous.revision&&!(requested==previous))` → `graph.applySettings(requested)`，
+不重建、不重置历史、不打断采集；失败时回滚 `desired` 并给出提示文字。
+日志新增 `[settings] live parameter update revision=… colourEnabled=… exposure=… contrast=… temperature=…`。
+
+**测试补强（这次必须能抓到）**：烟测的曝光步骤改为同时断言 `desired` **和** `applied`，
+并新增两步：把曝光改成 0.75 → 要求 `applied.exposure==0.75` **且 `applied.revision` 不变**
+（证明走的是实时路径、没有重建）。日志：
+`exposure 1.00 reached the engine and the running graph (applied, revision=3)`、
+`live parameter update reached the graph without a rebuild (revision stays 3)`。
+
+**验证**：`--smoke-color` exit 0；`scripts/gates/delivery.ps1` → **DELIVERY SHORT GATE PASS**
+（`logs/delivery/1292ac3a395e451e9d50927f67645df9/result.json`）。
+已用修复后的构建重新拉起测试实例（4K GTA VI 片段 + 色彩页）。
+
 ## 2026-09-17 色彩页 P1/T3 收口：分组“眼睛”bypass + schema v19
 
 方案 T3 要求的“分组眼睛”落地，并且是**真 bypass**（不只是隐藏 UI）：
