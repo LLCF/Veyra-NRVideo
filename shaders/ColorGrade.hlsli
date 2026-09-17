@@ -177,21 +177,26 @@ float3 ColorGradeApply(float3 lin, ColorGradeParams p)
     const float3 graded = ColorGradeDecodeLog(saturate(tableOut));
     rgb = select((encoded < 0.0) | (encoded > 1.0), rgb, graded);
 
-    // Hue mixer.
-    const float3 hsv = RgbToHsv(rgb);
+    // Hue mixer. The bands must be matched against the *display-referred* colour
+    // the user sees: skin sits at ~30 degrees (orange) in an encoded HSV, but
+    // linear-light HSV pulls skin towards red, which made the red band grab
+    // faces. Encode with a monotone gamma (no clipping, so HDR highlights are
+    // safe), mix there, decode back to the linear working image.
+    const float3 mixEncoded = pow(max(rgb, 0.0), 1.0 / 2.2);
+    const float3 hsv = RgbToHsv(mixEncoded);
     const float4 hueResponse = ColorGradeHue(hsv.x / 360.0);
     if (p.flags.z > 0.5)
     {
         // Black & white mixer: the frame becomes monochrome and each colour band
         // lightens or darkens its own grey by up to +/-100% (Lightroom's B&W
         // mixer semantics). The per-band weight rides in hueResponse.a.
-        const float luma = dot(rgb, float3(0.2126, 0.7152, 0.0722));
+        const float luma = dot(mixEncoded, float3(0.2126, 0.7152, 0.0722));
         const float grey = max(0.0, luma * max(0.0, 1.0 + hueResponse.a * 0.01));
-        rgb = float3(grey, grey, grey);
+        rgb = pow(float3(grey, grey, grey), 2.2);
     }
     else
     {
-        rgb = HsvToRgb(float3(hsv.x + hueResponse.r, saturate(hsv.y * hueResponse.g), max(hsv.z * hueResponse.b, 0.0)));
+        rgb = pow(max(HsvToRgb(float3(hsv.x + hueResponse.r, saturate(hsv.y * hueResponse.g), max(hsv.z * hueResponse.b, 0.0))), 0.0), 2.2);
     }
 
     // Luminance-zone grading + calibration shadow tint.

@@ -143,6 +143,7 @@ constexpr int colorMixerModeId=830,colorBandsId=831;
 constexpr const wchar_t* kColorBandsClass=L"VeyraColorBands";
 int colourMixerMode=0;   // 0 hue, 1 saturation, 2 luminance, 3 black & white
 int colourMixerBand=0;   // 0..7, the eight colour ranges
+bool colourBlackWhite=false;   // the mixer's black & white switch
 // Tone-curve editor: which channel is being edited (0 RGB, 1 R, 2 G, 3 B) and
 // which control point is being dragged.
 constexpr int colorCurveCanvasId=850,colorCurveChannelId=851,colorCurveResetId=855;
@@ -256,6 +257,7 @@ void layoutColorPage(){
         if(section==4){
             // body width is not in scope here; the viewport width is enough to
             // split the wheel grid into two columns.
+            y+=12;   // keep the section title clear of the wheels
             const int cellWidth=std::max<int>(dip(window,120),(bodyWidthDip-24-8)/2);
             place(colorWheelId(0),y,190,collapsed,12,cellWidth);
             place(colorWheelId(1),y,190,collapsed,12+cellWidth+8,cellWidth);
@@ -266,8 +268,11 @@ void layoutColorPage(){
         // Mixer header: correction dropdown + the eight colour ranges. The 24
         // rows stay in the table but only the selected range is on screen.
         if(section==3){
-            place(colorMixerModeId,y,30,collapsed,12,bodyWidthDip-24);y+=36;
-            place(colorBandsId,y,34,collapsed,12,bodyWidthDip-24);y+=42;
+            // No correction dropdown: the three mixer rows are always on screen
+            // for the selected colour range; the B&W row appears when the switch
+            // is on (that switch IS the black & white mixer).
+            place(colorMixerModeId,y,30,collapsed,12,bodyWidthDip-24);y+=34;
+            place(colorBandsId,y,32,collapsed,12,bodyWidthDip-24);y+=40;
         }
         // Tone curve: channel tabs + reset, then the grid canvas.
         if(section==2){
@@ -283,7 +288,9 @@ void layoutColorPage(){
             const auto& param=colorParams[i];
             if(param.section!=section)continue;
             const int mode=mixerModeOf(param);
-            const bool hidden=collapsed||(mode>=0&&(mode!=colourMixerMode||param.index!=colourMixerBand));
+            // Hue/saturation/luminance always visible for the selected band; the
+            // black & white row only while the B&W switch is on.
+            const bool hidden=collapsed||(mode>=0&&(param.index!=colourMixerBand||(mode==3&&!colourBlackWhite)));
             place(colorLabelId(int(i)),y,24,hidden);
             place(colorEditId(int(i)),y-2,26,hidden);
             place(colorSliderId(int(i)),y+24,16,hidden);
@@ -316,7 +323,8 @@ void syncColorControls(){
         }
     }
     if(auto space=item(819))if(int(SendMessageW(space,CB_GETCURSEL,0,0))!=colour.lutInputSpace)SendMessageW(space,CB_SETCURSEL,WPARAM(colour.lutInputSpace),0);
-    if(auto mode=item(colorMixerModeId))if(int(SendMessageW(mode,CB_GETCURSEL,0,0))!=colourMixerMode)SendMessageW(mode,CB_SETCURSEL,WPARAM(colourMixerMode),0);
+    colourBlackWhite=colour.blackWhite;
+    check(colorMixerModeId,colourBlackWhite?BST_CHECKED:BST_UNCHECKED);
     if(auto bands=item(colorBandsId))InvalidateRect(bands,nullptr,FALSE);
     if(auto canvas=item(colorCurveCanvasId))InvalidateRect(canvas,nullptr,FALSE);
     for(int channel=0;channel<4;++channel)if(auto tab=item(colorCurveChannelId+channel))selected(tab,channel==colourCurveChannel);
@@ -681,7 +689,7 @@ void registerToneCurveClass(){
                         engine::ColorCurvePoint added{};
                         added.x=std::clamp(float(cursor.x-canvas.left)/float(std::max<int>(1,canvas.right-canvas.left)),0.0f,1.0f);
                         added.y=std::clamp(float(canvas.bottom-cursor.y)/float(std::max<int>(1,canvas.bottom-canvas.top)),0.0f,1.0f);
-                        int slot=curve.count;
+                int slot=curve.count;
                         for(int i=0;i<curve.count;++i)if(curve.points[std::size_t(i)].x>added.x){slot=i;break;}
                         for(int i=curve.count;i>slot;--i)curve.points[std::size_t(i)]=curve.points[std::size_t(i-1)];
                         curve.points[std::size_t(slot)]=added;++curve.count;
@@ -695,12 +703,19 @@ void registerToneCurveClass(){
             }else if(msg==WM_MOUSEMOVE&&colourCurveDragPoint>=0){
                 auto colour=colourTarget();
                 auto& curve=curveForChannel(colour,colourCurveChannel);
-                const int index=std::clamp(colourCurveDragPoint,1,curve.count-2);
+                const int index=std::clamp(colourCurveDragPoint,0,curve.count-1);
                 colourCurveDragPoint=index;
-                const float x=std::clamp(float(cursor.x-canvas.left)/float(std::max<int>(1,canvas.right-canvas.left)),
-                    curve.points[std::size_t(index-1)].x+0.01f,curve.points[std::size_t(index+1)].x-0.01f);
                 const float y=std::clamp(float(canvas.bottom-cursor.y)/float(std::max<int>(1,canvas.bottom-canvas.top)),0.0f,1.0f);
-                curve.points[std::size_t(index)]={x,y};
+                // Endpoints keep their x (they are the black/white points) but
+                // must move vertically - Lightroom lets you pull them up or down
+                // to set the black and white output levels.
+                if(index==0)curve.points[0]={curve.points[0].x,y};
+                else if(index==curve.count-1)curve.points[std::size_t(index)]={curve.points[std::size_t(index)].x,y};
+                else{
+                    const float x=std::clamp(float(cursor.x-canvas.left)/float(std::max<int>(1,canvas.right-canvas.left)),
+                        curve.points[std::size_t(index-1)].x+0.01f,curve.points[std::size_t(index+1)].x-0.01f);
+                    curve.points[std::size_t(index)]={x,y};
+                }
                 applyColour(colour,true,false);
             }else if(msg==WM_LBUTTONUP){
                 ReleaseCapture();
@@ -1099,22 +1114,19 @@ LRESULT CALLBACK proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
         }
         syncColorControls();arrange();return 0;
     }
-    if(msg==WM_COMMAND&&LOWORD(wp)==colorMixerModeId&&HIWORD(wp)==CBN_SELCHANGE){
-        colourMixerMode=std::clamp(int(SendMessageW(item(colorMixerModeId),CB_GETCURSEL,0,0)),0,3);
-        // Picking 黑白 is the B&W mixer switch itself (Lightroom's B&W panel),
-        // so the model flag follows the dropdown instead of a second checkbox.
+    if(msg==WM_COMMAND&&LOWORD(wp)==colorMixerModeId&&HIWORD(wp)==BN_CLICKED){
+        colourBlackWhite=SendMessageW(item(colorMixerModeId),BM_GETCHECK,0,0)==BST_CHECKED;
         auto colour=colourTarget();
-        const bool wantBlackWhite=colourMixerMode==3;
-        if(colour.blackWhite!=wantBlackWhite){
-            colour.blackWhite=wantBlackWhite;
+        if(colour.blackWhite!=colourBlackWhite){
+            colour.blackWhite=colourBlackWhite;
             if(!applyColour(colour,true)){
                 veyra::log::warn("color-ui","mixer correction switch rejected");
                 syncColorControls();
                 return 0;
             }
         }
-        veyra::log::info("color-ui",std::format("mixer correction={} blackWhite={}",colourMixerMode,wantBlackWhite?1:0));
-        message(wantBlackWhite?L"黑白：画面转成单色，下方滑块控制各色系的灰阶明暗。":L"用下方滑块按色系微调（点色点切换色系）。");
+        veyra::log::info("color-ui",std::format("mixer blackWhite={}",colourBlackWhite?1:0));
+        message(colourBlackWhite?L"黑白混色器已打开：画面转单色，下面出现“黑白”滑块。":L"已回到 HSL 混色（色相/饱和度/明亮度）。");
         syncColorControls();
         arrange();
         return 0;
@@ -1289,13 +1301,6 @@ case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.
             {1,L"色调",&engine::ColorSettings::tint,-100,100},
             {1,L"自然饱和度",&engine::ColorSettings::vibrance,-100,100},
             {1,L"饱和度",&engine::ColorSettings::saturation,-100,100},
-            {2,L"高光（参数曲线）",&engine::ColorSettings::paramHighlights,-100,100},
-            {2,L"亮色调（参数曲线）",&engine::ColorSettings::paramLights,-100,100},
-            {2,L"暗色调（参数曲线）",&engine::ColorSettings::paramDarks,-100,100},
-            {2,L"阴影（参数曲线）",&engine::ColorSettings::paramShadows,-100,100},
-            {2,L"高光范围分割",&engine::ColorSettings::splitHighlights,-100,100},
-            {2,L"中间调范围分割",&engine::ColorSettings::splitMidtones,-100,100},
-            {2,L"阴影范围分割",&engine::ColorSettings::splitShadows,-100,100},
         };
         for(const auto& definition:definitions)
             colorParams.push_back({definition.section,definition.label,definition.min,definition.max,ColorTarget::Scalar,definition.field,0,0.0f,
@@ -1354,13 +1359,13 @@ case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.
         SetPropW(item(822),L"veyra.tip",HANDLE(L"复制当前色彩设置，用来粘贴到别的预设或下一段素材。"));
         SetPropW(item(823),L"veyra.tip",HANDLE(L"粘贴刚才复制的色彩设置。"));
         SetPropW(item(821),L"veyra.tip",HANDLE(L"按住不放：临时显示没有调色的原图；松开恢复。用中性调色实现，不重建管线。"));
-        // Mixer header: "校正" dropdown + the eight colour ranges. Only the
-        // selected range's rows are on screen, like Lightroom's colour mixer.
+        // Mixer header: the eight colour ranges plus the black & white switch.
+        // The selected range's hue/saturation/luminance rows are always shown;
+        // its 黑白 row is added while the switch is on.
         registerColorBandsClass();
-        combo(colorMixerModeId,2,0,{L"色相",L"饱和度",L"明亮度",L"黑白"});
-        send(colorMixerModeId,CB_SETCURSEL,WPARAM(colourMixerMode),0);
-        add(kColorBandsClass,L"",colorBandsId,WS_TABSTOP,2,12,0,-1,34);
-        SetPropW(item(colorMixerModeId),L"veyra.tip",HANDLE(L"校正方式：色相/饱和度/明亮度按色系微调；黑白把画面转成单色，并用同一组滑块控制各色系的灰阶明暗。"));
+        add(L"BUTTON",L"",colorMixerModeId,BS_AUTOCHECKBOX|WS_TABSTOP,2,12,0,dip(window,26),26);check(colorMixerModeId,BST_UNCHECKED);
+        add(kColorBandsClass,L"",colorBandsId,WS_TABSTOP,2,12,0,-1,32);
+        SetPropW(item(colorMixerModeId),L"veyra.tip",HANDLE(L"黑白混色器：打开后画面转成单色，下面的“黑白”滑块按色系控制灰阶明暗（色相/饱和度行这时不起作用）。"));
         SetPropW(item(colorBandsId),L"veyra.tip",HANDLE(L"点色点切换要调整的色系；下方滑块只作用于选中的色系。"));
         // Tone curve: channel tabs (RGB / R / G / B), a flatten button and the
         // grid canvas itself.
@@ -1573,13 +1578,12 @@ void settingsColorScrollToTest(int id){
     }
 }
 void settingsColorMixerModeForTest(int mode){
-    colourMixerMode=std::clamp(mode,0,3);
-    if(auto combo=item(colorMixerModeId))SendMessageW(combo,CB_SETCURSEL,WPARAM(colourMixerMode),0);
+    colourBlackWhite=mode==3;
+    check(colorMixerModeId,colourBlackWhite?BST_CHECKED:BST_UNCHECKED);
     auto colour=colourTarget();
-    const bool wantBlackWhite=colourMixerMode==3;
     bool applied=true;
-    if(colour.blackWhite!=wantBlackWhite){colour.blackWhite=wantBlackWhite;applied=applyColour(colour,true);}
-    veyra::log::info("color-ui",std::format("mixer mode={} blackWhiteAsked={} applied={}",colourMixerMode,wantBlackWhite?1:0,applied?1:0));
+    if(colour.blackWhite!=colourBlackWhite){colour.blackWhite=colourBlackWhite;applied=applyColour(colour,true);}
+    veyra::log::info("color-ui",std::format("mixer blackWhiteAsked={} applied={}",colourBlackWhite?1:0,applied?1:0));
     syncColorControls();
     arrange();
 }

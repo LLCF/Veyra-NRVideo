@@ -1,11 +1,17 @@
 #include "veyra/media/FFmpegVideoDecoder.h"
 
+#include <d3d11.h>
+#include <d3d11_4.h>
 #include <d3d12.h>
+#include <dxgi1_2.h>
+#include <dxgi1_4.h>
+#include <wrl/client.h>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/avutil.h>
 #include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_d3d11va.h>
 #include <libavutil/hwcontext_d3d12va.h>
 }
 
@@ -18,11 +24,29 @@ namespace veyra::media {
 
 namespace {
 
+using Microsoft::WRL::ComPtr;
+
+std::string hrText(HRESULT hr)
+{
+    return std::format("0x{:08X}", static_cast<uint32_t>(hr));
+}
+
 // get_format: only accept D3D12 (Playbook 13.2 get_format contract).
 enum AVPixelFormat SelectD3D12Format(struct AVCodecContext* /*ctx*/, const enum AVPixelFormat* pixFmts)
 {
     for (const enum AVPixelFormat* p = pixFmts; *p != AV_PIX_FMT_NONE; ++p) {
         if (*p == AV_PIX_FMT_D3D12) {
+            return *p;
+        }
+    }
+    return AV_PIX_FMT_NONE;
+}
+
+// get_format for the D3D11VA path: only D3D11 surfaces are importable.
+enum AVPixelFormat SelectD3D11Format(struct AVCodecContext* /*ctx*/, const enum AVPixelFormat* pixFmts)
+{
+    for (const enum AVPixelFormat* p = pixFmts; *p != AV_PIX_FMT_NONE; ++p) {
+        if (*p == AV_PIX_FMT_D3D11) {
             return *p;
         }
     }
@@ -193,7 +217,9 @@ void FFmpegVideoDecoder::close()
     if (context_ != nullptr) {
         avcodec_free_context(&context_);
     }
+    releaseInterop();
     hwAccelActive_ = false;
+    hwAccelKind_ = HardwareDecodeKind::None;
     lastFrameFormat_ = -1;
     gpuQueueWaitCount_ = 0;
 }

@@ -219,7 +219,12 @@ ColorGradeTables ColorGradeTables::bake(const engine::ColorSettings& s){
         for(int b=0;b<engine::kColorMixerBands;++b){
             float d=std::abs(hue-centres[b]);
             d=std::min(d,360.0f-d);
-            const float w=std::max(0.0f,1.0f-d/45.0f);
+            // Half-width 32 degrees with a smoothstep falloff: wide enough for a
+            // colour range, narrow enough that the red band does not drag orange
+            // (skin) along with it. The shader matches these bands against the
+            // display-referred hue, so the centres are the hues users see.
+            const float t=std::max(0.0f,1.0f-d/32.0f);
+            const float w=t*t*(3.0f-2.0f*t);
             shift+=w*s.mixerHue[std::size_t(b)]*0.3f;
             sat*=1.0f+w*s.mixerSaturation[std::size_t(b)]/100.0f;
             lum*=1.0f+w*s.mixerLuminance[std::size_t(b)]/100.0f;

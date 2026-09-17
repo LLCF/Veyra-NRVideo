@@ -183,6 +183,24 @@ struct GpuTextureHandle {
     }
 };
 
+// Decoded hardware surface for the graph ingress, filled by sources whose
+// decoder owns the surface outside FFmpeg's AVFrame (today: the D3D11VA HEVC
+// path, whose textures are shared to D3D12 as NT handles). The packet never
+// owns the resource or the fence: the decoder keeps both alive for at least as
+// long as the frame it belongs to. The graph issues one GPU-side queue wait on
+// `waitFence`/`waitValue` and then samples the texture by texel index inside
+// the visible extent, so decoder allocation padding is never read.
+struct HardwareSurfaceInput {
+    ID3D12Resource* texture = nullptr;
+    uint32_t subresourceIndex = 0;
+    ID3D12Fence* waitFence = nullptr;
+    uint64_t waitValue = 0;
+    uint32_t textureWidth = 0;        // includes decoder padding
+    uint32_t textureHeight = 0;
+
+    bool present() const { return texture != nullptr; }
+};
+
 struct FramePacket {
     uint64_t sequence = 0;        // monotonic per source (0 reserved as invalid)
     Rational pts;
@@ -195,6 +213,9 @@ struct FramePacket {
     int64_t decodedHost100ns = 0; // actual remote decoder output; same local clock
 
     GpuTextureHandle color;       // canonical linear RGBA16F working texture
+    HardwareSurfaceInput hardwareSurface; // decoded NV12/P010 surface when the
+                                          // codec path does not expose it through
+                                          // the AVFrame (see the struct comment)
 
     bool valid() const {
         return sequence > 0 && color.present() && !pts.isUnknown();
