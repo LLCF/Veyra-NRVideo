@@ -83,6 +83,12 @@ struct ColorParam{
     ColorTarget target;
     float engine::ColorSettings::*field;
     int index;
+    // Value a double-click / Home returns the row to (0 for every slider except
+    // the LUT strength and the grading blend).
+    float neutral=0.0f;
+    // Lightroom-style rail: colour-relevant rows get a gradient track instead of
+    // the plain rail, so the direction of the slider is readable at a glance.
+    int gradient=0; // 0 none, 1 temperature, 2 tint, 3 saturation, 4 hue rainbow
     float value(const engine::ColorSettings& colour)const{
         switch(target){
         case ColorTarget::MixerHue:return colour.mixerHue[std::size_t(index)];
@@ -127,8 +133,27 @@ constexpr int kColorMaxParams=100;
 engine::ColorSettings colourTarget(){
     return (enhancementEnabled?controller->snapshot().desired:configuredSettings).color;
 }
-engine::ColorSettings colourUndo;
-bool colourUndoValid=false;
+// Multi-step undo/redo for the colour page (plan T3: "撤销重做"). The stack
+// holds applied states, so both the one-click reset and every live edit are
+// reversible. Pasting or holding "看原图" never records history of its own.
+std::vector<engine::ColorSettings> colourHistory;
+int colourHistoryIndex=-1;
+engine::ColorSettings colourClipboard;
+bool colourClipboardValid=false;
+engine::ColorSettings colourHoldSaved;
+bool colourHolding=false;
+bool colourHoldHadValue=false;
+void colourHistoryReset(const engine::ColorSettings& current){
+    colourHistory.assign(1,current);
+    colourHistoryIndex=0;
+}
+void colourHistoryPush(const engine::ColorSettings& state){
+    if(colourHistoryIndex>=0&&colourHistoryIndex<int(colourHistory.size())&&colourHistory[size_t(colourHistoryIndex)]==state)return;
+    colourHistory.resize(size_t(colourHistoryIndex)+1);
+    colourHistory.push_back(state);
+    if(colourHistory.size()>32)colourHistory.erase(colourHistory.begin());
+    colourHistoryIndex=int(colourHistory.size())-1;
+}
 int colorPageContentHeight=0;
 bool syncingColour=false;
 // Named colour looks + the .cube list shown in the colour page.
@@ -191,7 +216,8 @@ void layoutColorPage(){
     // Preset toolbar: which look, a name to save under, and the actions.
     place(803,y,200,false);place(804,y,180,false);y+=38;
     place(805,y,32,false);place(806,y,32,false);place(807,y,32,false);place(808,y,32,false);place(809,y,32,false);y+=40;
-    place(801,y,32,false);place(802,y,32,false);y+=40;
+    place(801,y,32,false);place(802,y,32,false);place(824,y,32,false);place(822,y,32,false);place(823,y,32,false);y+=38;
+    place(821,y,32,false);y+=42;
     for(int section=0;section<kColorSections;++section){
         const bool collapsed=(colorFoldMask>>section)&1u;
         place(810+section,y,32,false);
@@ -236,12 +262,16 @@ void syncColorControls(){
     check(820,colour.blackWhite?BST_CHECKED:BST_UNCHECKED);
     syncingColour=false;
 }
-bool applyColour(const engine::ColorSettings& colour,bool autoEnable){
+bool applyColour(const engine::ColorSettings& colour,bool autoEnable,bool record=true){
     auto settings=enhancementEnabled?controller->snapshot().desired:configuredSettings;
     const auto previous=settings.color;
     settings.color=colour;
     if(autoEnable)settings.color.enabled=true;
     if(!(settings.color==previous)&&!submit(settings))return false;
+    if(record&&settings.color.enabled){
+        if(colourHistoryIndex<0)colourHistoryReset(previous);
+        colourHistoryPush(settings.color);
+    }
     return true;
 }
 // Native file pickers for the colour page. They run modal on the UI thread, which
@@ -416,6 +446,96 @@ LRESULT CALLBACK scrollOnly(HWND h,UINT msg,WPARAM wp,LPARAM lp,UINT_PTR id,DWOR
     if(msg==WM_NCDESTROY)RemoveWindowSubclass(h,scrollOnly,id);
     return DefSubclassProc(h,msg,wp,lp);
 }
+// Slider rows (plan section 3.3): double-click or Home returns the row to its
+// neutral value, exactly like Lightroom's double-click reset.
+LRESULT CALLBACK colourSliderKeys(HWND h,UINT msg,WPARAM wp,LPARAM lp,UINT_PTR id,DWORD_PTR){
+    if(msg==WM_PAINT||msg==WM_PRINTCLIENT){
+        // Lightroom-style rail: the colour-relevant rows show a gradient track
+        // (blue->yellow for temperature, green->magenta for tint, blue->green->
+        // red for saturation, a rainbow for the hue rows); everything else keeps
+        // the plain rail with the accent fill up to the thumb.
+        const int index=GetDlgCtrlID(h)-colorSliderId(0);
+        PaintBuffer paint(h,reinterpret_cast<HDC>(wp));
+        HDC dc=paint.dc;RECT r=paint.rect;
+        fillSurface(dc,r,h);
+        const int minimum=int(SendMessageW(h,TBM_GETRANGEMIN,0,0)),maximum=int(SendMessageW(h,TBM_GETRANGEMAX,0,0));
+        const float progress=float(SendMessageW(h,TBM_GETPOS,0,0)-minimum)/std::max(1,maximum-minimum);
+        const int margin=dip(h,8),y=r.bottom/2;
+        RECT rail{margin,y-dip(h,2),r.right-margin,y+dip(h,2)};
+        const int gradient=(index>=0&&index<int(colorParams.size()))?colorParams[size_t(index)].gradient:0;
+        struct Stop{float at;COLORREF colour;};
+        auto stopsFor=[&](int kind,std::vector<Stop>& out){
+            switch(kind){
+            case 1:out={{0,RGB(30,110,205)},{1,RGB(255,206,110)}};break;
+            case 2:out={{0,RGB(52,180,105)},{1,RGB(222,68,158)}};break;
+            case 3:out={{0,RGB(38,86,214)},{0.33f,RGB(58,190,92)},{0.66f,RGB(232,198,58)},{1,RGB(228,86,58)}};break;
+            case 4:out={{0,RGB(226,64,64)},{0.17f,RGB(226,190,58)},{0.33f,RGB(70,200,80)},{0.5f,RGB(58,200,206)},{0.67f,RGB(58,110,226)},{0.83f,RGB(190,64,214)},{1,RGB(226,64,64)}};break;
+            default:break;
+            }
+        };
+        std::vector<Stop> stops;stopsFor(gradient,stops);
+        const int x=margin+int((r.right-margin*2)*progress);
+        if(stops.empty()){
+            RECT fill=rail;fill.right=x;
+            roundRect(dc,rail,line,dip(h,3));
+            if(fill.right>fill.left)roundRect(dc,fill,IsWindowEnabled(h)?accent:secondary,dip(h,3));
+        }else{
+            // Paint the gradient as thin columns; the panel is tiny compared to a
+            // full frame, so this stays a few hundred GDI calls at most.
+            const int width=std::max<int>(1,r.right-margin-rail.left);
+            for(int i=0;i<width;++i){
+                const float t=float(i)/float(std::max<int>(1,width-1));
+                size_t band=0;while(band+2<stops.size()&&t>stops[band+1].at)++band;
+                const auto& a=stops[band];const auto& b=stops[std::min(band+1,stops.size()-1)];
+                const float span=std::max(1e-4f,b.at-a.at),local=std::clamp((t-a.at)/span,0.0f,1.0f);
+                const COLORREF colour=RGB(int(GetRValue(a.colour)+(GetRValue(b.colour)-GetRValue(a.colour))*local),
+                                          int(GetGValue(a.colour)+(GetGValue(b.colour)-GetGValue(a.colour))*local),
+                                          int(GetBValue(a.colour)+(GetBValue(b.colour)-GetBValue(a.colour))*local));
+                RECT column{rail.left+i,rail.top,rail.left+i+1,rail.bottom};
+                HBRUSH brush=CreateSolidBrush(colour);FillRect(dc,&column,brush);DeleteObject(brush);
+            }
+        }
+        const int radius=dip(h,6);
+        RECT ring{x-radius-1,y-radius-1,x+radius+1,y+radius+1};roundRect(dc,ring,RGB(16,17,18),radius+1);
+        RECT dot{x-radius,y-radius,x+radius,y+radius};roundRect(dc,dot,IsWindowEnabled(h)?RGB(244,246,248):line,radius);
+        return 0;
+    }
+    if(msg==WM_LBUTTONDBLCLK||(msg==WM_KEYDOWN&&wp==VK_HOME)){
+        const int index=GetDlgCtrlID(h)-colorSliderId(0);
+        if(index>=0&&index<int(colorParams.size())){
+            auto colour=colourTarget();
+            colorParams[size_t(index)].set(colour,colorParams[size_t(index)].neutral);
+            if(applyColour(colour,true))veyra::log::info("color-ui",std::format("slider reset index={} neutral={:.3f}",index,colorParams[size_t(index)].neutral));
+            syncColorControls();
+        }
+        return 0;
+    }
+    if(msg==WM_NCDESTROY)RemoveWindowSubclass(h,colourSliderKeys,id);
+    return DefSubclassProc(h,msg,wp,lp);
+}
+// "Hold to see the original" (section 9): mouse-down swaps in a neutral grade
+// (which the graph guarantees renders exactly like no grading) and mouse-up puts
+// the user's values back. No rebuild, no history entry.
+LRESULT CALLBACK holdOriginalProc(HWND h,UINT msg,WPARAM wp,LPARAM lp,UINT_PTR id,DWORD_PTR){
+    if(msg==WM_LBUTTONDOWN){
+        colourHoldSaved=colourTarget();colourHoldHadValue=true;colourHolding=true;
+        SetCapture(h);
+        auto neutral=engine::ColorSettings{};neutral.enabled=true;
+        if(applyColour(neutral,false,false))syncColorControls();
+        return 0;
+    }
+    if(msg==WM_LBUTTONUP||msg==WM_CAPTURECHANGED){
+        if(colourHolding){
+            colourHolding=false;
+            if(colourHoldHadValue)applyColour(colourHoldSaved,false,false);
+            syncColorControls();
+        }
+        if(GetCapture()==h)ReleaseCapture();
+        return 0;
+    }
+    if(msg==WM_NCDESTROY)RemoveWindowSubclass(h,holdOriginalProc,id);
+    return DefSubclassProc(h,msg,wp,lp);
+}
 
 void arrange(){
     if(!window||!body)return;RECT r{};GetClientRect(window,&r);int width=MulDiv(r.right,96,veyra::ui::layoutDpi(window)),height=MulDiv(r.bottom,96,veyra::ui::layoutDpi(window));
@@ -454,14 +574,33 @@ LRESULT CALLBACK proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
         message(settings.color.enabled?L"调色已开启：链路在所有效果器之前，会有一点额外开销。":L"调色已关闭：这条链完全不存在，零开销。");
         return 0;
     }
-    if(msg==WM_COMMAND&&(LOWORD(wp)==801||LOWORD(wp)==802)&&HIWORD(wp)==BN_CLICKED){
-        if(LOWORD(wp)==801){
-            colourUndo=colourTarget();colourUndoValid=true;
+    // Reset / undo / redo / copy / paste / hold-to-compare (plan T3 + section 9).
+    // Explicit ids: 820 sits inside this range but is the black & white switch,
+    // which has its own handler below (a range test silently swallowed it and the
+    // following sync reset the checkbox).
+    if(msg==WM_COMMAND&&HIWORD(wp)==BN_CLICKED&&(LOWORD(wp)==801||LOWORD(wp)==802||LOWORD(wp)==822||LOWORD(wp)==823||LOWORD(wp)==824)){
+        const int id=LOWORD(wp);
+        if(id==801){
             auto neutral=engine::ColorSettings{};neutral.enabled=true;
-            if(applyColour(neutral,false))message(L"已还原为中性；可以点“撤销还原”找回上一组数值。");
-        }else if(colourUndoValid){
-            if(applyColour(colourUndo,false))message(L"已恢复还原前的数值。");
-        }else message(L"没有可撤销的还原。");
+            if(applyColour(neutral,false))message(L"已还原为中性；可以点“撤销”逐步找回。");
+        }else if(id==802){
+            if(colourHistoryIndex>0){
+                --colourHistoryIndex;
+                if(applyColour(colourHistory[size_t(colourHistoryIndex)],false,false))message(L"已撤销上一步。");
+            }else message(L"没有可撤销的步骤。");
+        }else if(id==824){
+            if(colourHistoryIndex>=0&&colourHistoryIndex+1<int(colourHistory.size())){
+                ++colourHistoryIndex;
+                if(applyColour(colourHistory[size_t(colourHistoryIndex)],false,false))message(L"已重做。");
+            }else message(L"没有可重做的步骤。");
+        }else if(id==822){
+            colourClipboard=colourTarget();colourClipboardValid=true;
+            message(L"已复制当前色彩设置；可以粘贴到别的预设或下一段素材。");
+        }else if(id==823){
+            if(colourClipboardValid&&applyColour(colourClipboard,true))message(L"已粘贴色彩设置。");
+            else if(!colourClipboardValid)message(L"剪贴板里还没有色彩设置，先点“复制”。");
+            else message(L"设置正在切换，请稍后再试。");
+        }
         syncColorControls();arrange();return 0;
     }
     if(msg==WM_COMMAND&&LOWORD(wp)==820&&HIWORD(wp)==BN_CLICKED){
@@ -640,7 +779,9 @@ case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.
             {2,L"阴影范围分割",&engine::ColorSettings::splitShadows,-100,100},
         };
         for(const auto& definition:definitions)
-            colorParams.push_back({definition.section,definition.label,definition.min,definition.max,ColorTarget::Scalar,definition.field,0});
+            colorParams.push_back({definition.section,definition.label,definition.min,definition.max,ColorTarget::Scalar,definition.field,0,0.0f,
+                _wcsicmp(definition.label,L"色温（相对）")==0?1:_wcsicmp(definition.label,L"色调")==0?2:
+                (_wcsicmp(definition.label,L"饱和度")==0||_wcsicmp(definition.label,L"自然饱和度")==0)?3:0});
         // Composite labels are built once; reserve keeps the c_str() pointers
         // stable for the lifetime of the panel.
         static std::vector<std::wstring> colorLabelStorage;
@@ -651,7 +792,7 @@ case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.
         {
             static const wchar_t* bands[engine::kColorMixerBands]={L"红色",L"橙色",L"黄色",L"绿色",L"浅绿色",L"蓝色",L"紫色",L"洋红"};
             for(int band=0;band<engine::kColorMixerBands;++band){
-                colorParams.push_back({3,composed(std::wstring(bands[band])+L" · 色相"),-100,100,ColorTarget::MixerHue,nullptr,band});
+                colorParams.push_back({3,composed(std::wstring(bands[band])+L" · 色相"),-100,100,ColorTarget::MixerHue,nullptr,band,0.0f,4});
                 colorParams.push_back({3,composed(std::wstring(bands[band])+L" · 饱和度"),-100,100,ColorTarget::MixerSaturation,nullptr,band});
                 colorParams.push_back({3,composed(std::wstring(bands[band])+L" · 明亮度"),-100,100,ColorTarget::MixerLuminance,nullptr,band});
             }
@@ -663,11 +804,11 @@ case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.
         {
             static const wchar_t* zones[engine::kColorGradingZones]={L"阴影",L"中间调",L"高光",L"全局"};
             for(int zone=0;zone<engine::kColorGradingZones;++zone){
-                colorParams.push_back({4,composed(std::wstring(zones[zone])+L" · 色相"),0,360,ColorTarget::GradingHue,nullptr,zone});
+                colorParams.push_back({4,composed(std::wstring(zones[zone])+L" · 色相"),0,360,ColorTarget::GradingHue,nullptr,zone,0.0f,4});
                 colorParams.push_back({4,composed(std::wstring(zones[zone])+L" · 饱和度"),0,100,ColorTarget::GradingSaturation,nullptr,zone});
                 colorParams.push_back({4,composed(std::wstring(zones[zone])+L" · 明亮度"),-100,100,ColorTarget::GradingLuminance,nullptr,zone});
             }
-            colorParams.push_back({4,L"混合",0,100,ColorTarget::Scalar,&engine::ColorSettings::gradingBlending,0});
+            colorParams.push_back({4,L"混合",0,100,ColorTarget::Scalar,&engine::ColorSettings::gradingBlending,0,50.0f});
             colorParams.push_back({4,L"平衡",-100,100,ColorTarget::Scalar,&engine::ColorSettings::gradingBalance,0});
         }
         // Calibration: shadow tint plus the three primaries.
@@ -682,8 +823,19 @@ case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.
         // LUT: the .cube selection, its strength and the input-space choice. The
         // strength row is a normal parameter; the two combos are placed by
         // layoutColorPage().
-        colorParams.push_back({6,L"LUT 强度",0,100,ColorTarget::Scalar,&engine::ColorSettings::lutStrength,0});
-        check(820,BST_UNCHECKED);add(L"BUTTON",L"黑白混色器（把画面转成黑白）",820,BS_AUTOCHECKBOX|WS_TABSTOP,3,12,0,-1,28);
+        colorParams.push_back({6,L"LUT 强度",0,100,ColorTarget::Scalar,&engine::ColorSettings::lutStrength,0,100.0f});
+        // Undo/redo/copy/paste/hold-to-compare row (plan T3 + section 9).
+        button(L"撤销",802,2,12,0,72);button(L"重做",824,2,12,0,72);button(L"复制",822,2,12,0,72);button(L"粘贴",823,2,12,0,72);
+        button(L"按住看原图",821,2,12,0,140);
+        SetWindowSubclass(item(821),holdOriginalProc,970,0);
+        SetPropW(item(802),L"veyra.tip",HANDLE(L"撤销上一步色彩改动（最多 32 步）。"));
+        SetPropW(item(824),L"veyra.tip",HANDLE(L"重做刚刚撤销的改动。"));
+        SetPropW(item(822),L"veyra.tip",HANDLE(L"复制当前色彩设置，用来粘贴到别的预设或下一段素材。"));
+        SetPropW(item(823),L"veyra.tip",HANDLE(L"粘贴刚才复制的色彩设置。"));
+        SetPropW(item(821),L"veyra.tip",HANDLE(L"按住不放：临时显示没有调色的原图；松开恢复。用中性调色实现，不重建管线。"));
+        // group 2 = the colour page; 3 was the section index, not the page, and a
+        // control on another page is hidden (and therefore ignores BM_CLICK).
+        check(820,BST_UNCHECKED);add(L"BUTTON",L"黑白混色器（把画面转成黑白）",820,BS_AUTOCHECKBOX|WS_TABSTOP,2,12,0,-1,28);
         SetPropW(item(820),L"veyra.tip",HANDLE(L"打开后画面变成黑白，下面八个“黑白”滑块控制各色系对应的灰阶明暗（和 Lightroom 的黑白混色器同一套语义）。"));
         for(int section=0;section<kColorSections;++section)add(L"BUTTON",L"",810+section,BS_PUSHBUTTON|WS_TABSTOP,2,12,12,-1,32);
         // Preset toolbar.
@@ -705,8 +857,12 @@ case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.
             const auto& param=colorParams[i];
             add(L"STATIC",param.label,colorLabelId(int(i)),0,2,12,0,180,24);
             add(L"EDIT",L"0",colorEditId(int(i)),ES_AUTOHSCROLL|ES_RIGHT|WS_TABSTOP,2,202,0,-1,26);
+            // Lightroom prints the value as text rather than as a boxed field.
+            SetPropW(item(colorEditId(int(i))),L"veyra.flat",HANDLE(1));
+            surface(item(colorEditId(int(i))),panel);
             auto slider=add(TRACKBAR_CLASSW,L"",colorSliderId(int(i)),TBS_HORZ|TBS_NOTICKS|WS_TABSTOP,2,12,0,-1,16);
             SendMessageW(slider,TBM_SETRANGE,TRUE,MAKELPARAM(int(std::lround(param.min*100.0f)),int(std::lround(param.max*100.0f))));
+            SetWindowSubclass(slider,colourSliderKeys,960+i,0);
             SetPropW(item(colorEditId(int(i))),L"veyra.tip",HANDLE(L"可以直接输入数字，回车生效；拖动滑块即时生效。"));
         }
     }
@@ -797,7 +953,17 @@ case WM_COMMAND:{const int id=LOWORD(wp);if(!populating&&((id>=202&&id<=205||id=
 case WM_HSCROLL:{int id=GetDlgCtrlID(reinterpret_cast<HWND>(lp));if(id>=600&&id<612){int index=id-600;float v=float(SendMessageW(reinterpret_cast<HWND>(lp),TBM_GETPOS,0,0))/(index>=4&&index<=6?1:100);if(index==3&&v<0)v=-1;std::wostringstream o;o<<std::setprecision(4)<<v;putText(100+index,o.str().c_str());}
     else if(id>=colorSliderId(0)&&id<colorSliderId(0)+kColorMaxParams){
         const int index=id-colorSliderId(0);
-        if(index<int(colorParams.size()))colourFieldEdited(index,float(SendMessageW(reinterpret_cast<HWND>(lp),TBM_GETPOS,0,0))/100.0f);
+        if(index<int(colorParams.size())){
+            float value=float(SendMessageW(reinterpret_cast<HWND>(lp),TBM_GETPOS,0,0))/100.0f;
+            // Alt+drag = fine adjust (plan section 3.3): the thumb may jump, but
+            // the applied value only moves a tenth of the way towards it, and the
+            // sync below pulls the thumb back so repeated Alt-drags stay fine.
+            if((GetKeyState(VK_MENU)&0x8000)!=0){
+                const float current=colorParams[size_t(index)].value(colourTarget());
+                value=current+(value-current)*0.1f;
+            }
+            colourFieldEdited(index,value);
+        }
     }
     else if(id==622){// Feather slider: the edit box owns the value, its EN_CHANGE applies it.
         const int value=std::clamp(int(SendMessageW(reinterpret_cast<HWND>(lp),TBM_GETPOS,0,0)),0,64);putText(222,std::to_wstring(value).c_str());}
