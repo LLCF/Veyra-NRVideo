@@ -21,8 +21,8 @@
 **验证**：`veyra_color_grade_tests`、`veyra_color_grade_gpu_tests`、`veyra_color_look_tests`、
 `veyra_color_lut_tests`、`veyra_hdr_color_tests`、`veyra_ui_contract_tests`、
 `veyra_repair_preset_tests`（含 v18→v19 迁移与损坏保护）、`veyra_repair_contract_tests 191/0` 全 exit 0；
-`--smoke-color` exit 0；`scripts/gates/delivery.ps1` → **DELIVERY SHORT GATE PASS**
-（`logs/delivery/4651417ba2ca4c35b0eceb894059d936/result.json`）。
+`--smoke-color` exit 0；`scripts/gates/delivery.ps1`（UI 全部五批完成后的最终代码）→ **DELIVERY SHORT GATE PASS**
+（`logs/delivery/e41b66176a824c2990bbe28f845cb369/result.json`）。
 真机截图：`logs/color/ui-preview-eyes2.png`（分组眼睛 + 曲线通道按钮同屏）。
 
 **至此 UI 四批（渐变轨道/四色轮/混色器色点条/曲线编辑器）+ 眼睛全部落地**；

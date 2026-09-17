@@ -127,8 +127,8 @@ GPU：`bypassing the 亮 group renders exactly like the ungraded reference`（�
 
 ## 6. 回归与闸门
 
-- `scripts/gates/delivery.ps1`（最终代码上重跑）→ **DELIVERY SHORT GATE PASS**
-  （`logs/delivery/fbb42f3f08e8482a96c817d3883569e0/result.json`，含 `color-page`、`player-sync`、
+- `scripts/gates/delivery.ps1`（UI 返工后的最终代码上再次重跑）→ **DELIVERY SHORT GATE PASS**
+  （`logs/delivery/e41b66176a824c2990bbe28f845cb369/result.json`，含 `color-page`、`player-sync`、
   `controls` 等用例）；
 - 52 个测试程序逐个单跑：**45 个 exit 0**；7 个未执行，原因是需要真实硬件/素材或运行库放置策略
   （`capture_tests` 采集卡、`live_presentation_tests`/`ps5_*`/`hw_import_image` PS5 素材、
