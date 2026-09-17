@@ -1,5 +1,49 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-17 1.4.0：移除 FSR 补帧入口 + 版本号 + 打包 + 分支审计（未推送/未发布）
+
+**产品的改动（仅这一处）**：把 **AMD FSR 补帧的界面入口删掉**（用户：切回 DLSS 容易卡住、效果一般）。
+帧生成下拉现在只有 `DLSS 帧生成` / `Intel XeSS · 实验显示补帧`；**引擎后端原样保留**（`--fg-fsr`、
+探针、能力门控都还在）。旧 `last-applied` 或旧预设里若存了 FSR：
+设置面板打开时会**自动切回 DLSS**、状态栏给提示、日志写
+`AMD FSR frame generation is no longer selectable in the UI; falling back to DLSS`——
+不允许出现"界面改了、后端还挂在 FSR、用户没法切回去"的状态。帮助文本（id 208）同步改写。
+FSR **超分**（id 207）是另一个功能，保留不动。
+
+**版本号**：`project(veyra VERSION 1.4.0)` + 显示串 `1.4.0`。顺带修了一个打包级隐患：
+`VEYRA_DISPLAY_VERSION` 是 CMake **cache** 变量，改 CMakeLists 里的默认值不会覆盖已有 cache →
+1.4.0 的 EXE 会继续被盖上 `1.3.2beta4` 的版本戳。现在加了"cache 与项目版本不一致就强制对齐"的检查
+（显式传入的、以项目版本开头的标签如 `1.4.0beta` 仍然被尊重）。实测 `Veyra.exe` ProductVersion=1.4.0。
+
+**发布材料**：新增 `docs/RELEASE_NOTES_1.4.0.md`（1.3.0→现在的完整变更统计，含本轮修掉的 12 个真实缺陷、
+导出/MKV/音频/采集/帧生成各线，以及"未验证边界"）、`docs/RUNTIME_COMPONENTS_1.4.0.md`（组件身份与 1.3.2 一致，
+说明 FSR 补帧入口已移除但组件保留）、`docs/REMOTEPLAY_BUILD_1.4.0.md`。
+
+**打包与验证**（`scripts/package-portable.ps1`，输出 `E:\App`）：
+
+- 包：`E:\App\Veyra-1.4.0-win64-portable`（110 文件 / 0.67 GB 解压）+
+  `Veyra-1.4.0-win64-portable.zip` 470,005,039 字节，
+  SHA256 `ED6A604542895FA740608A77434B73416BDF66B7846811111391E22329CF87B6`；
+- `Veyra.exe` ProductVersion/FileVersion = **1.4.0**；
+- `scripts/acceptance/portable-smoke.ps1 -Package E:\App\Veyra-1.4.0-win64-portable …` → **PASS**；
+- 打包前：全量编译 **197/197** 链接成功、`delivery.ps1` **DELIVERY SHORT GATE PASS**
+  （`logs/delivery/68236852305a42a3940194ffa548af82/result.json`）、
+  `veyra_repair_contract_tests` 197/0、`veyra_avermedia_switch_tests` PASS、
+  `--smoke-color` exit 0。
+
+**分支审计（用户要求：别漏掉没合并的修复）**：`git branch --no-merged main` 现在只剩两个，
+且都**不是修复**：
+
+| 分支 | 独有提交 | 结论 |
+| --- | --- | --- |
+| `codex/github-source-archive` | `2d2a3a6 Archive current Veyra source and document setup`、`8556fc7 Initial commit` | 独立血统的源码归档分支，不是功能/修复 |
+| `codex/smooth-motion-experiment` | `27c17eb Add isolated manual Smooth Motion experiment with internal FG exclusion` | 已被 2026-09-14 用户决定取代（Smooth Motion 交给 NVIDIA App、不做互斥/驱动配置管理），**有意不合并** |
+
+所有修过东西的分支（色彩 P1、AVerMedia 5.1、导出/MKV、采集链路 N1–N4、MPEG 链、framegen/FSR/Dolby、
+1.3.0/1.3.1/1.3.2 发布线）都已在 main 里；三个 worktree 全部干净。
+
+**未推送、未上传 Release、未替换旧便携包**——等用户自己的测试结果。
+
 ## 2026-09-17 合并到 main：色彩页 P1 + AVerMedia 5.1 + 导出/MKV 修复（本轮未推送）
 
 按用户指令把三条线合并进 main，**分支全部保留**，合并前存了 checkpoint tag：
