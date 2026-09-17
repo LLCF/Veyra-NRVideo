@@ -84,6 +84,7 @@ float ColorGradeTables::decodeLog(float encoded){
     return kMidGrey*std::exp2((std::clamp(encoded,0.0f,1.0f)-0.5f)*kLogStops);
 }
 
+float ColorGradeTables::curveValue(const engine::ColorCurve& curve,float x){return pointCurve(curve,std::clamp(x,0.0f,1.0f));}
 ColorGradeTables ColorGradeTables::bake(const engine::ColorSettings& s){
     ColorGradeTables out;
     out.exposure=s.exposure;

@@ -26,4 +26,10 @@ void settingsColorScrollToTest(int id);
 void settingsColorMixerModeForTest(int mode);
 void settingsColorBandForTest(int band);
 int colourBandsControlId();
+int colourCurveCanvasControlId();
+// Client point on the curve canvas for a normalised (input, output) pair.
+bool settingsCurveTestPoint(float x,float y,POINT& out);
+// Expand/collapse one colour section (acceptance code needs the target section
+// unfolded regardless of what the previous run persisted).
+void settingsColorSectionForTest(int section,bool expanded);
 }

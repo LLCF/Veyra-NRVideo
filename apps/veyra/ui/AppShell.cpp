@@ -874,9 +874,42 @@ else if(colorStep==64){
     const auto& grading=colourSnapshot.desired.color.grading[0];
     const bool reset=grading.hue==0.0f&&grading.saturation==0.0f&&grading.luminance==0.0f;
     veyra::log::info("color-ui-test",std::format("colour wheel double-click reset pass={}",reset));
-    colorStep=reset?65:-1;
+    colorStep=reset?66:-1;
 }
-else if(colorStep==65){
+// Tone curve (professional layout): pick the red channel, click the grid to add a
+// control point, then flatten the channel again.
+else if(colorStep==66){
+    veyra::ui::settingsColorSectionForTest(2,true);
+    if(auto tab=colourControl(852))SendMessageW(tab,BM_CLICK,0,0);
+    veyra::ui::settingsColorScrollToTest(veyra::ui::colourCurveCanvasControlId());
+    POINT point{};
+    const auto canvasControl=colourControl(veyra::ui::colourCurveCanvasControlId());
+    if(canvasControl&&veyra::ui::settingsCurveTestPoint(0.5f,0.75f,point)){
+        SendMessageW(canvasControl,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(point.x,point.y));
+        SendMessageW(canvasControl,WM_LBUTTONUP,0,MAKELPARAM(point.x,point.y));
+        colorStep=67;
+    }else{
+        veyra::log::info("color-ui-test","curve canvas missing");
+        colorStep=-1;
+    }
+}
+else if(colorStep==67){
+    const auto& curve=colourSnapshot.desired.color.curves[1];
+    const bool added=curve.count==3&&std::abs(curve.points[1].x-0.5f)<0.05f&&std::abs(curve.points[1].y-0.75f)<0.05f;
+    veyra::log::info("color-ui-test",std::format("curve point added count={} x={:.2f} y={:.2f} pass={}",curve.count,curve.points[1].x,curve.points[1].y,added));
+    if(auto flatten=colourControl(855))SendMessageW(flatten,BM_CLICK,0,0);
+    colorStep=added?68:-1;
+}
+else if(colorStep==68){
+    const auto& curve=colourSnapshot.desired.color.curves[1];
+    const bool flattened=curve.identity();
+    veyra::log::info("color-ui-test",std::format("curve flatten restored the identity ramp pass={} count={}",flattened,curve.count));
+    colorStep=flattened?69:-1;
+}
+// Hold the curve view steady for a moment: acceptance screenshots and a human
+// can actually see the editor before the fold checks scroll the page.
+else if(colorStep==69&&elapsed>9000){colorStep=70;}
+else if(colorStep==70){
     auto edit=colourControl(1300);
     const bool beforeVisible=edit&&IsWindowVisible(edit);
     const bool beforeMask=(preferences.load().colourFoldMask&1u)!=0u;
