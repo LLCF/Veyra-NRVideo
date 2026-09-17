@@ -45,6 +45,56 @@ int wmain() {
     check(!AverMediaAudioSwitch::isAverMediaDevicePath(L"{0.0.1.00000000}.{1234}"),
           "a WASAPI endpoint id is rejected");
 
+    // Device-tree fallback. The card's DirectShow audio moniker may carry no
+    // DevicePath at all (exactly what the 2026-09-17 field log showed), so the
+    // switch has to be able to learn vid/pid from Windows itself.
+    {
+        const auto avermedia = AverMediaAudioSwitch::findUsbFunctions(L"vid_07ca");
+        std::printf("note vid_07ca functions on this machine: %zu\n", avermedia.size());
+        bool allMatch = true;
+        for (const auto& function : avermedia) {
+            std::wstring id = function.instanceId;
+            for (wchar_t& c : id) c = wchar_t(towlower(c));
+            if (id.find(L"vid_07ca") == std::wstring::npos) allMatch = false;
+        }
+        check(allMatch, "every returned function really belongs to the requested vendor");
+
+        // Any USB device proves the enumeration itself works on this host; a
+        // machine with no USB at all would make this vacuous, not wrong.
+        const auto anyUsb = AverMediaAudioSwitch::findUsbFunctions(L"vid_");
+        std::printf("note vid_ devices on this machine: %zu\n", anyUsb.size());
+        check(!anyUsb.empty(), "device-tree enumeration finds USB functions");
+        size_t withInterface = 0, withName = 0;
+        bool pathsCarryToken = true;
+        for (const auto& function : anyUsb) {
+            if (!function.interfacePath.empty()) ++withInterface;
+            if (!function.friendlyName.empty()) ++withName;
+            std::wstring path = function.interfacePath;
+            for (wchar_t& c : path) c = wchar_t(towlower(c));
+            if (path.find(L"vid_") == std::wstring::npos) pathsCarryToken = false;
+        }
+        std::printf("note of those: interfacePath=%zu friendlyName=%zu\n", withInterface, withName);
+        // The vendor component parses the literal lower-case tokens "vid_" and
+        // "&pid_" out of whatever path we hand it, so that property is what the
+        // fallback has to guarantee - not that a real interface path exists.
+        check(pathsCarryToken, "every path handed to the vendor carries the vendor token");
+        check(withInterface > 0, "at least one candidate resolves to a real interface path");
+        check(withName > 0, "device friendly names are readable");
+    }
+
+    {
+        std::vector<veyra::source::AverMediaUsbFunction> none;
+        check(AverMediaAudioSwitch::pickAudioFunction(none) == nullptr, "no candidates -> no audio function");
+        std::vector<veyra::source::AverMediaUsbFunction> single{{L"USB\\\\VID_07CA&PID_2553\\\\x", L"USB3 Video", L"\\\\?\\\\usb#vid_07ca&pid_2553#x#{g}"}};
+        check(AverMediaAudioSwitch::pickAudioFunction(single) == &single.front(), "a single candidate is used");
+        std::vector<veyra::source::AverMediaUsbFunction> composite{
+            {L"USB\\\\VID_07CA&PID_2553&MI_00\\\\x", L"USB3 Video", L"\\\\?\\\\usb#vid_07ca&pid_2553&mi_00#x#{g}"},
+            {L"USB\\\\VID_07CA&PID_2553&MI_02\\\\x", L"USB3 Digital Audio", L"\\\\?\\\\usb#vid_07ca&pid_2553&mi_02#x#{g}"}};
+        const auto* picked = AverMediaAudioSwitch::pickAudioFunction(composite);
+        check(picked != nullptr && picked->instanceId.find(L"MI_02") != std::wstring::npos,
+              "the composite audio function is preferred over the camera functions");
+    }
+
     // Component discovery must either find a usable folder or report nothing at
     // all; a half-matched folder would hand garbage to LoadLibrary later.
     const std::wstring root = AverMediaAudioSwitch::locateComponentRoot();

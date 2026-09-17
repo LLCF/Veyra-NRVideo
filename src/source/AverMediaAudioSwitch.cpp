@@ -3,14 +3,55 @@
 #include "veyra/Log.h"
 
 #include <windows.h>
+#include <setupapi.h>
 
 #include <cstdint>
 #include <format>
 #include <string>
 #include <vector>
 
+#pragma comment(lib, "setupapi.lib")
+
 namespace veyra::source {
 namespace {
+
+bool containsCaseInsensitive(std::wstring_view haystack, std::wstring_view needle) {
+    if (needle.empty() || haystack.size() < needle.size()) return false;
+    for (size_t start = 0; start + needle.size() <= haystack.size(); ++start) {
+        bool match = true;
+        for (size_t i = 0; i < needle.size(); ++i) {
+            if (towlower(haystack[start + i]) != towlower(needle[i])) { match = false; break; }
+        }
+        if (match) return true;
+    }
+    return false;
+}
+
+std::wstring deviceProperty(HDEVINFO set, SP_DEVINFO_DATA* info, DWORD property) {
+    wchar_t buffer[1024] = {};
+    DWORD type = 0;
+    DWORD bytes = 0;
+    if (!SetupDiGetDeviceRegistryPropertyW(set, info, property, &type, reinterpret_cast<BYTE*>(buffer), sizeof(buffer), &bytes)) return {};
+    if (type != REG_SZ && type != REG_EXPAND_SZ) return {};
+    return std::wstring(buffer, bytes / sizeof(wchar_t) > 0 ? (bytes / sizeof(wchar_t)) - 1 : 0);
+}
+
+// Device interface classes that carry the real "\\?\usb#vid_...#{guid}" path a
+// USB audio function is reached by. Declared locally so this translation unit
+// does not need INITGUID (which would leak definitions into other TUs).
+constexpr GUID kCategoryAudio = {0x6994AD04, 0x93EF, 0x11D0, {0xA3, 0xCC, 0x00, 0xA0, 0xC9, 0x22, 0x31, 0x96}};
+constexpr GUID kCategoryCapture = {0x65E8773D, 0x8F56, 0x11D0, {0xA3, 0xB9, 0x00, 0xA0, 0xC9, 0x22, 0x31, 0x96}};
+
+// Lower-case display-name form the vendor parser expects: it looks for the
+// literal tokens "vid_" and "&pid_", so an upper-case instance id would never
+// match. Used only when no real interface path could be resolved.
+std::wstring syntheticInterfacePath(const std::wstring& instanceId) {
+    std::wstring lowered;
+    lowered.reserve(instanceId.size() + 8);
+    for (wchar_t character : instanceId) lowered.push_back(wchar_t(towlower(character)));
+    for (wchar_t& character : lowered) if (character == L'\\') character = L'#';
+    return L"\\\\?\\" + lowered;
+}
 
 // ---------------------------------------------------------------------------
 // ABI mirror of the component's public headers (GPLv2, shipped in
@@ -299,6 +340,104 @@ bool AverMediaAudioSwitch::isAverMediaDevicePath(std::wstring_view devicePath) {
     std::wstring lowered(devicePath);
     for (wchar_t& character : lowered) character = wchar_t(towlower(character));
     return lowered.find(L"vid_07ca") != std::wstring::npos;
+}
+
+std::vector<AverMediaUsbFunction> AverMediaAudioSwitch::findUsbFunctions(std::wstring_view vendorToken) {
+    std::vector<AverMediaUsbFunction> result;
+    if (vendorToken.empty()) return result;
+    // Preferred route: enumerate the device interface classes directly. This is
+    // what yields the "\\?\usb#vid_...#{guid}" strings the vendor component
+    // parses; enumerating interfaces of a class-less device set returns none.
+    for (const GUID* category : {&kCategoryAudio, &kCategoryCapture}) {
+        HDEVINFO interfaces = SetupDiGetClassDevsW(category, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+        if (interfaces == INVALID_HANDLE_VALUE) continue;
+        for (DWORD index = 0;; ++index) {
+            SP_DEVICE_INTERFACE_DATA interfaceData{};
+            interfaceData.cbSize = sizeof(interfaceData);
+            if (!SetupDiEnumDeviceInterfaces(interfaces, nullptr, category, index, &interfaceData)) break;
+            DWORD required = 0;
+            SetupDiGetDeviceInterfaceDetailW(interfaces, &interfaceData, nullptr, 0, &required, nullptr);
+            if (required == 0) continue;
+            std::vector<BYTE> buffer(required);
+            auto* detail = reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_W*>(buffer.data());
+            detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
+            SP_DEVINFO_DATA info{};
+            info.cbSize = sizeof(info);
+            if (!SetupDiGetDeviceInterfaceDetailW(interfaces, &interfaceData, detail, required, nullptr, &info)) continue;
+            wchar_t instance[512] = {};
+            if (!SetupDiGetDeviceInstanceIdW(interfaces, &info, instance, 512, nullptr)) continue;
+            if (!containsCaseInsensitive(instance, vendorToken)) continue;
+            bool duplicate = false;
+            for (const auto& existing : result) {
+                if (_wcsicmp(existing.instanceId.c_str(), instance) == 0) { duplicate = true; break; }
+            }
+            if (duplicate) continue;
+            AverMediaUsbFunction function;
+            function.instanceId = instance;
+            function.friendlyName = deviceProperty(interfaces, &info, SPDRP_FRIENDLYNAME);
+            function.interfacePath = detail->DevicePath;
+            result.push_back(std::move(function));
+            if (result.size() > 64) break;  // sanity bound
+        }
+        SetupDiDestroyDeviceInfoList(interfaces);
+    }
+    if (!result.empty()) return result;
+    // Fallback: class-less enumeration, which still gives the instance id (that
+    // alone carries vid_/pid_ once lower-cased).
+    HDEVINFO set = SetupDiGetClassDevsW(nullptr, nullptr, nullptr, DIGCF_ALLCLASSES | DIGCF_PRESENT);
+    if (set == INVALID_HANDLE_VALUE) return result;
+    for (DWORD index = 0;; ++index) {
+        SP_DEVINFO_DATA info{};
+        info.cbSize = sizeof(info);
+        if (!SetupDiEnumDeviceInfo(set, index, &info)) break;
+        wchar_t instance[512] = {};
+        if (!SetupDiGetDeviceInstanceIdW(set, &info, instance, 512, nullptr)) continue;
+        if (!containsCaseInsensitive(instance, vendorToken)) continue;
+        AverMediaUsbFunction function;
+        function.instanceId = instance;
+        function.friendlyName = deviceProperty(set, &info, SPDRP_FRIENDLYNAME);
+        // No interface class matched: give the vendor parser the lower-cased
+        // display-name shape anyway, because it only needs vid_/pid_ from here
+        // and re-enumerates the device tree itself afterwards.
+        function.interfacePath = syntheticInterfacePath(instance);
+        // First interface of this function is enough: the vendor component
+        // re-enumerates the device tree itself once it has vid/pid, and it only
+        // needs one path that carries them.
+        for (DWORD interfaceIndex = 0;; ++interfaceIndex) {
+            SP_DEVICE_INTERFACE_DATA interfaceData{};
+            interfaceData.cbSize = sizeof(interfaceData);
+            if (!SetupDiEnumDeviceInterfaces(set, &info, nullptr, interfaceIndex, &interfaceData)) break;
+            DWORD required = 0;
+            SetupDiGetDeviceInterfaceDetailW(set, &interfaceData, nullptr, 0, &required, nullptr);
+            if (required == 0) continue;
+            std::vector<BYTE> buffer(required);
+            auto* detail = reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_W*>(buffer.data());
+            detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
+            if (SetupDiGetDeviceInterfaceDetailW(set, &interfaceData, detail, required, nullptr, nullptr)) {
+                function.interfacePath = detail->DevicePath;
+                break;
+            }
+        }
+        result.push_back(std::move(function));
+    }
+    SetupDiDestroyDeviceInfoList(set);
+    return result;
+}
+
+const AverMediaUsbFunction* AverMediaAudioSwitch::pickAudioFunction(const std::vector<AverMediaUsbFunction>& functions) {
+    // A UVC/UAC composite puts the audio streaming interface on a later
+    // function (mi_00/mi_01 are the camera); prefer that, then an audio-looking
+    // friendly name, then the only candidate.
+    for (const auto& function : functions) {
+        if (containsCaseInsensitive(function.instanceId, L"mi_02")) return &function;
+    }
+    for (const auto& function : functions) {
+        if (containsCaseInsensitive(function.interfacePath, L"audio")) return &function;
+    }
+    for (const auto& function : functions) {
+        if (containsCaseInsensitive(function.friendlyName, L"audio")) return &function;
+    }
+    return functions.size() == 1 ? &functions.front() : nullptr;
 }
 
 bool AverMediaAudioSwitch::apply(const std::wstring& deviceName, const std::wstring& devicePath) {

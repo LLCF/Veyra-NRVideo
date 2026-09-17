@@ -235,6 +235,11 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
     // card downmixes to real 2.0 when passthrough is not armed - only the bytes
     // tell the two apart. Observational: it never changes what is played.
     std::shared_ptr<sink::Iec61937Probe> carrierProbe;
+    // Friendly name of the DirectShow audio device being connected, resolved
+    // before the graph is built. The log has to carry it: the stored path may
+    // be an opaque class-manager display name, which made the 2026-09-17 field
+    // log impossible to interpret.
+    std::wstring pendingAudioName;
     // AVerMedia GC553G2 / GC553PRO / GC575 only forward compressed HDMI audio
     // after the installed vendor component arms non-PCM passthrough. The
     // component is loaded from the user's own OBS installation (never
@@ -633,8 +638,14 @@ bool CaptureCardSource::configure(const SourceOpenDesc& desc){close();p_->lastAu
             // The AVerMedia switch is keyed on the device path, and it has to
             // happen first so media-type enumeration sees the post-switch state.
             std::wstring audioName,audioPath;
-            if(selection.stable)audioPath=selection.audioPath;
-            else{auto list=monikers(true);if(size_t(audio)<list.size()){audioName=propertyString(list[size_t(audio)].Get(),L"FriendlyName");audioPath=monikerPath(list[size_t(audio)].Get());}}
+            auto list=monikers(true);
+            for(size_t i=0;i<list.size();++i){
+                const std::wstring path=monikerPath(list[i].Get());
+                const bool wanted=selection.stable?(path==selection.audioPath):(i==size_t(audio));
+                if(!wanted)continue;
+                audioName=propertyString(list[i].Get(),L"FriendlyName");audioPath=path;break;
+            }
+            p.pendingAudioName=audioName;
             if(!audioPath.empty())applyVendorAudioSwitch(audioName,audioPath);
         }
         const bool audioReady=connectDirectShowAudio(desc);
@@ -686,19 +697,38 @@ bool CaptureCardSource::configure(const SourceOpenDesc& desc){close();p_->lastAu
 }
 bool CaptureCardSource::applyVendorAudioSwitch(const std::wstring& audioName,const std::wstring& audioPath){
     auto& p=*p_;
-    if(!AverMediaAudioSwitch::isAverMediaDevicePath(audioPath)){
-        log::info("capture-audio-vendor",std::format("skipped: not an AVerMedia capture device (device=\"{}\")",narrowForLog(audioName)));
-        return false;
+    std::wstring name=audioName,path=audioPath;
+    if(!AverMediaAudioSwitch::isAverMediaDevicePath(path)){
+        // These cards' DirectShow audio monikers often carry no DevicePath, so
+        // the stored path is the class-manager display name
+        // ("@device:cm:{...}\wave:{...}") and contains no vid_/pid_ - exactly
+        // the tokens the vendor component parses. Ask the device tree instead:
+        // the USB functions are still there.
+        const auto functions=AverMediaAudioSwitch::findUsbFunctions(L"vid_07ca");
+        for(const auto& function:functions)
+            log::info("capture-audio-vendor",std::format("device tree: instance=\"{}\" friendly=\"{}\" interfacePath={}",
+                narrowForLog(function.instanceId),narrowForLog(function.friendlyName),
+                function.interfacePath.empty()?std::string("<none>"):pathTag(function.interfacePath)));
+        const auto* chosen=AverMediaAudioSwitch::pickAudioFunction(functions);
+        if(chosen==nullptr){
+            log::info("capture-audio-vendor",std::format("skipped: no AVerMedia USB audio function present (selected device=\"{}\" directShowPath={})",
+                narrowForLog(name),pathTag(path)));
+            return false;
+        }
+        if(name.empty())name=chosen->friendlyName;
+        path=chosen->interfacePath.empty()?chosen->instanceId:chosen->interfacePath;
+        log::info("capture-audio-vendor",std::format("using device-tree audio function instance=\"{}\" for selected device=\"{}\"",
+            narrowForLog(chosen->instanceId),narrowForLog(name)));
     }
-    const bool applied=p.averMediaSwitch.apply(audioName,audioPath);
+    const bool applied=p.averMediaSwitch.apply(name,path);
     const auto& status=p.averMediaSwitch.status();
     if(applied){
         log::info("capture-audio-vendor",std::format("non-PCM switch armed device=\"{}\" component=\"{}\" chipFormat={} nonPcmNow={} monitoring={}",
-            narrowForLog(audioName),narrowForLog(status.componentRoot),status.chipAudioFormat,status.nonPcmActive?1:0,
+            narrowForLog(name),narrowForLog(status.componentRoot),status.chipAudioFormat,status.nonPcmActive?1:0,
             p.averMediaSwitch.active()?1:0));
     }else{
         log::warn("capture-audio-vendor",std::format("non-PCM switch unavailable device=\"{}\" componentFound={} dllsLoaded={} detail=\"{}\"",
-            narrowForLog(audioName),status.componentFound?1:0,status.dllsLoaded?1:0,status.detail));
+            narrowForLog(name),status.componentFound?1:0,status.dllsLoaded?1:0,status.detail));
     }
     return applied;
 }
@@ -716,7 +746,8 @@ bool CaptureCardSource::connectDirectShowAudio(const SourceOpenDesc& desc){
         if(!bound){log::warn("capture-audio",std::format("binding=separate failed mode={} audioIndex={} audioPathTag={}",audio,audio,pathTag(selection.audioPath)));return false;}
         hr=p.graph->AddFilter(audioFilter.Get(),L"Capture audio");
         if(FAILED(hr)){log::warn("capture-audio",std::format("binding=separate AddFilter hr=0x{:08X}",uint32_t(hr)));return false;}
-        p.audioFilter=audioFilter;log::info("capture-audio",std::format("binding=separate embedded=0 audioIndex={} audioPathTag={} device=\"{}\"",audio,audio,pathTag(selection.audioPath),narrowForLog(filterName(audioFilter.Get()))));
+        const std::wstring deviceName=p.pendingAudioName.empty()?filterName(audioFilter.Get()):p.pendingAudioName;
+        p.audioFilter=audioFilter;log::info("capture-audio",std::format("binding=separate embedded=0 audioIndex={} device=\"{}\" pathTag={}",audio,narrowForLog(deviceName),pathTag(selection.audioPath)));
     }
     ComPtr<IPin> audioPin;hr=audioPinFor(p.builder.Get(),audioFilter.Get(),audioPin);
     if(FAILED(hr)){

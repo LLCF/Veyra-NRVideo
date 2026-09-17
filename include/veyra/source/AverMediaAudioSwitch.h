@@ -29,10 +29,25 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace veyra::source {
 
 enum class AverMediaSwitchState { Unavailable, Ready, Switched, Failed };
+
+// One AVerMedia USB function as Windows sees it in the device tree.
+//
+// This exists because the DirectShow audio moniker of these cards does not
+// always carry a DevicePath: on the machine that produced the 2026-09-17 field
+// log the stored path was the class-manager display name
+// ("@device:cm:{...}\wave:{...}"), which contains no vid_/pid_ at all, while
+// the vendor component parses exactly those out of the path. The device tree
+// still knows the truth.
+struct AverMediaUsbFunction {
+    std::wstring instanceId;     // USB\VID_07CA&PID_2553&MI_02\5&2f0a1c4&0&0002
+    std::wstring friendlyName;   // driver friendly name, may be empty
+    std::wstring interfacePath;  // \\?\usb#vid_07ca&pid_2553&mi_02#...#{guid}
+};
 
 struct AverMediaSwitchStatus {
     AverMediaSwitchState state = AverMediaSwitchState::Unavailable;
@@ -58,6 +73,16 @@ public:
     // Cheap test used to skip unrelated audio devices: the DirectShow device
     // path of an AVerMedia capture device carries vid_07ca.
     static bool isAverMediaDevicePath(std::wstring_view devicePath);
+    // Every present USB function whose device instance id contains
+    // `vendorToken` (production uses L"vid_07ca"). Enumerated from the device
+    // tree, so it works when DirectShow gives us nothing usable. `vendorToken`
+    // is a parameter so tests can prove the enumeration itself works on a
+    // machine that has no AVerMedia hardware.
+    static std::vector<AverMediaUsbFunction> findUsbFunctions(std::wstring_view vendorToken);
+    // Picks the audio function out of a device-tree result: the UAC interface
+    // is the one Windows exposes as an audio endpoint. Falls back to the only
+    // entry when there is exactly one.
+    static const AverMediaUsbFunction* pickAudioFunction(const std::vector<AverMediaUsbFunction>& functions);
 
     // Loads the component (once) and arms non-PCM passthrough for the card
     // behind `devicePath`. Never throws; failures are reported in status().
