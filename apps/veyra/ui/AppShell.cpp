@@ -67,6 +67,7 @@ bool smokeDual=false,smokeDualPause=false,smokeMaster=false,smokeMasterReject=fa
 // open, so a reviewer lands straight on the panel instead of hunting for it.
 bool openColourPageOnStart=false;
 uint64_t colourLiveRevision=0;
+uint64_t colourPausedBase=0;
 void switchMode();void selectInspector(int);
 bool applySettings(veyra::engine::EnhancementSettings s){if(masterPendingRevision)return false;uiState.configured=s;if(uiState.enhanced)engine.requestSettings(s);else {auto effective=engine.snapshot().desired;if(effective.captureCompatible!=s.captureCompatible||effective.forceSdrPreview!=s.forceSdrPreview||effective.captureFlipVertical!=s.captureFlipVertical||effective.captureBuffer!=s.captureBuffer||!(effective.color==s.color)){effective.captureCompatible=s.captureCompatible;effective.forceSdrPreview=s.forceSdrPreview;effective.captureFlipVertical=s.captureFlipVertical;effective.captureBuffer=s.captureBuffer;effective.color=s.color;engine.requestSettings(effective);}veyra::log::info("ui-settings","enhancement off: draft saved; presentation setting applied independently");}veyra::ui::settingsEnabled(uiState.enhanced,uiState.configured);return true;}
 
@@ -777,7 +778,25 @@ else if(colorStep==2){
 }else if(colorStep==11){
     // Put the value back so the reset/undo expectations below stay meaningful.
     if(auto edit=colourControl(1300))SetWindowTextW(edit,L"1.00");
-    colorStep=(colourSnapshot.desired.color.exposure==1.0f&&colourSnapshot.applied.color.exposure==1.0f)?3:(elapsed>11000?-1:11);
+    colorStep=(colourSnapshot.desired.color.exposure==1.0f&&colourSnapshot.applied.color.exposure==1.0f)?12:(elapsed>11000?-1:11);
+}
+// Paused adjustments must reach the picture too: pause, edit, and require the
+// engine to re-render the cached frame (counter + log), then resume.
+else if(colorStep==12){
+    colourPausedBase=colourSnapshot.pausedFrameRefreshes;
+    engine.pause(true);
+    if(auto edit=colourControl(1300))SetWindowTextW(edit,L"0.50");
+    colorStep=13;
+}
+else if(colorStep==13){
+    const bool refreshed=colourSnapshot.applied.color.exposure==0.50f&&colourSnapshot.pausedFrameRefreshes>colourPausedBase;
+    colorStep=refreshed?14:(elapsed>13000?-1:13);
+    if(colorStep==14)veyra::log::info("color-ui-test",std::format("paused adjustment re-rendered the frame (refreshes={})",colourSnapshot.pausedFrameRefreshes));
+}
+else if(colorStep==14){
+    engine.pause(false);
+    if(auto edit=colourControl(1300))SetWindowTextW(edit,L"1.00");
+    colorStep=3;
 }else if(colorStep==3){SendMessageW(colourControl(801),BM_CLICK,0,0);colorStep=30;}
 // The snapshot is taken once per tick, so the reset/undo results are observed on
 // the following tick instead of in the same one that clicked the button.

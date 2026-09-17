@@ -56,6 +56,11 @@ struct PlayerSnapshot {
     // window, and measured media-advance / wall-clock playback speed (1.0 =
     // normal speed). Zero previewSkipped means every decoded frame was enhanced.
     uint64_t previewSkipped=0;
+    // Paused/still-image frames re-rendered because a live parameter changed
+    // (colour is fused into the ingest dispatch, so a paused picture only
+    // updates when the cached source frame is processed again). Test-visible
+    // proof that "adjust while paused" works.
+    uint64_t pausedFrameRefreshes=0;
     double playbackSpeed=0;
     bool fgBudgetLimited=false,xessGenerationSuppressed=false;
     // Runtime-reported DLSSG MultiFrameCountMax: 1 = 2X only, 5 = 6X.

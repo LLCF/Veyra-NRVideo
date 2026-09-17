@@ -26,6 +26,23 @@
 （`logs/delivery/1292ac3a395e451e9d50927f67645df9/result.json`）。
 已用修复后的构建重新拉起测试实例（4K GTA VI 片段 + 色彩页）。
 
+### 追加：暂停时调整也要看得见
+
+用户接着问“为什么暂停时调整看不见、必须播放”。原因：调色**融合在 ingest 的 dispatch 里**，
+而暂停时渲染线程走的是“只把上一帧重新 present”的快路径，**不会再跑 process()**，
+所以新烘焙的表根本没上传到 GPU（`colorDirty_` 一直挂着），只有等下一帧真正处理时才生效。
+
+修复：实时参数更新成功后，如果当前是暂停（或静态图片），置 `refreshPausedFrame_`；
+在暂停快路径里用**缓存下来的源帧**重新过一次 `graph.process(..., reset=true, ...)`，
+再 present 这一帧。代价是每次改动一帧的处理时间（4K 约几毫秒），拖动滑块就是连续重渲染。
+
+新增可测证据：`PlayerSnapshot::pausedFrameRefreshes` 计数器 + 烟测三步
+（暂停→改曝光→要求 `applied` 生效且计数器自增→恢复播放）。日志：
+`[settings] paused frame re-rendered with the new parameters ptsMs=3033.333`、
+`[color-ui-test] paused adjustment re-rendered the frame (refreshes=1)`。
+`--smoke-color` exit 0；`scripts/gates/delivery.ps1` → **DELIVERY SHORT GATE PASS**
+（`logs/delivery/4752929202354ecca7474cdac60f1ccd/result.json`）。
+
 ## 2026-09-17 色彩页 P1/T3 收口：分组“眼睛”bypass + schema v19
 
 方案 T3 要求的“分组眼睛”落地，并且是**真 bypass**（不只是隐藏 UI）：

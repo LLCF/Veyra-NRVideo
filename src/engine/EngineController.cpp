@@ -150,8 +150,12 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
     status(L"正在初始化GPU与本地运行时…");
     gfx::D3D12DeviceContext ctx;gfx::CommandSlotRing ring;source::MediaFileSource source;
     sink::AudioPipeline audioPipe;sink::AudioRenderer audio;VideoPresenter presenter;
-    pipeline::EnhanceGraph graph(ctx,ring);AVFrame* imageFrame=nullptr;AVFrame* cachedFrame=nullptr;pipeline::FramePacket cachedPacket;
-    source::CaptureCardSource captureSource;const bool physicalCapture=path.starts_with(L"capture:")||path.starts_with(L"capture2:");
+   pipeline::EnhanceGraph graph(ctx,ring);AVFrame* imageFrame=nullptr;AVFrame* cachedFrame=nullptr;pipeline::FramePacket cachedPacket;
+   source::CaptureCardSource captureSource;const bool physicalCapture=path.starts_with(L"capture:")||path.starts_with(L"capture2:");
+    // Set when a live parameter change arrives while paused (or on a still
+    // image): the cached source frame must be re-rendered before the next
+    // present, otherwise the new colour tables never reach the GPU.
+    bool refreshPausedFrame_=false;
 #ifdef VEYRA_ENABLE_REMOTEPLAY
     auto remote=remoteRequest?std::make_shared<source::RemotePlaySessionSource>():nullptr;
     const bool isRemote=bool(remote);
@@ -744,6 +748,11 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                         options=PlayerOptions::from(requested);
                         {std::lock_guard lock(mutex_);snapshot_.applied=options.snapshot();snapshot_.applying=desired_!=snapshot_.applied;}
                         veyra::log::info("settings",std::format("live parameter update revision={} colourEnabled={} exposure={:.2f} contrast={:.2f} temperature={:.2f}",requested.revision,requested.color.enabled?1:0,requested.color.exposure,requested.color.contrast,requested.color.temperature));
+                        // Colour lives inside the ingest dispatch, so a paused
+                        // frame has no process() call to upload the new tables or
+                        // re-run the chain: remember that the cached frame must
+                        // be re-rendered before the next present.
+                        if(paused_||isImage)refreshPausedFrame_=true;
                     }else{
                         std::lock_guard lock(mutex_);desired_.rejectVideoRequest(requested,previous);snapshot_.desired=desired_;snapshot_.applying=desired_!=previous;snapshot_.status=L"这套参数需要重建管线，已回到上一套数值";
                     }
@@ -760,6 +769,25 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     discardBefore=seek*1000;seekPreviewPending=true;reset=true;pendingResetCause=pipeline::ResetReason::Seek;anchorMs=discardBefore;anchor=Clock::now();lastAudioClockMs=discardBefore;audioClockExhausted=false;audioRebuffering=false;if(audioStarted){audioPipe.setPaused(paused_);audioPipe.requestSeek(discardBefore);}
                 }
                 if(!transaction&&((paused_&&!seekPreviewPending)||(isImage&&hasOutput))){
+                    // A parameter change while paused (or on a still image) only
+                    // reaches the picture if the cached source frame is pushed
+                    // through the graph again: the grade is fused into the ingest
+                    // dispatch, so nothing else would upload the new tables.
+                    if(refreshPausedFrame_){
+                        refreshPausedFrame_=false;
+                        if(cachedFrame){
+                            pipeline::EnhanceGraph::FrameOutputs refreshed;
+                            const double refreshPtsMs=cachedPacket.pts.toDouble()*1000.0;
+                            if(graph.process(cachedFrame,refreshPtsMs,true,refreshed,cachedPacket.sequence,&cachedPacket.colorInfo,false)){
+                                out=refreshed;
+                                hasOutput=true;
+                                {std::lock_guard lock(mutex_);++snapshot_.pausedFrameRefreshes;}
+                                veyra::log::info("settings",std::format("paused frame re-rendered with the new parameters ptsMs={:.3f}",refreshPtsMs));
+                            }else{
+                                veyra::log::warn("settings","paused frame re-render failed; keeping the previous output");
+                            }
+                        }
+                    }
                     drainLivePresentation();
                     if(!wasPaused){holdFileAudio();if(physicalCapture)captureSource.videoReset();
 #ifdef VEYRA_ENABLE_REMOTEPLAY
