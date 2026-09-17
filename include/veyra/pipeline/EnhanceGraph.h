@@ -105,6 +105,11 @@ struct EnhanceGraphDesc {
     std::wstring runtimeAbsPath; // absolute runtime_local/nvidia path
     // Optional stage instrumentation hook (GPU timing experiments).
     std::function<void(const char*)> stageMark;
+    // Output dither step for the 8/10-bit write paths, in coded units. -1 keeps
+    // the product default (one LSB while the colour grade is active, nothing
+    // otherwise) so ungraded output stays byte-identical; tests and diagnostics
+    // can force a value (0 disables it).
+    float outputDitherStep=-1.0f;
     // Isolated contract probes only. Unset by every product entry point.
     // Caller retains any supplied resources until graph drain/shutdown.
     std::function<void(NVSDK_NGX_Parameter*,ID3D12Resource*,ID3D12Resource*,uint32_t,uint32_t)> nrParameterProbe;
@@ -243,6 +248,11 @@ public:
     // does not match the content domain). The engine surfaces this in the
     // status panel so the refusal is visible, not only logged.
     const std::wstring& colorLutNotice() const { return colorLutNotice_; }
+    // True when the colour stage exists in this graph (master switch on and not
+    // neutral). The encoder uses it to dither its 8/10-bit conversion output.
+    bool colorGradeActive() const { return colorActive_; }
+    // Effective dither step for the 8/10-bit output paths (0 = no dither).
+    float outputDitherStep() const;
     // Isolated diagnostics only: existing constant guidance, borrowed lifetime.
     // A caller writing before the first real frame must restore COMMON state.
     ID3D12Resource* diagnosticDepthResource(bool frameGeneration) const { return frameGeneration?depthTex_.Get():nrZeroDepth_.Get(); }

@@ -153,6 +153,18 @@ bool EnhanceGraph::createColorResources(){
        FAILED(upColorLum_->Map(0,nullptr,reinterpret_cast<void**>(&mappedColorLum_))))return false;
     return true;
 }
+// Product default: dither exactly one LSB of whatever the graph is writing while
+// the colour grade is active, and nothing at all when it is not - every ungraded
+// output path therefore stays byte-identical to the pre-colour build.
+float EnhanceGraph::outputDitherStep() const{
+    if(desc_.outputDitherStep>=0.0f)return desc_.outputDitherStep;
+    // A master switch that is on but neutral renders exactly like no grading at
+    // all (contract), so it must not add noise either - only a real grade does.
+    if(!colorActive_||colorTables_.identity)return 0.0f;
+    if(hdr10Output())return 1.0f/1023.0f;
+    if(desc_.hdrOutput)return 0.0f;   // FP16 target: nothing to quantise
+    return 1.0f/255.0f;
+}
 void EnhanceGraph::refreshColorTables(){
     colorTables_=ColorGradeTables::bake(desc_.color);
     if(!colorActive_||!mappedColorCurve_||!mappedColorHue_||!mappedColorLum_)return;
@@ -1765,7 +1777,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
         tracker_.transition(list, videoFrame_[parity].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         const float constants[8] = {
             uintBits(workW_), uintBits(workH_),
-            uintBits(workW_), uintBits(workH_), hdr10Output()?2.0f:desc_.hdrOutput?0.0f:1.0f, 0, 0, 0 };
+            uintBits(workW_), uintBits(workH_), hdr10Output()?2.0f:desc_.hdrOutput?0.0f:1.0f, outputDitherStep(), 0, 0 };
         blitPass_.bind(list, constants, gpuHandleOf(blitPass_, srcSlot).ptr, gpuHandleOf(blitPass_, uavSlot).ptr);
         list->Dispatch((workW_ + 15) / 16, (workH_ + 15) / 16, 1);
         tracker_.uavBarrier(list, videoFrame_[parity].Get());

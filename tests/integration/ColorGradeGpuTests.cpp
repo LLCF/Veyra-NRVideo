@@ -49,6 +49,20 @@ struct Frame {
         }
         return true;
     }
+    // Horizontal ramp used by the banding check: the grade compresses it so the
+    // ideal 8-bit output advances by a fraction of a code per pixel.
+    bool makeRamp(uint8_t from,uint8_t to){
+        frame=av_frame_alloc();
+        frame->format=AV_PIX_FMT_BGR0;frame->width=frame->height=kSize;
+        frame->color_range=AVCOL_RANGE_UNSPECIFIED;frame->color_trc=AVCOL_TRC_IEC61966_2_1;frame->colorspace=AVCOL_SPC_RGB;
+        if(av_frame_get_buffer(frame,32)<0)return false;
+        for(int y=0;y<kSize;++y)for(int x=0;x<kSize;++x){
+            const int value=from+int(std::lround(double(to-from)*double(x)/double(kSize-1)));
+            auto* p=frame->data[0]+std::size_t(y)*frame->linesize[0]+std::size_t(x)*4;
+            p[0]=uint8_t(value);p[1]=uint8_t(value);p[2]=uint8_t(value);p[3]=255;
+        }
+        return true;
+    }
 };
 struct Graph {
     gfx::D3D12DeviceContext ctx;gfx::CommandSlotRing ring;
@@ -75,6 +89,18 @@ struct Graph {
         if(!gd.color.setLutName(lutName))return false;
         gd.color.lutStrength=100.0f;
         gd.color.lutInputSpace=inputSpace;
+        return g.initialize(gd)&&g.createViews();
+    }
+    bool startWithDither(float ditherStep){
+        gfx::DeviceContextDesc device;Status st;
+        if(!ctx.initialize(device,st)||!ring.initialize(ctx.device(),ctx.directQueue(),ctx.fence(),ctx.fenceEvent(),4,st))return false;
+        up=true;
+        pipeline::EnhanceGraphDesc gd;
+        gd.sourceWidth=gd.sourceHeight=gd.workWidth=gd.workHeight=kSize;
+        gd.rgbInput=true;gd.stillImage=true;gd.noFeatures=true;gd.enableNr=false;gd.enableSr=false;gd.enableFg=false;
+        // A compressing grade: the ramp must be flattened by the tone curve so
+        // plateaus are long enough to measure the dither's effect.
+        gd.color.enabled=true;gd.color.contrast=-100.0f;gd.outputDitherStep=ditherStep;
         return g.initialize(gd)&&g.createViews();
     }
     bool apply(const engine::EnhancementSettings& settings){return g.applySettings(settings);}
@@ -182,7 +208,36 @@ int wmain(){
             }
         }
     }
-    // 3. A real .cube file, imported into runtime_local/luts and resolved by name
+    // 3. Output dither (plan section 4.1): a smooth ramp pushed through a
+    // compressing grade must not turn into long flat plateaus at the 8-bit
+    // write. The same graph is rendered with the dither off and at one LSB.
+    {
+        Graph plain,ditheredGraph;
+        const bool started=plain.startWithDither(0.0f)&&ditheredGraph.startWithDither(1.0f/255.0f);
+        check(started,"the dither probe graphs initialise");
+        if(started){
+            Frame rampA,rampB;
+            sink::RgbaImage noDither,dithered;
+            const bool rendered=rampA.makeRamp(112,128)&&rampB.makeRamp(112,128)&&
+                plain.render(rampA,noDither)&&ditheredGraph.render(rampB,dithered);
+            check(rendered,"the compressing ramp renders through both graphs");
+            if(rendered&&!noDither.pixels.empty()&&!dithered.pixels.empty()){
+                const auto longestRun=[&](const sink::RgbaImage& image){
+                    int longest=0,current=0,previous=-1;
+                    for(int x=8;x<kSize-8;++x){
+                        const int value=image.pixels[(std::size_t(kSize/2)*image.width+std::size_t(x))*4];
+                        if(value==previous)++current;else current=1;
+                        previous=value;longest=std::max(longest,current);
+                    }
+                    return longest;
+                };
+                const int without=longestRun(noDither),with=longestRun(dithered);
+                check(with<without,std::format("the output dither breaks the banding plateaus apart ({} -> {} px)",without,with));
+                check(with<=6,std::format("dither keeps the longest identical 8-bit run short ({} px, without dither {} px)",with,without));
+            }
+        }
+    }
+    // 4. A real .cube file, imported into runtime_local/luts and resolved by name
     // when the graph is built - the same path the UI importer uses.
     {
         const engine::ColorLutStore store(veyra::runtime::localDataDirectory());

@@ -13,7 +13,7 @@ cbuffer ScaleBlitConstants : register(b0)
     uint outputWidth;
     uint outputHeight;
     float encodeSrgb; // 1 only at linear working -> SDR output boundary
-    float _pad1;
+    float ditherStep; // 1 LSB of the target (0 = no dither)
     float _pad2;
     float _pad3;
 };
@@ -53,10 +53,12 @@ void main(uint3 groupId : SV_GroupID, uint3 localId : SV_GroupThreadID, uint3 gl
     value = lerp(top, bottom, fy);
     }
     if(encodeSrgb>2.5){value.rgb=HdrProxy(value.rgb);}
-    if(encodeSrgb>1.5&&encodeSrgb<2.5){outputTex[globalId.xy]=float4(HdrEncodePq(value.rgb),value.a);return;}
+    // The dither runs in the *coded* domain, so it must be applied after the
+    // transfer encode of whichever 8/10-bit target the graph is writing.
+    if(encodeSrgb>1.5&&encodeSrgb<2.5){outputTex[globalId.xy]=float4(HdrEncodePq(value.rgb)+OutputDither(globalId.xy,ditherStep),value.a);return;}
     if (encodeSrgb > 0.5) {
         const float3 c = max(value.rgb, 0.0);
-        value.rgb = select(c <= 0.0031308, c * 12.92, 1.055 * pow(c, 1.0/2.4) - 0.055);
+        value.rgb = select(c <= 0.0031308, c * 12.92, 1.055 * pow(c, 1.0/2.4) - 0.055) + OutputDither(globalId.xy, ditherStep);
     }
     if(encodeSrgb < -0.5){const float3 c=max(value.rgb,0.0);value.rgb=select(c<=0.04045,c/12.92,pow((c+0.055)/1.055,2.4));}
     outputTex[globalId.xy] = value;
