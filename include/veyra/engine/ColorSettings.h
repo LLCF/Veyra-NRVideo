@@ -44,6 +44,11 @@ struct ColorGradingWheel {
 };
 
 struct ColorSettings {
+    // Master switch (v4 plan): when false the colour stage does not exist at all
+    // - no pass, no tables, no dispatch - so users who want the absolute lowest
+    // latency pay nothing. Toggling it changes the graph shape (like NR/SR),
+    // while changing the parameters below stays a live uniform update.
+    bool enabled=false;
     // White balance: relative to the source metadata (capture has no as-shot WB,
     // so the UI must label these as relative values - plan section 5).
     float temperature=0,tint=0;
@@ -84,7 +89,14 @@ struct ColorSettings {
     int lutInputSpace=0;
 
     bool operator==(const ColorSettings&)const=default;
-    bool neutral()const{return *this==ColorSettings{};}
+    // Neutral means "renders exactly like no grading at all", ignoring the
+    // master switch: enabled+neutral must be a visual no-op (verified by test),
+    // which lets the stage early-out instead of running an identity transform.
+    bool neutral()const{
+        auto copy=*this;
+        copy.enabled=false;
+        return copy==ColorSettings{};
+    }
 
     // P1 knows only these two LUT spaces plus "no LUT"; anything else is a bug.
     static constexpr int kLutInputCineon=0,kLutInputSrgb=1,kLutInputPq=2;
@@ -140,7 +152,7 @@ struct ColorSettings {
 // narrow UTF-8 (PresetStore owns the wide/UTF-8 conversion of lutPath) so this
 // header stays free of platform includes.
 inline void writeColorSettings(std::ostream& out,const ColorSettings& c,const std::string& lutPathUtf8){
-    out<<c.temperature<<' '<<c.tint<<' '<<c.exposure<<' '<<c.contrast<<' '<<c.highlights<<' '<<c.shadows<<' '<<c.whites<<' '<<c.blacks<<' '
+    out<<(c.enabled?1:0)<<' '<<c.temperature<<' '<<c.tint<<' '<<c.exposure<<' '<<c.contrast<<' '<<c.highlights<<' '<<c.shadows<<' '<<c.whites<<' '<<c.blacks<<' '
        <<c.texture<<' '<<c.clarity<<' '<<c.dehaze<<' '<<c.vibrance<<' '<<c.saturation<<' '
        <<c.paramHighlights<<' '<<c.paramLights<<' '<<c.paramDarks<<' '<<c.paramShadows<<' '
        <<c.splitHighlights<<' '<<c.splitMidtones<<' '<<c.splitShadows<<' '
@@ -159,13 +171,14 @@ inline void writeColorSettings(std::ostream& out,const ColorSettings& c,const st
     for(float v:c.calibrationSaturation)out<<' '<<v;
 }
 inline bool readColorSettings(std::istream& in,ColorSettings& c,std::string& lutPathUtf8){
-    int blackWhite=0;
-    if(!(in>>c.temperature>>c.tint>>c.exposure>>c.contrast>>c.highlights>>c.shadows>>c.whites>>c.blacks
+    int blackWhite=0,enabled=0;
+    if(!(in>>enabled>>c.temperature>>c.tint>>c.exposure>>c.contrast>>c.highlights>>c.shadows>>c.whites>>c.blacks
         >>c.texture>>c.clarity>>c.dehaze>>c.vibrance>>c.saturation
         >>c.paramHighlights>>c.paramLights>>c.paramDarks>>c.paramShadows
         >>c.splitHighlights>>c.splitMidtones>>c.splitShadows
         >>blackWhite>>c.gradingBlending>>c.gradingBalance>>c.calibrationShadowTint
-        >>c.lutStrength>>c.lutInputSpace>>std::quoted(lutPathUtf8))||(blackWhite!=0&&blackWhite!=1))return false;
+        >>c.lutStrength>>c.lutInputSpace>>std::quoted(lutPathUtf8))||(blackWhite!=0&&blackWhite!=1)||(enabled!=0&&enabled!=1))return false;
+    c.enabled=enabled!=0;
     c.blackWhite=blackWhite!=0;
     for(auto& curve:c.curves){
         if(!(in>>curve.count))return false;

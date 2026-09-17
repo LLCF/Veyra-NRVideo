@@ -1,5 +1,39 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-17 色彩页 P1：T2b-a 总开关语义 + CPU 烘焙表（调色前移到源头）
+
+按 v4 计划（调色链**全部前移到所有效果器之前**、单一链路、可完全关闭）落地第一批：
+
+- `ColorSettings::enabled`（总开关，默认关）；`neutral()` 忽略开关，含义是"渲染结果等于没调色"，
+  所以"开着但全中性"必须是视觉无操作；
+- `EnhancementSettings::sameVideoConfiguration()`：色彩**参数**仍是排除项（改参数不重建图），
+  但 **总开关参与比较** —— 它是链路形状变化，允许重建（与 NR/超分开关同级）；
+- 新增 `include/veyra/pipeline/ColorGradeTables.h` + `src/pipeline/ColorGradeTables.cpp`：把整条调色
+  在 CPU 端烘焙成三条小表 + 一个 3×3 矩阵，供 ingest shader 读取（**不新增 pass**）：
+  - 曲线表 1024×RGBA16F：对数域（10 档，围绕 18% 灰）里的"分区色调 + 对比度 + 4 区参数曲线 +
+    RGB/单通道点曲线"，解码回线性；
+  - 色相表 256×RGBA16F：8 段混色器的（色相偏移 / 饱和度 / 明度）响应；
+  - 亮度表 256×RGBA16F：颜色分级四个色轮 + 校准阴影色调的按区增益；
+  - 3×3 线性矩阵：白平衡（Planck 轨迹 + Bradford CAT，方向按"滑块声明光源"惯例）
+    叠加校准原色近似；
+- `tests/unit/ColorGradeTableTests.cpp`（新目标 `veyra_color_grade_tests`，纯 CPU、不依赖 GPU）：
+  23 项断言全部 PASS —— 关/全中性恒等、对数域往返、白平衡冷暖方向与中性不动、黑白场符号、
+  曲线单调与落点、单通道只动自己、混色器波段、分级分区、阴影色调只动暗部、LUT 未选时为惰性。
+
+修正记录（烘焙数学，两处方向性错误，测试抓到后修正）：
+
+1. 白平衡 CAT 方向写反（`D65→目标` 应为 `目标→D65`），导致正温度变冷；
+2. 阴影/黑场符号写反（正值应为提亮），导致"负 black 变亮"。
+
+命令与结果：构建 exit 0；`veyra_color_grade_tests` → `PASS: colour grade bake tables ...`（exit 0）；
+`veyra_repair_preset_tests`（66 组迁移 + v18 往返，schema 追加总开关字段）exit 0；
+`veyra_ui_contract_tests` exit 0；`veyra_repair_contract_tests` 191/0；
+`scripts/gates/delivery.ps1` → `DELIVERY SHORT GATE PASS`
+（`logs/delivery/682bb5d4f300439588ae65eb211ac450/result.json`）。
+
+未完成：T2b-b（把烘焙表接进 ingest shader：源头单一 pass、`GpuStage::Grade` 计时、
+关开关与旧链路逐像素一致的 GPU 对比），然后 T3–T6。
+
 ## 2026-09-17 色彩页 P1：T2a 色彩数据模型 + 预设 schema v18
 
 - 新增 `include/veyra/engine/ColorSettings.h`：LR 对齐的 P1 色彩模型（白平衡、亮、存在感、参数/点曲线 5 通道、

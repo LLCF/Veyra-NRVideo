@@ -150,8 +150,10 @@ struct EnhancementSettings {
         // Export-only fields: changing the bitrate must never invalidate the
         // running preview graph (the controller would otherwise rebuild it).
         video.exportBitrateMbps=other.exportBitrateMbps;
-        // Colour grade: uniform-only update, never a graph rebuild.
+        // Colour grade: parameters are uniform-only (never a rebuild), but the
+        // master switch changes the graph shape, so it stays in the comparison.
         video.color=other.color;
+        video.color.enabled=color.enabled;
         return video==other;
     }
     void rejectVideoRequest(const EnhancementSettings& attempted,const EnhancementSettings& previous) {

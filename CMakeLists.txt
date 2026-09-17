@@ -669,6 +669,13 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
   target_compile_definitions(veyra_engine PUBLIC VEYRA_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}" VEYRA_SHADER_DIR="${CMAKE_BINARY_DIR}/shaders")
   target_link_libraries(veyra_engine PUBLIC veyra_pipeline veyra_sources veyra_sinks veyra_ngx veyra_nvof)
   add_executable(veyra_repair_preset_tests tests/unit/RepairPresetTests.cpp src/engine/PresetStore.cpp)
+  # CPU bake of the colour grade: no GPU, no engine link - the tables the ingest
+  # shader reads are pure maths and must be verifiable without a device.
+  add_executable(veyra_color_grade_tests tests/unit/ColorGradeTableTests.cpp src/pipeline/ColorGradeTables.cpp)
+  target_compile_features(veyra_color_grade_tests PRIVATE cxx_std_20)
+  target_compile_options(veyra_color_grade_tests PRIVATE /utf-8)
+  target_compile_definitions(veyra_color_grade_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_include_directories(veyra_color_grade_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_compile_features(veyra_repair_preset_tests PRIVATE cxx_std_20)
   target_compile_options(veyra_repair_preset_tests PRIVATE /utf-8)
   target_compile_definitions(veyra_repair_preset_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
