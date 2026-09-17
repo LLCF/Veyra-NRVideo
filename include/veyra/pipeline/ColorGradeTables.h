@@ -33,4 +33,17 @@ struct ColorGradeTables {
     static float encodeLog(float linear);
     static float decodeLog(float encoded);
 };
+// Root-constant block consumed by ColorGrade.hlsli: five float4s (rows 0-2,
+// controls, flags). The ingest passes apppend it after their own constants, so
+// nothing existing moves.
+inline constexpr int kColorGradeConstantCount=20;
+inline void packColorGradeConstants(const ColorGradeTables& t,float* out){
+    out[0]=t.matrix[0];out[1]=t.matrix[1];out[2]=t.matrix[2];out[3]=0;
+    out[4]=t.matrix[3];out[5]=t.matrix[4];out[6]=t.matrix[5];out[7]=0;
+    out[8]=t.matrix[6];out[9]=t.matrix[7];out[10]=t.matrix[8];out[11]=0;
+    out[12]=t.exposure;out[13]=t.saturation;out[14]=t.vibrance;out[15]=t.identity?0.0f:t.lutStrength;
+    // "identity" covers both "master switch off" and "every parameter neutral":
+    // in either case the shader must return the input untouched.
+    out[16]=t.identity?0.0f:1.0f;out[17]=float(t.identity?0:t.lutInputSpace);out[18]=0;out[19]=0;
+}
 } // namespace veyra::pipeline

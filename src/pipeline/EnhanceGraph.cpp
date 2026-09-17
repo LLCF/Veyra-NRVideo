@@ -101,6 +101,119 @@ EnhanceGraph::~EnhanceGraph()
 // ---------------------------------------------------------------------------
 // initialize: exact ordering of the proven probe sequence.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Colour grade (plan v4): the tables are baked on the CPU, uploaded into small
+// FP32 textures and read by the ingest shaders. Nothing here allocates, copies
+// or dispatches when desc.color.enabled is false, so the "off" path costs zero.
+// ---------------------------------------------------------------------------
+namespace {
+ComPtr<ID3D12Resource> makeColorTable(ID3D12Device* device,uint32_t width){
+    return makeTexture(device,width,1,DXGI_FORMAT_R32G32B32A32_FLOAT,false);
+}
+ComPtr<ID3D12Resource> makeColorLut3D(ID3D12Device* device,uint32_t size){
+    D3D12_HEAP_PROPERTIES hp{};hp.Type=D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC td{};
+    td.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+    td.Width=size;td.Height=size;td.DepthOrArraySize=UINT16(size);td.MipLevels=1;
+    td.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;td.SampleDesc.Count=1;
+    ComPtr<ID3D12Resource> r;
+    if(FAILED(device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&td,D3D12_RESOURCE_STATE_COMMON,nullptr,IID_PPV_ARGS(&r))))return {};
+    return r;
+}
+}
+bool EnhanceGraph::createColorResources(){
+    if(colorCurveTex_&&colorHueTex_&&colorLumTex_&&colorLutTex_)return true;
+    colorCurveTex_=makeColorTable(context_.device(),ColorGradeTables::kCurveEntries);
+    colorHueTex_=makeColorTable(context_.device(),ColorGradeTables::kHueEntries);
+    colorLumTex_=makeColorTable(context_.device(),ColorGradeTables::kLumEntries);
+    // 1x1x1 placeholder keeps the descriptor valid while no LUT is loaded;
+    // lutStrength stays 0 in that case, so it is never sampled.
+    colorLutTex_=makeColorLut3D(context_.device(),1);
+    colorLutSize_=0;
+    upColorCurve_=makeUploadBuffer(context_.device(),sizeof(float)*4*ColorGradeTables::kCurveEntries);
+    upColorHue_=makeUploadBuffer(context_.device(),sizeof(float)*4*ColorGradeTables::kHueEntries);
+    upColorLum_=makeUploadBuffer(context_.device(),sizeof(float)*4*ColorGradeTables::kLumEntries);
+    if(!colorCurveTex_||!colorHueTex_||!colorLumTex_||!colorLutTex_||!upColorCurve_||!upColorHue_||!upColorLum_){
+        veyra::log::error("color-grade",std::format("colour resources unavailable tables={} lut={}",colorCurveTex_?1:0,colorLutTex_?1:0));
+        return false;
+    }
+    if(FAILED(upColorCurve_->Map(0,nullptr,reinterpret_cast<void**>(&mappedColorCurve_)))||
+       FAILED(upColorHue_->Map(0,nullptr,reinterpret_cast<void**>(&mappedColorHue_)))||
+       FAILED(upColorLum_->Map(0,nullptr,reinterpret_cast<void**>(&mappedColorLum_))))return false;
+    return true;
+}
+void EnhanceGraph::refreshColorTables(){
+    colorTables_=ColorGradeTables::bake(desc_.color);
+    if(!colorActive_||!mappedColorCurve_||!mappedColorHue_||!mappedColorLum_)return;
+    std::copy(colorTables_.curve.begin(),colorTables_.curve.end(),mappedColorCurve_);
+    std::copy(colorTables_.hue.begin(),colorTables_.hue.end(),mappedColorHue_);
+    std::copy(colorTables_.lum.begin(),colorTables_.lum.end(),mappedColorLum_);
+    colorDirty_=true;
+}
+void EnhanceGraph::uploadColorTables(ID3D12GraphicsCommandList* list){
+    if(!colorDirty_)return;
+    auto copyTable=[&](ID3D12Resource* dst,ID3D12Resource* src,UINT width){
+        tracker_.transition(list,dst,D3D12_RESOURCE_STATE_COPY_DEST);
+        D3D12_TEXTURE_COPY_LOCATION d{},s{};
+        d.pResource=dst;d.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;d.SubresourceIndex=0;
+        s.pResource=src;s.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        s.PlacedFootprint.Footprint={DXGI_FORMAT_R32G32B32A32_FLOAT,width,1,1,width*16};
+        list->CopyTextureRegion(&d,0,0,0,&s,nullptr);
+        tracker_.transition(list,dst,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    };
+    copyTable(colorCurveTex_.Get(),upColorCurve_.Get(),ColorGradeTables::kCurveEntries);
+    copyTable(colorHueTex_.Get(),upColorHue_.Get(),ColorGradeTables::kHueEntries);
+    copyTable(colorLumTex_.Get(),upColorLum_.Get(),ColorGradeTables::kLumEntries);
+    if(colorLutPending_&&!colorLutUpload_.empty()){
+        const unsigned size=colorLutPending_;
+        const uint64_t bytes=uint64_t(size)*size*size*16;
+        auto& staging=colorLutStaging_[colorLutStagingSlot_];
+        colorLutStagingSlot_=(colorLutStagingSlot_+1)%colorLutStaging_.size();
+        staging=makeUploadBuffer(context_.device(),bytes);
+        void* mapped=nullptr;
+        if(staging&&SUCCEEDED(staging->Map(0,nullptr,&mapped))&&mapped){
+            auto* dst=static_cast<float*>(mapped);
+            for(size_t i=0;i<size_t(size)*size*size;++i){
+                dst[i*4+0]=colorLutUpload_[i*3+0];
+                dst[i*4+1]=colorLutUpload_[i*3+1];
+                dst[i*4+2]=colorLutUpload_[i*3+2];
+                dst[i*4+3]=1.0f;
+            }
+            staging->Unmap(0,nullptr);
+            tracker_.transition(list,colorLutTex_.Get(),D3D12_RESOURCE_STATE_COPY_DEST);
+            D3D12_TEXTURE_COPY_LOCATION d{},s{};
+            d.pResource=colorLutTex_.Get();d.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;d.SubresourceIndex=0;
+            s.pResource=staging.Get();s.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            s.PlacedFootprint.Footprint={DXGI_FORMAT_R32G32B32A32_FLOAT,size,size,size,size*16};
+            list->CopyTextureRegion(&d,0,0,0,&s,nullptr);
+            tracker_.transition(list,colorLutTex_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }else{
+            veyra::log::warn("color-grade","lut staging buffer unavailable; keeping the previous table");
+        }
+        colorLutUpload_.clear();
+        colorLutPending_=0;
+    }
+    colorDirty_=false;
+}
+bool EnhanceGraph::setColorLut(const float* rgb,unsigned size){
+    if(!colorActive_||size<2||size>64)return false;
+    if(!createColorResources())return false;
+    colorLutTex_=makeColorLut3D(context_.device(),size);
+    if(!colorLutTex_)return false;
+    colorLutSize_=size;
+    colorLutUpload_.assign(rgb,rgb+std::size_t(size)*size*size*3);
+    colorLutPending_=size;
+    colorDirty_=true;
+    // Callers must have drained the queue: the descriptor is re-staged in place.
+    D3D12_SHADER_RESOURCE_VIEW_DESC lutSrv{};
+    lutSrv.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;
+    lutSrv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE3D;
+    lutSrv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    lutSrv.Texture3D.MipLevels=1;
+    for(auto* pass:{&yuvPass_,&rgbPass_})if(pass->heap)stager_.stageSrv(colorLutTex_.Get(),&lutSrv,pass->heap.Get(),11);
+    return true;
+}
+
 bool EnhanceGraph::initialize(const EnhanceGraphDesc& desc)
 {
     failedBackend_=engine::FailedBackend::Infrastructure;
@@ -236,6 +349,15 @@ bool EnhanceGraph::createResources()
     baseFlow_=makeTexture(context_.device(),workW_,workH_,DXGI_FORMAT_R16G16_FLOAT,true);
     if(presentSinkFg())for(auto& motion:presentMotion_){motion=makeTexture(context_.device(),workW_,workH_,DXGI_FORMAT_R16G16_FLOAT,false);if(!motion)return false;}
     if(!nrInput_||!residualRgba_||!nrFlow_||!baseFlow_)return false;
+    // Colour grade tables (v4): only allocated when the stage is enabled.
+    colorActive_=desc_.color.enabled;
+    if(colorActive_){
+        if(!createColorResources())return false;
+        refreshColorTables();
+        veyra::log::info("color-grade",std::format("stage enabled tables={}/{}/{} lutInputSpace={} lut={}",
+            ColorGradeTables::kCurveEntries,ColorGradeTables::kHueEntries,ColorGradeTables::kLumEntries,
+            desc_.color.lutInputSpace,desc_.color.hasLut()?1:0));
+    }
     proxyTex_ = makeTexture(context_.device(), nrW_, nrH_, DXGI_FORMAT_R8G8B8A8_UNORM, true);
     neuralTex_ = makeTexture(context_.device(), nrW_, nrH_, DXGI_FORMAT_R8G8B8A8_UNORM, true);
     finalRgba_ = makeTexture(context_.device(), nrW_, nrH_, DXGI_FORMAT_R16G16B16A16_FLOAT, true);
@@ -884,9 +1006,9 @@ bool EnhanceGraph::createComputePasses()
     if(!downsamplePass_.loadShader("NrDownsample.dxil",cs)||!downsamplePass_.create(context_.device(),cs,2,1,1))return false;
     if(!residualPass_.loadShader("NrResidualComposite.dxil",cs)||!residualPass_.create(context_.device(),cs,4,3,1,24))return false;
     if(!flowAdaptPass_.loadShader("FlowAdapt.dxil",cs)||!flowAdaptPass_.create(context_.device(),cs,3,1,1))return false;
-    if (!yuvPass_.loadShader("YuvToLinearRgb.dxil", cs) || !yuvPass_.create(context_.device(), cs, 8, 2, 1, 12)) return false;
+    if (!yuvPass_.loadShader("YuvToLinearRgb.dxil", cs) || !yuvPass_.create(context_.device(), cs, 12, 2, 1, 12+kColorGradeConstantCount, 4)) return false;
     const char* rgbShader=desc_.packedInput?"PackedCaptureToLinear.dxil":desc_.yuy2Input?"Yuy2ToLinear.dxil":"RgbToLinear.dxil";
-    if((desc_.rgbInput||desc_.yuy2Input||desc_.packedInput)&&(!rgbPass_.loadShader(rgbShader,cs)||!rgbPass_.create(context_.device(),cs,8,1,1)))return false;
+    if((desc_.rgbInput||desc_.yuy2Input||desc_.packedInput)&&(!rgbPass_.loadShader(rgbShader,cs)||!rgbPass_.create(context_.device(),cs,12,1,1,8+kColorGradeConstantCount,4)))return false;
     if (!encPass_.loadShader("ParityEncode.dxil", cs) || !encPass_.create(context_.device(), cs, 8, 1, 1)) return false;
     if (!decPass_.loadShader("ParityDecode.dxil", cs) || !decPass_.create(context_.device(), cs, 8)) return false;
     if (!blitPass_.loadShader("ScaleBlit.dxil", cs) || !blitPass_.create(context_.device(), cs, 19, 1, 1)) return false;
@@ -985,6 +1107,21 @@ bool EnhanceGraph::createViews()
     if(videoSrOutput_&&viewsTex)stagedSrv(videoSrOutput_.Get(),DXGI_FORMAT_R8G8B8A8_UNORM,blitPass_,17);
     if (viewsTex) stagedSrv(residualRgba_.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT,blitPass_,18);
     if (viewsTex) stagedSrv(srcRgba_.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, blitPass_, 0);
+    // Colour-grade tables: four SRVs at the extra table's fixed register base.
+    if(colorActive_){
+        D3D12_SHADER_RESOURCE_VIEW_DESC lutSrv{};
+        lutSrv.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;
+        lutSrv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE3D;
+        lutSrv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        lutSrv.Texture3D.MipLevels=1;
+        for(auto* pass:{&yuvPass_,&rgbPass_}){
+            if(!pass->heap)continue;
+            stager_.stageSrv(colorCurveTex_.Get(),nullptr,pass->heap.Get(),8);
+            stager_.stageSrv(colorHueTex_.Get(),nullptr,pass->heap.Get(),9);
+            stager_.stageSrv(colorLumTex_.Get(),nullptr,pass->heap.Get(),10);
+            stager_.stageSrv(colorLutTex_.Get(),&lutSrv,pass->heap.Get(),11);
+        }
+    }
     if (viewsUav) makeUav(context_.device(), workRgba_.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, cpu(blitPass_, 1));
     if (viewsTex) stagedSrv(nrEnabled_&&!desc_.nrBeforeSr ? residualRgba_.Get() : workRgba_.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, blitPass_, 2);
     if (viewsUav) makeUav(context_.device(), videoFrame_[0].Get(), outputFormat(), cpu(blitPass_, 3));
@@ -1271,19 +1408,22 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
     if (desc_.stageMark) desc_.stageMark("upload");
 
     // 2. YUV -> RGBA16F.
+    if(colorActive_&&colorDirty_)uploadColorTables(list);
     tracker_.transition(list, srcRgba_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     if(desc_.rgbInput||desc_.yuy2Input||desc_.packedInput){
-        const float c[8]={uintBits(srcW_),uintBits(srcH_),uintBits(workingTransferCode(resolved)),uintBits(resolved.range==ColorRange::Limited?1u:0u),
+        float c[8+kColorGradeConstantCount]={uintBits(srcW_),uintBits(srcH_),uintBits(workingTransferCode(resolved)),uintBits(resolved.range==ColorRange::Limited?1u:0u),
             resolved.range==ColorRange::Full?0.0f:1.0f,resolved.matrix==YuvMatrix::BT2020NCL?2.0f:resolved.matrix==YuvMatrix::BT601?0.0f:1.0f,resolved.primaries==ColorPrimaries::BT2020?1.0f:0.0f,uintBits(desc_.packedInput)};
-        rgbPass_.bind(list,c,gpuHandleOf(rgbPass_,0).ptr,gpuHandleOf(rgbPass_,1).ptr);
+        if(colorActive_)packColorGradeConstants(colorTables_,c+8);
+        rgbPass_.bind(list,c,gpuHandleOf(rgbPass_,0).ptr,gpuHandleOf(rgbPass_,1).ptr,gpuHandleOf(rgbPass_,8).ptr);
         list->Dispatch((srcW_+15)/16,(srcH_+15)/16,1);
     }else{
-        const float constants[12] = { resolved.range==ColorRange::Full?0.0f:1.0f,
+        float constants[12+kColorGradeConstantCount] = { resolved.range==ColorRange::Full?0.0f:1.0f,
             resolved.matrix==YuvMatrix::BT2020NCL?2.0f:resolved.matrix==YuvMatrix::BT601?0.0f:1.0f,
             resolved.transfer==TransferFunction::HLG?5.0f:resolved.transfer==TransferFunction::PQ?4.0f:float(workingTransferCode(resolved)), (nv12Texture?(nv12Texture->GetDesc().Format==DXGI_FORMAT_P010?1.0f:0.0f):(desc_.captureBitDepth==16?2.0f:desc_.wideYuvInput()?1.0f:0.0f)),
             uintBits(srcW_), uintBits(srcH_), uintBits((desc_.hdrOutput?1u:0u)|(resolved.primaries==ColorPrimaries::BT2020?2u:0u)),
             uintBits(resolved.reconstructChroma?std::max(1u,unsigned(resolved.chromaLocation)):0u),toneMapPeakNits_,203.0f,0,0 };
-        yuvPass_.bind(list, constants, gpuHandleOf(yuvPass_, nv12Texture ? 3 + parity * 2 : 0).ptr, gpuHandleOf(yuvPass_, 2).ptr);
+        if(colorActive_)packColorGradeConstants(colorTables_,constants+12);
+        yuvPass_.bind(list, constants, gpuHandleOf(yuvPass_, nv12Texture ? 3 + parity * 2 : 0).ptr, gpuHandleOf(yuvPass_, 2).ptr,gpuHandleOf(yuvPass_,8).ptr);
         list->Dispatch((srcW_ + 15) / 16, (srcH_ + 15) / 16, 1);
     }
     tracker_.uavBarrier(list, srcRgba_.Get());
@@ -1707,6 +1847,10 @@ bool EnhanceGraph::applySettings(const engine::EnhancementSettings& s){
     // XeSS has a fixed 2X proxy swapchain contract. Settings callers must
     // rebuild instead of accepting a change that cannot take effect in place.
     if(s.nrRuntime!=desc_.nrRuntime||std::max(2u,s.multiplier)!=desc_.fgMultiplier||s.frameGenerationBackend!=desc_.frameGenerationBackend||s.videoSrQuality!=desc_.videoSrQuality||!s.validate().empty()||(s.multiplier>1&&!engine::presentSinkFrameGeneration(s.frameGenerationBackend)&&(!fgCapsAvailable_||s.multiplier-1>uint32_t(fgMultiFrameMax_))))return false;
+    // The colour master switch changes the graph shape (tables + shader branch)
+    // and must rebuild; every other colour field is a live uniform update.
+    if(s.color.enabled!=desc_.color.enabled)return false;
+    if(!(s.color==desc_.color)){desc_.color=s.color;refreshColorTables();}
     desc_.contentRate=s.content;desc_.model=s.model;desc_.residual=s.residual;desc_.protection=s.protection;desc_.settingsRevision=s.revision;
     desc_.fgMultiplier=std::max(2u,s.multiplier);desc_.enableNvofStandalone=s.nr&&!desc_.stillImage;nvofStandalone_=desc_.enableNvofStandalone;
     setNrEnabled(s.nr);setFgEnabled(s.multiplier>1&&!engine::presentSinkFrameGeneration(s.frameGenerationBackend));

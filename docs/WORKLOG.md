@@ -1,5 +1,44 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-17 色彩页 P1：T2b-b 源头侧调色链接入 ingest（GPU 验收通过）
+
+按 v4 计划完成 GPU 接线：调色**不新增 pass**，而是接进现有的 ingest 派发（YUV→线性、
+RGB/打包/YUY2→线性），作用在**所有效果器之前**。
+
+- `shaders/ColorGrade.hlsli`：单一入口 `ColorGradeApply(lin, params)` —— 线性 3×3（白平衡+校准）、
+  曝光、对数域逐通道曲线表、色相表混色器、亮度表分级/阴影色调、饱和度/自然饱和度；
+  10 档对数据窗口之外的值直接放行，HDR 高光不被色调表截断；另含 6 例四面体 LUT 采样
+  （`base` 已钳制，避免 coord==dims-1 时越界读）；
+- 表数据：CPU 端 `ColorGradeTables::bake()` 烘焙成 3 张 FP32 表（1024/256/256），
+  经常驻映射的上传缓冲一次拷进纹理；`GpuPassUtils` 为 ingest pass 增加**第二个 SRV 表**
+  （固定寄存器基址 8，t8..t11），不影响其他 pass 的三参数根签名；
+- 总开关：`desc.color.enabled` 决定是否创建表资源；关闭时 ingest shader 直接返回线性值
+  （`flags.x==0`），不采样任何表、不额外派发；开关切换走重建（与 NR/超分同级），
+  改色彩参数只更新 uniform/表（`applySettings` 接受、不重建）；
+- 引擎：`EngineController` 把 `settings.color` 传进图描述与 nextDesc，重建条件加入
+  `color.enabled`；`EnhanceGraphDesc::color` 为唯一数据入口。
+
+**GPU 验收（新目标 `veyra_color_grade_gpu_tests`，RTX 5070，`gd.rgbInput` 路径）**
+
+```
+PASS colour graphs initialise and render
+PASS master off and enabled-neutral are byte-identical to the ungraded path
+PASS a green input stays green through the neutral grade
+PASS +1 EV brightens mid grey by a visible step
+PASS point curve at 0.5 raises the coded value
+PASS saturation -100 collapses the frame to grey
+PASS: colour grade GPU contract (off/neutral identity, exposure, curve, saturation, hue)   exit=0
+```
+
+**回归**：`veyra_color_grade_tests` 23/23 PASS；`veyra_repair_preset_tests` exit 0；
+`veyra_ui_contract_tests` exit 0；`veyra_repair_contract_tests` 191/0；
+`veyra_image_dimension_tests`（羽化 2/32/64 + 分块 + 运动序列）exit 0；
+`scripts/gates/delivery.ps1` → `DELIVERY SHORT GATE PASS`
+（`logs/delivery/4d71b79296484248bc370413c09c0ea0/result.json`）。
+
+**未做/待办**：`.cube` 文件导入与 LUT 案例（T5，`setColorLut` 接口已就绪、测试里暂未覆盖）；
+色彩页 UI（T3/T4）；开调色档位的 GPU 耗时对比（等 UI 能开了在真机量，当前默认关闭=零开销）。
+
 ## 2026-09-17 色彩页 P1：T2b-a 总开关语义 + CPU 烘焙表（调色前移到源头）
 
 按 v4 计划（调色链**全部前移到所有效果器之前**、单一链路、可完全关闭）落地第一批：

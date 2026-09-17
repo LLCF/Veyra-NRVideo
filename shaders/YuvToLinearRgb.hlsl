@@ -4,12 +4,17 @@
 // transfer) arrives as root constants set per frame from FFmpeg stream data.
 #include "HdrColor.hlsli"
 #include "HdrToSdr.hlsli"
+#include "ColorGrade.hlsli"
 
 cbuffer YuvParams : register(b0)
 {
     float4 colorParams0; // x=limitedRange y=matrix709 z=transferSRGB w=padding
     uint4 yuvDimensions; // x=width y=height z=bit0 nativeHDR, bit1 BT2020 primaries; w=chroma location
     float4 toneMapParams; // x=validated source peak nits, y=SDR target peak nits
+    // Colour grade (plan v4): appended after the existing constants, packed by
+    // veyra::pipeline::packColorGradeConstants (five float4s).
+    float4 colorRow0; float4 colorRow1; float4 colorRow2;
+    float4 colorControls; float4 colorFlags;
 };
 
 Texture2D<float> lumaPlane : register(t0);   // R8_UNORM or R16_UNORM
@@ -107,6 +112,9 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
             nits=1000.0*scene*pow(max(dot(scene,float3(.2627,.6780,.0593)),0),.2);
         }
         float3 linear709=mul(float3x3(1.660491,-0.587641,-0.072850,-0.124550,1.132900,-0.008349,-0.018151,-0.100579,1.118730),nits);
+        // Grade in the normalised domain: HDR is referenced to the BT.2408
+        // 203 cd/m2 SDR reference white; SDR paths below are already 0..1.
+        if(colorFlags.x>0.5){ColorGradeParams grade={colorRow0,colorRow1,colorRow2,colorControls,colorFlags};linear709=ColorGradeApply(linear709/203.0,grade)*203.0;}
         if((yuvDimensions.z&1)!=0)rgb=linear709/80.0; // scRGB: 1.0 = 80 nits.
         else{
             rgb=HdrToSdr(linear709,toneMapParams.x,toneMapParams.y);
@@ -121,5 +129,8 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         rgb = float3(SrgbDecode(rgb.r), SrgbDecode(rgb.g), SrgbDecode(rgb.b));
     }
     if(colorParams0.z<3.5&&(yuvDimensions.z&2)!=0)rgb=HdrTo709(rgb);
+    // SDR paths carry normalised scene-linear RGB here (after any primaries
+    // conversion), which is exactly the domain ColorGradeApply expects.
+    if(colorParams0.z<3.5&&colorFlags.x>0.5){ColorGradeParams grade={colorRow0,colorRow1,colorRow2,colorControls,colorFlags};rgb=ColorGradeApply(rgb,grade);}
     linearRgb[dispatchThreadId.xy] = float4(rgb, 1.0);
 }

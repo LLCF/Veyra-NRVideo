@@ -297,6 +297,7 @@ target_link_libraries(veyra_guidance_tests PRIVATE veyra_guidance)
 # Grows in R3 as the real GPU graph migrates out of the probes.
 add_library(veyra_pipeline STATIC
   src/pipeline/ResetCoordinator.cpp
+  src/pipeline/ColorGradeTables.cpp
 )
 veyra_apply_warnings(veyra_pipeline)
 # FFmpeg/NVOF headers are third-party: /WX stays off for this target.
@@ -671,11 +672,20 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
   add_executable(veyra_repair_preset_tests tests/unit/RepairPresetTests.cpp src/engine/PresetStore.cpp)
   # CPU bake of the colour grade: no GPU, no engine link - the tables the ingest
   # shader reads are pure maths and must be verifiable without a device.
-  add_executable(veyra_color_grade_tests tests/unit/ColorGradeTableTests.cpp src/pipeline/ColorGradeTables.cpp)
+  add_executable(veyra_color_grade_tests tests/unit/ColorGradeTableTests.cpp)
   target_compile_features(veyra_color_grade_tests PRIVATE cxx_std_20)
   target_compile_options(veyra_color_grade_tests PRIVATE /utf-8)
   target_compile_definitions(veyra_color_grade_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   target_include_directories(veyra_color_grade_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_link_libraries(veyra_color_grade_tests PRIVATE veyra_pipeline)
+  # GPU contract for the v4 colour chain: identity when off/neutral, exposure,
+  # curve, saturation and hue, all through a real graph and its ingest pass.
+  add_executable(veyra_color_grade_gpu_tests tests/integration/ColorGradeGpuTests.cpp)
+  target_compile_features(veyra_color_grade_gpu_tests PRIVATE cxx_std_20)
+  target_compile_options(veyra_color_grade_gpu_tests PRIVATE /utf-8 /WX-)
+  target_compile_definitions(veyra_color_grade_gpu_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_include_directories(veyra_color_grade_gpu_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${FFMPEG_INCLUDE_DIRS})
+  target_link_libraries(veyra_color_grade_gpu_tests PRIVATE veyra_pipeline veyra_sinks)
   target_compile_features(veyra_repair_preset_tests PRIVATE cxx_std_20)
   target_compile_options(veyra_repair_preset_tests PRIVATE /utf-8)
   target_compile_definitions(veyra_repair_preset_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)

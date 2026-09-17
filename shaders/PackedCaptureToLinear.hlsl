@@ -3,9 +3,11 @@
 // UYVY / YVYU with the same color contract as RgbToLinear / Yuy2ToLinear.
 // packing: 1 BGR24, 2 RGB555, 3 RGB565, 4 UYVY, 5 YVYU.
 #include "HdrColor.hlsli"
+#include "ColorGrade.hlsli"
 cbuffer Params : register(b0) {
     uint width; uint height; uint transfer; uint limitedU;
     float limited; float matrix709; float primaries2020; uint packing;
+    float4 colorRow0; float4 colorRow1; float4 colorRow2; float4 colorControls; float4 colorFlags;
 };
 Texture2D<float4> packedBytes : register(t0);
 RWTexture2D<float4> linearRgb : register(u0);
@@ -47,5 +49,6 @@ void main(uint3 p : SV_DispatchThreadID) {
     if (limitedU != 0 && packing <= 3) rgb = saturate((rgb - 16.0 / 255.0) * (255.0 / 219.0));
     float3 decoded = float3(decode(rgb.r), decode(rgb.g), decode(rgb.b));
     if (primaries2020 > 0.5) decoded = HdrTo709(decoded);
+    if (colorFlags.x > 0.5) { ColorGradeParams grade = { colorRow0, colorRow1, colorRow2, colorControls, colorFlags }; decoded = ColorGradeApply(decoded, grade); }
     linearRgb[p.xy] = float4(decoded, 1);
 }
