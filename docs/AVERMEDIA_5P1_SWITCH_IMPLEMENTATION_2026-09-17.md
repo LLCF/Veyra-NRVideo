@@ -236,3 +236,74 @@ PASS (0 failures)
 
 未提交任何 SDK / DLL / 模型 / 用户配置；`third_party_local`、`runtime_local`、`loop\local` 在隔离 worktree 里
 是**目录联接**（只读复用主检出的本地依赖），不参与版本控制。
+
+---
+
+## 附录 C：用户实测日志复盘（2026-09-17）与修复
+
+日志：`veyra-app(8).log`（1,472,697 字节，4104 行，SHA256 待补），隔离测试包第一次真机运行。
+
+### C1 结论：这次**没有测到功能**，是我的识别逻辑把它挡在门外
+
+日志里 6 次 DirectShow 连接全部是同一行：
+
+```
+[capture-audio-vendor] skipped: not an AVerMedia capture device (device="")
+```
+
+`device=""` 是空的——同时那行 `binding=separate ... device="0040..."` 打出来的是一串十六进制。
+解码后是：
+
+```
+@device:cm:{33D9A762-90C8-11D0-BD43-00A0C911CE86}\wave:{C25BCE96-8C5E-4894-8ED1-092A0D29FDA5}
+```
+
+即 `pathTag(selection.audioPath)`：**这张卡音频设备的 DirectShow moniker 根本没有 `DevicePath` 属性**，
+Veyra 保存下来的是类管理器显示名，里面没有 `vid_07ca`。而开关的准入条件恰恰是"路径含 vid_07ca"，
+于是 6 次全部直接跳过——**开关一次都没发出去**，`device bitstream types=0` 和
+`no IEC 61937 burst` 都只是"没切"的自然结果。
+
+顺带两处自曝的毛病：
+1. 那行 `binding=separate` 的格式串只有 3 个占位符却传了 4 个参数，`device=` 打的是路径而不是友好名
+   （我上一轮想加的"设备名进日志"实际没生效）；`audioPathTag=0` 也是历史遗留的错位参数。
+2. 因为准入失败，日志里连"组件装没装"都没记录。
+
+### C2 这次实测仍然提供了三条有价值的事实
+
+1. **音频设备确实是那张卡**：枚举出 15 个 PCM 媒体类型（含 8 位 / 11.025k / 8k）+ 48k/96k，
+   与本机 GC553G2 的指纹完全一致（索引 0 和索引 2 各一个，指纹相同）。
+2. **声音是真的**：多个会话峰值 0.17–0.33（11:07 那次到 0.81），说明游戏音频正常送达，
+   不是静音、也不是位流当 PCM 的噪音。
+3. **用户把三种接法都试了**：DirectShow 独立设备、WASAPI（-3）、以及视频设备内置音频；
+   DirectShow 与 WASAPI 都能出声音，行为与预期一致。
+
+### C3 修复
+
+1. **不再依赖 DirectShow 路径识别设备**：新增 `AverMediaAudioSwitch::findUsbFunctions()`，
+   用 SetupAPI 按 `KSCATEGORY_AUDIO` / `KSCATEGORY_CAPTURE` 枚举设备接口，挑出 `VID_07CA` 的
+   USB 功能，把**真实接口路径**（`\\?\usb#vid_07ca&pid_2553&mi_02#...#{guid}`）喂给厂商组件——
+   它本来就只从路径里抠 `vid_`/`&pid_` 两个 token，拿不出这两个 token 就什么都做不了。
+   接口类枚举失败时退化为实例 ID（小写化、反斜杠转 `#`），仍然带得住这两个 token。
+   所有候选（实例 ID / 友好名 / 接口路径）都进日志。
+2. **修好设备名日志**：格式串与参数对齐，`binding=separate` 现在打印真正的 DirectShow 友好名
+   （stable 路径与序号两种形式都解析）。
+3. **组件状态永远可见**：即使设备识别失败，日志也会写出设备树里找到了什么。
+
+### C4 本机验证
+
+```
+veyra_avermedia_switch_tests：PASS（0 失败）
+  note vid_07ca functions on this machine: 0        ← 本机没插卡，符合预期
+  note vid_ devices on this machine: 2
+  note of those: interfacePath=2 friendlyName=2     ← 接口类枚举确实拿到真实路径
+  ok   every path handed to the vendor carries the vendor token
+  ok   the composite audio function is preferred over the camera functions
+delivery 短测：PASS（logs\delivery\ac2283ab2a9d4f9e90738120ad79aada\result.json）
+```
+
+### C5 环境坑（记录一次，避免重复踩）
+
+隔离 worktree 最初把 `runtime_local` 做成了指向主检出的**目录联接**。`applicationRoot()` 会从 exe
+往上找到第一个含 `runtime_local` 的目录，于是两个会话**共用同一份 UI 设置/预设**：门禁里的
+`--smoke-color` 因此出现一次假失败（共享状态漂移），改成"只硬链接运行库、不共享状态文件"后复跑
+PASS。隔离工作区可以共享二进制依赖，**不能共享状态**。
