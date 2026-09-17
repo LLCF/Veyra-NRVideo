@@ -37,7 +37,7 @@ int wmain(int argc,wchar_t** argv){
         pipeline::EnhanceGraph::FrameOutputs out;
         const bool reject=(i>=8&&i<12)||(i>=24&&i<28);
         auto admission=[&](const auto&){return engine::admitLiveFg(reject?2000000:900000,1000000,0,std::nullopt,0);};
-        ok=graph.process(frame,packet.pts.toDouble()*1000,i==0,out,packet.sequence,&packet.colorInfo,false,admission);
+        ok=graph.process(frame,packet.pts.toDouble()*1000,i==0,out,packet.sequence,&packet.colorInfo,nullptr,false,admission);
         const auto start=std::chrono::steady_clock::now();
         while(ok&&!graph.resolveGeneration(out)){
             if(std::chrono::steady_clock::now()-start>std::chrono::seconds(2)){ok=false;break;}wait.slice(.2);

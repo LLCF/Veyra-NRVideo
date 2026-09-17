@@ -13,6 +13,7 @@ struct AVFrame;
 struct AVPacket;
 struct AVBufferRef;
 struct ID3D11Device;
+struct ID3D11DeviceContext;
 struct ID3D11DeviceContext4;
 struct ID3D11Fence;
 struct ID3D11Texture2D;
@@ -113,6 +114,12 @@ public:
             && hwAccelKind_ == HardwareDecodeKind::D3D11VA;
     }
     bool hardwareActive() const { return hwAccelActive_ && context_ != nullptr; }
+    // Decode path actually in use, for telemetry/UI labels: "d3d12va",
+    // "d3d11va" or "software". Do not label a session with a path it is not on.
+    const char* decodePathName() const {
+        if (!hwAccelActive_) { return "software"; }
+        return hwAccelKind_ == HardwareDecodeKind::D3D11VA ? "d3d11va" : "d3d12va";
+    }
     // Latest decoded surface for the D3D11VA path; only valid after
     // receiveFrame() returned a frame and receiveStatus() == Frame.
     const HardwareSurfaceView& hardwareSurface() const { return hardwareSurface_; }
@@ -126,7 +133,21 @@ public:
 private:
     enum class HardwareDecodeKind { None, D3D12VA, D3D11VA };
 
+    // Decoded slices are copied into these D3D11 textures, which are shared to
+    // D3D12 as NT handles. The ring is oversized for the app's six command
+    // slots, so a slot is only rewritten well after the graph finished reading
+    // it (see the comment in receiveFrame()).
+    static constexpr uint32_t kInteropSlotCount = 8;
+    struct InteropSlot {
+        ID3D11Texture2D* texture = nullptr;
+        ID3D12Resource* resource = nullptr;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        uint64_t lastFenceValue = 0;
+    };
+
     ID3D12Resource* importD3D11Texture(ID3D11Texture2D* texture);
+    bool createInteropSlots(const void* sourceDesc);
     bool createInteropFence(ID3D12Device* d3d12Device);
     void releaseInterop();
 
@@ -145,11 +166,15 @@ private:
     // the extra device reference, the fence pair and the opened texture views.
     AVBufferRef* d3d11DeviceRef_ = nullptr;
     ID3D11Device* d3d11Device_ = nullptr;             // our reference (FFmpeg holds its own)
+    ID3D11DeviceContext* d3d11Context_ = nullptr;     // borrowed from the hw device context
     ID3D11Fence* d3d11Fence_ = nullptr;
     ID3D11DeviceContext4* d3d11Context4_ = nullptr;   // borrowed from the hw device context
     ID3D12Device* d3d12Device_ = nullptr;             // borrowed from the caller
     ID3D12Fence* d3d12Fence_ = nullptr;
     uint64_t interopFenceValue_ = 0;
+    uint64_t interopFrameIndex_ = 0;
+    uint32_t interopSlotIndex_ = 0;
+    InteropSlot interopSlots_[kInteropSlotCount];
     HardwareSurfaceView hardwareSurface_{};
     struct D3D11TextureImport { ID3D12Resource* resource = nullptr; bool logged = false; };
     // One decoder pool is a single texture array, so this map stays tiny; the

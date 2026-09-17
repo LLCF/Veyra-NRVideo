@@ -1242,7 +1242,7 @@ bool EnhanceGraph::createViews()
 // ---------------------------------------------------------------------------
 // process: the per-frame chain (verbatim from the probe lambda).
 // ---------------------------------------------------------------------------
-bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, FrameOutputs& out, uint64_t sourceFrameId, const ColorDescription* color, bool retainReferences, const FgAdmission& admitFg)
+bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, FrameOutputs& out, uint64_t sourceFrameId, const ColorDescription* color, const HardwareSurfaceInput* hardwareSurface, bool retainReferences, const FgAdmission& admitFg)
 {
     failedBackend_=engine::FailedBackend::Infrastructure;
     out = FrameOutputs{};
@@ -1307,7 +1307,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
     uint32_t slot = 0;
     if (uploadFences_[parity] && !context_.waitForFenceValue(uploadFences_[parity])) return false;
     hardwareInputFrames_[parity].reset();
-    if(frame->format==AV_PIX_FMT_D3D12){
+    if(frame->format==AV_PIX_FMT_D3D12||frame->format==AV_PIX_FMT_D3D11){
         auto* retained=av_frame_clone(frame);
         if(!retained)return false;
         hardwareInputFrames_[parity]=std::shared_ptr<AVFrame>(retained,[](AVFrame* value){av_frame_free(&value);});
@@ -1372,17 +1372,37 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
         src.PlacedFootprint.Footprint={DXGI_FORMAT_R8G8B8A8_UNORM,packed?packedIngressTexels(desc_.packedInput,srcW_):desc_.yuy2Input?srcW_/2:srcW_,srcH_,1,UINT(rgbPitch_)};
         list->CopyTextureRegion(&dst,0,0,0,&src,nullptr);
         tracker_.transition(list,rgbTex_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    } else if (frame->format == AV_PIX_FMT_D3D12) {
-        auto* d3dFrame = reinterpret_cast<AVD3D12VAFrame*>(frame->data[0]);
-        if (d3dFrame == nullptr || d3dFrame->texture == nullptr) {
-            veyra::log::error("graph", "null d3d12va frame");
-            return false;
+    } else if (frame->format == AV_PIX_FMT_D3D12 || frame->format == AV_PIX_FMT_D3D11) {
+        // Two hardware sources feed the same import: D3D12VA hands the surface
+        // over inside the AVFrame, D3D11VA through the packet (NT-handle shared
+        // texture + D3D11 fence). Both become one NV12/P010 D3D12 texture plus
+        // one GPU-side wait; the shader samples by texel index inside the
+        // visible extent, so decoder allocation padding is never read.
+        ID3D12Fence* waitFence = nullptr;
+        uint64_t waitValue = 0;
+        UINT nv12Slice = 0;
+        if (frame->format == AV_PIX_FMT_D3D12) {
+            auto* d3dFrame = reinterpret_cast<AVD3D12VAFrame*>(frame->data[0]);
+            if (d3dFrame == nullptr || d3dFrame->texture == nullptr) {
+                veyra::log::error("graph", "null d3d12va frame");
+                return false;
+            }
+            nv12Texture = d3dFrame->texture;
+            nv12Slice = static_cast<UINT>(d3dFrame->subresource_index);
+            waitFence = d3dFrame->sync_ctx.fence;
+            waitValue = d3dFrame->sync_ctx.fence_value;
+        } else {
+            if (hardwareSurface == nullptr || !hardwareSurface->present()) {
+                veyra::log::error("graph", "d3d11va frame has no hardware surface view");
+                return false;
+            }
+            nv12Texture = hardwareSurface->texture;
+            nv12Slice = hardwareSurface->subresourceIndex;
+            waitFence = hardwareSurface->waitFence;
+            waitValue = hardwareSurface->waitValue;
         }
-        nv12Texture = d3dFrame->texture;
-        const UINT nv12Slice = static_cast<UINT>(d3dFrame->subresource_index);
-        if (d3dFrame->sync_ctx.fence != nullptr) {
-            if (FAILED(context_.directQueue()->Wait(
-                    d3dFrame->sync_ctx.fence, d3dFrame->sync_ctx.fence_value))) {
+        if (waitFence != nullptr) {
+            if (FAILED(context_.directQueue()->Wait(waitFence, waitValue))) {
                 veyra::log::error("graph", "nv12 fence wait");
                 return false;
             }

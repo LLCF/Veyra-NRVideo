@@ -65,7 +65,7 @@ bool TiledImageProcessor::process(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotR
         tileSettings.revision=desc.settingsRevision;if(!graph.applySettings(tileSettings))return false;
         pipeline::EnhanceGraph::FrameOutputs out;sink::RgbaImage tile;
         // Every tile is a new spatial image, never a temporal neighbour.
-        if(!graph.process(frame.get(),0,true,out,uint64_t(stats.tiles)+1,nullptr,false)||
+        if(!graph.process(frame.get(),0,true,out,uint64_t(stats.tiles)+1,nullptr,nullptr,false)||
             !sink::readRgba8(ctx,ring,graph.videoFrameResource(out.videoSlot),tile))return false;
         if(tile.width!=tileW||tile.height!=tileH)return false;
         out={};

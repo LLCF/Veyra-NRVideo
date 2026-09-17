@@ -199,10 +199,11 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 // capability check and records its fallback.
                 od.preferHardwareDecode=true;
                 od.d3d12Device=ctx.device();od.d3d12Queue=ctx.directQueue();
+                od.d3d12AdapterLuid=ctx.adapter().luid;
                 // Diagnostic uses the production graph/presenter to validate
                 // D3D12VA imports without needing a paired PS5 or credentials.
                 if(!isCapture&&GetEnvironmentVariableW(L"VEYRA_TEST_FILE_HW_DECODE",nullptr,0)){
-                    od.preferHardwareDecode=true;od.d3d12Device=ctx.device();od.d3d12Queue=ctx.directQueue();
+                    od.preferHardwareDecode=true;od.d3d12Device=ctx.device();od.d3d12Queue=ctx.directQueue();od.d3d12AdapterLuid=ctx.adapter().luid;
                 }
                 // Audio ingress policy has to be in place before the capture
                 // graph negotiates its media type, otherwise the first connect
@@ -778,7 +779,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                         if(cachedFrame){
                             pipeline::EnhanceGraph::FrameOutputs refreshed;
                             const double refreshPtsMs=cachedPacket.pts.toDouble()*1000.0;
-                            if(graph.process(cachedFrame,refreshPtsMs,true,refreshed,cachedPacket.sequence,&cachedPacket.colorInfo,false)){
+                            if(graph.process(cachedFrame,refreshPtsMs,true,refreshed,cachedPacket.sequence,&cachedPacket.colorInfo,&cachedPacket.hardwareSurface,false)){
                                 out=refreshed;
                                 hasOutput=true;
                                 {std::lock_guard lock(mutex_);++snapshot_.pausedFrameRefreshes;}
@@ -981,7 +982,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 // settings/history or inventing GPU execution timestamps.
                 wchar_t testWork[16]{};
                 if(!isImage&&GetEnvironmentVariableW(L"VEYRA_TEST_VIDEO_WORK_MS",testWork,16))std::this_thread::sleep_for(std::chrono::milliseconds(std::clamp(_wtoi(testWork),0,150)));
-                bool processed=false;{processWaitBase=ring.cpuWaitCount();processWaitMsBase=ring.cpuWaitMilliseconds();processSubmitBase=ring.submitCount();processed=!injectedReject&&graph.process(frame,pts,historyReset,out,pkt.sequence,&pkt.colorInfo,comparisonMode_!=0,admitFg);processSlotWaitMs=ring.cpuWaitMilliseconds()-processWaitMsBase;}
+                bool processed=false;{processWaitBase=ring.cpuWaitCount();processWaitMsBase=ring.cpuWaitMilliseconds();processSubmitBase=ring.submitCount();processed=!injectedReject&&graph.process(frame,pts,historyReset,out,pkt.sequence,&pkt.colorInfo,&pkt.hardwareSurface,comparisonMode_!=0,admitFg);processSlotWaitMs=ring.cpuWaitMilliseconds()-processWaitMsBase;}
                 previewSkipSinceProcess=false;
                 if(!processed){
                     const auto failedComponent=graph.failedBackend();
@@ -1009,7 +1010,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     if(transaction){
                         ring.drainQueue();out={};presenter.close();graph.shutdown();options=PlayerOptions::from(previous);
                         gd=previousDesc;
-                        if(graph.initialize(gd)&&presenter.open(ctx,window,graph,options.settings.captureCompatible)&&graph.createViews()&&graph.process(frame,pts,true,out,pkt.sequence,&pkt.colorInfo,comparisonMode_!=0)){
+                        if(graph.initialize(gd)&&presenter.open(ctx,window,graph,options.settings.captureCompatible)&&graph.createViews()&&graph.process(frame,pts,true,out,pkt.sequence,&pkt.colorInfo,&pkt.hardwareSurface,comparisonMode_!=0)){
                             finishReset(diagnostics::ResetOutcome::RolledBack);
                             std::lock_guard lock(mutex_);desired_.rejectVideoRequest(requested,previous);snapshot_.desired=desired_;snapshot_.rejectedRevision=requested.revision;snapshot_.applying=desired_!=previous;snapshot_.status=L"参数执行失败，已整套回滚";transaction=false;
                         }else{status(L"参数回滚失败，已停止",true);break;}

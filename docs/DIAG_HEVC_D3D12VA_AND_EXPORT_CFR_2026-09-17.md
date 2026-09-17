@@ -193,3 +193,101 @@ ffmpeg -hide_banner -loglevel verbose -hwaccel d3d11va -i IMAX.mkv -frames:v 60 
 # Veyra 本体（任意 HEVC 文件都会复现）
 Veyra.exe <any_hevc.mkv> --smoke-seconds 6
 ```
+
+## 8. 修复实施：HEVC 改走 D3D11VA（2026-09-17 当天完成）
+
+用户决定：**HEVC 一律接 D3D11VA，不再用 D3D12VA 碰运气。**
+
+### 8.1 实现
+
+| 文件 | 改动 |
+|---|---|
+| `include/veyra/media/FFmpegVideoDecoder.h` / `src/media/FFmpegVideoDecoder.cpp` | 新增 `openD3D11VA()`（同适配器私有 D3D11 设备 + 共享纹理环 + D3D11→D3D12 fence）、`HardwareSurfaceView`、`receiveFrame()` 里逐帧发布共享面；`hardwareFrameImportable()` 支持 D3D11 面 |
+| `include/veyra/pipeline/FramePacket.h` | 新增 `HardwareSurfaceInput`（纹理 / 子资源 / 等待 fence / 纹理尺寸），随帧包传递 |
+| `include/veyra/pipeline/EnhanceGraph.h` / `src/pipeline/EnhanceGraph.cpp` | `process()` 增加硬件面参数；ingress 支持 `AV_PIX_FMT_D3D11`，与 D3D12VA 共用同一段 SRV/等待逻辑 |
+| `include/veyra/source/IFrameSource.h` / `src/source/MediaFileSource.cpp` | `SourceOpenDesc.d3d12AdapterLuid`、`SourceInfo.videoDecodePath`；**HEVC → D3D11VA**，其余编码仍走 D3D12VA，失败再软解 |
+| `include/veyra/gfx/D3D12DeviceContext.h` / `src/gfx/D3D12DeviceContext.cpp` | `AdapterInfo.luid`（D3D11 设备需要同适配器） |
+| `src/engine/EngineController.cpp` / `src/engine/VideoExportJob.cpp` 等 | 传 adapter LUID 与 `&packet.hardwareSurface` |
+| `tests/integration/HardwareImportImageTests.cpp` | 支持两种硬件路径，打印真实解码路径与共享面信息 |
+| `CMakeLists.txt` | `veyra_media` 链接 `d3d11` |
+
+### 8.2 为什么是"拷贝进自己的共享纹理"而不是直接共享解码面
+
+实测（本机 RTX 5070 / 616.56）：
+
+1. 给 FFmpeg 的解码池加 `SHARED_NTHANDLE` → `[AVHWFramesContext] Could not create the texture (80070057)`，
+   即驱动拒绝在 **DXVA 解码输出纹理**上开共享。
+2. 自己新建一张 NV12 纹理，只加 `SHARED_NTHANDLE` → 同样 `0x80070057`。
+3. 换成 `D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE`（NT 句柄共享的标准组合）
+   → 创建成功，D3D12 `OpenSharedHandle` 成功。
+
+所以最终结构：FFmpeg 用标准（非共享）解码池 → 每帧把解码切片 **GPU 拷贝**进我们自己的共享纹理环（8 槽，
+保留解码对齐尺寸）→ D3D11 fence 加信号 → 图在 D3D12 队列上 `Wait` 一次再采样。全程零回读、零 CPU 等待。
+图入口本来就按**绝对 texel 索引**差分采样，所以对齐留白（HEVC 128 对齐）天然不会被读进来。
+
+槽位复用安全性：应用每 `read()` 一帧才提交一次 D3D12 工作，而 6 个命令槽会强制"第 N 帧提交前，第 N-6 帧
+的 GPU 工作已完成"；8 槽 > 6+1，因此一个槽在 8 帧后被重写时，它上一次的读取已经完成。同一槽内的两次拷贝
+之间还有 D3D11 侧 fence 等待兜底。
+
+### 8.3 验证（`veyra_hw_import_image_tests`，硬解 vs 软解逐像素全图对比）
+
+| 输入 | 解码路径 | 解码面 | 结果 |
+|---|---|---|---|
+| 1280x720 HEVC（本机 NVENC） | `d3d11va` | 1280x768（对齐） | `FULL_IMAGE_PASS=1 worst=0` |
+| 3840x2160 HEVC（本机 NVENC） | `d3d11va` | 3840x2176（对齐） | `FULL_IMAGE_PASS=1 worst=0` |
+| **IMAX 3840x2024 HEVC（用户文件）** | `d3d11va` | 3840x2048（对齐） | `FULL_IMAGE_PASS=1 worst=0` |
+| 1080x1920 H.264（回归） | `d3d12va`（未变） | 1080x1920 | `FULL_IMAGE_PASS=1 worst=0` |
+
+`worst=0` = 4 帧全图平均绝对误差为 0，说明共享/拷贝/裁剪链路与软解完全一致，没有颜色或几何失真；
+测试内附带的 `hardwareImportFixtures`（1/3 切片纹理阵列）同样通过。
+
+### 8.4 未验证（不许当作已通过）
+
+- **没有跑 Veyra 本体 smoke**：构建目录里的 `veyra.exe` 被另一个正在运行的实例占用。
+  全目标编译（`cmake --build <dir> -- -k 0`）结果：**105/105 个其他目标全部编译+链接通过**，唯一失败的是
+  `veyra.exe` 的链接（`LNK1104: 无法打开文件"veyra.exe"`，纯文件锁）。因此"打开 IMAX 文件、播放 30 秒"
+  这一条留给用户顺手验收。
+- 10-bit HEVC（P010）未测；AMD/Intel 适配器未测；低延迟（采集）路径未测。
+- 8 槽复用的推理依赖"应用 6 命令槽 + 每次 read 提交一帧"这一当前架构，改环大小或改调度需重新评估。
+
+## 9. 导出修复：整槽缺口补帧（同日晚，用户拍板"把导出修复一下"）
+
+### 9.1 策略
+
+- **只有"正好缺整数个网格槽位"才补**：`CfrTimeline::missingSlots()` 要求该帧时间戳落在网格上
+  （残差 ≤ 半个容器 tick），且相对当前索引前移 1..2 槽。落在网格外（真 VFR 抖动）或跳幅超过 2 槽的源，
+  **照旧硬失败**，输出不落地。
+- 缺口用**上一帧真实画面重复填充**（`multiplier` 个输出帧，与正常一格的输出格数一致），**不伪造插值**：
+  DLSS-G 无法用"同一帧"做插值，硬插会编造运动。补帧计入 `hold`，并单独统计 `gapFillEvents/gapFilledSlots`。
+- 补完立刻 `CfrTimeline::resync()` 重锚相位，后续帧继续严格校验；预检的 120 帧抽样
+  （`CfrTimeline::select()`）也认同样的整槽缺口，否则文件会在进循环前就被拒。
+- 结束语会写清楚：`（源文件缺帧 N 处/M 帧，已按恒定帧率复制上一帧补齐）`；日志另有一行
+  `[export-timeline] gap filled … (previous frame repeated; no interpolation invented)`。
+
+### 9.2 验证
+
+素材：`testsrc2` 30fps / 6.000s / 180 帧 CFR，用 `select` 精确抠掉样点（保留时间轴）：
+`exp_hole1.mp4`（缺第 60 帧，179 帧，时间戳 1.9333→2.0333）与 `exp_hole3.mp4`（缺 60/61/62，177 帧）。
+
+| 用例 | 命令 | 结果 |
+|---|---|---|
+| 单元策略 | `veyra_repair_contract_tests` | **197 checks / 0 failures**（新增 6 项：缺口识别、网格外抖动拒绝、>2 槽拒绝、resync 后重对齐） |
+| 缺 1 帧导出 | `veyra_export_probe exp_hole1.mp4 out_hole1.mp4` | **exit 0**；`gap filled source=60 … missingSlots=1`；`source=179 hold=1 output=180 gapFillEvents=1`；`export-verify decoded=180 expected=180 passed=true` |
+| 缺 3 帧导出 | `veyra_export_probe exp_hole3.mp4 out_hole3.mp4` | **exit 1**，`CFR rejected source=preflight`，**不生成输出文件**（边界未被放宽） |
+| 无缺口回归 | `veyra_export_probe exp_src.mp4 out_clean.mp4` | exit 0，`gapFillEvents=0 hold=0 output=180`，verify 通过 |
+| **应用本体无界面导出** | `Veyra.exe exp_hole1.mp4 --export-out … --max-frames 80` | **exitCode=0**，输出存在，`[app] export result=true`，verify `decoded=81 expected=81` |
+| 补的是不是"上一帧" | 输出第 60 帧 vs 源各帧 PSNR | 源第 59 帧（洞前最后一张）**43.64 dB**，源第 60 帧（洞后第一张）20.47 dB，源第 57 帧 22.20 dB → 确为重复上一帧，不是插值/编造 |
+
+### 9.3 改动文件
+
+`include/veyra/engine/CfrTimeline.h`（`missingSlots()` / `resync()` / `select()` 缺口容忍）、
+`src/engine/VideoExportJob.cpp`（补帧 + 重锚 + 计数 + 收尾文案）、
+`tests/unit/RepairContractTests.cpp`（策略用例）、
+`tools/export_probe/main.cpp` + `CMakeLists.txt`（无界面导出验证台）。
+
+### 9.4 边界（如实记录）
+
+- 只补 1..2 槽；3 槽以上或网格外偏差仍然拒绝——**没有把 VFR 源悄悄当 CFR 导出**。
+- 缺口处是"冻结上一帧"，缺口后第一帧的 DLSSG 插值仍取自（洞前, 洞后）两帧；那一处运动速度会比真实
+  时间轴略快，属于源素材本身丢帧的固有代价，不额外伪造。
+- 补帧数计入 `hold`（导出摘要里的"重复帧"），未新增 `ExportCounts` 字段以免动 UI 契约。

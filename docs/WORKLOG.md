@@ -101,8 +101,23 @@ veyra.exe capture:0:0:0 --smoke-seconds 120 --color-grade=1.0   # 链路开（+1
 - 1080x1920 H.264 → 仍 `path=d3d12va`，`worst=0`，无回归。
 - 测试内 `hardwareImportFixtures`（1/3 切片阵列）同样通过。
 
-**未验证**：Veyra 本体 smoke（构建目录 `veyra.exe` 被另一个运行中的实例占用，编译全过、只差最后链接）、
-10-bit P010、AMD/Intel、采集低延迟路径。**本轮未提交、未发布、未替换便携包。**
+**未验证**：GUI 里打开 IMAX 文件的播放 smoke（`veyra.exe` 已链接成功、应用级无界面导出已实测，但没跑
+窗口播放）；10-bit P010、AMD/Intel、采集低延迟路径。**本轮未提交、未发布、未替换便携包。**
+
+#### 再后续：导出整槽缺口补帧（用户拍板"把导出修复一下"）
+
+- 策略：`CfrTimeline::missingSlots()` 只认"落在网格上、前移 1..2 槽"的缺口（残差 ≤ 半个容器 tick），
+  补帧用**上一帧真实画面重复** `multiplier` 次，**不伪造插值**；补完 `resync()` 重锚相位；预检
+  `select()` 的 120 帧抽样同样容忍整槽缺口（否则文件在进循环前就被拒）。网格外抖动或 >2 槽照旧硬失败。
+- 改动：`include/veyra/engine/CfrTimeline.h`、`src/engine/VideoExportJob.cpp`、
+  `tests/unit/RepairContractTests.cpp`、新增 `tools/export_probe`（无界面导出验证台）+ `CMakeLists.txt`。
+- 验证：单元 **197 checks / 0 failures**；`exp_hole1.mp4`（缺 1 帧）导出 **exit 0**，
+  `gap filled source=60 missingSlots=1`、`source=179 hold=1 output=180 gapFillEvents=1`、
+  `export-verify decoded=180 expected=180 passed=true`；`exp_hole3.mp4`（缺 3 帧）仍 **exit 1 + 无输出**；
+  无缺口素材 `gapFillEvents=0` 正常；**应用本体无界面导出**（`Veyra.exe … --export-out … --max-frames 80`）
+  `exitCode=0`、`export result=true`；补帧正确性用 PSNR 证明：输出第 60 帧 vs 源第 59 帧 **43.64 dB**
+  （vs 洞后第一帧 20.47 dB），确为重复上一帧，不是插值。
+- 全目标编译 `-k 0` → **21/21 全部链接成功（含 veyra.exe）**。仍未提交、未发布。
 
 用户报两件事：`IMAX.Laser.Pre.Show.New.2160P.DDP5.1.Atmos-ZhiLuan.mkv` 打不开；另一台机器上
 连续两次导出跑到一半中止（`C:\Users\123\Desktop\导出失败\`）。

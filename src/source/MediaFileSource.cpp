@@ -54,6 +54,7 @@ bool MediaFileSource::fallbackToSoftware(std::string_view reason)
         return false;
     }
     info_.hardwareDecodeActive = false;
+    info_.videoDecodePath = "software";
     info_.containerName = demuxer_.formatName();
     info_.videoPixelFormatName = params->format >= 0 && av_get_pix_fmt_name(static_cast<AVPixelFormat>(params->format))
         ? av_get_pix_fmt_name(static_cast<AVPixelFormat>(params->format)) : "unknown";
@@ -140,14 +141,31 @@ bool MediaFileSource::open(const SourceOpenDesc& desc)
 
     bool decoderOpen = false;
     if (desc.preferHardwareDecode && desc.d3d12Device != nullptr && desc.d3d12Queue != nullptr) {
-        decoderOpen = decoder_.openD3D12VA(params, demuxer_.videoTimeBaseNum(),
-            demuxer_.videoTimeBaseDen(),
-            static_cast<ID3D12Device*>(desc.d3d12Device),
-            static_cast<ID3D12CommandQueue*>(desc.d3d12Queue));
-        if (decoderOpen) {
-            veyra::log::info("source-file", "D3D12VA decode active (shared device)");
+        // HEVC uses D3D11VA on purpose. On some drivers (RTX 5070 + 616.56) the
+        // first HEVC picture of the D3D12VA decoder faults the driver and the
+        // SHARED D3D12 device is removed, which took the whole session down
+        // instead of falling back (docs/DIAG_HEVC_D3D12VA_AND_EXPORT_CFR_2026-09-17.md).
+        // The D3D11VA path decodes on its own device and shares the surfaces as
+        // NT handles, so a failure there can only cost a software fallback.
+        if (params->codec_id == AV_CODEC_ID_HEVC) {
+            decoderOpen = decoder_.openD3D11VA(params, demuxer_.videoTimeBaseNum(),
+                demuxer_.videoTimeBaseDen(), desc.d3d12AdapterLuid,
+                static_cast<ID3D12Device*>(desc.d3d12Device));
+            if (decoderOpen) {
+                veyra::log::info("source-file", "D3D11VA decode active (NT-handle surfaces shared to the D3D12 graph)");
+            } else {
+                veyra::log::warn("source-file", "D3D11VA open failed; falling back to software decode (explicit)");
+            }
         } else {
-            veyra::log::warn("source-file", "D3D12VA open failed; falling back to software decode (explicit)");
+            decoderOpen = decoder_.openD3D12VA(params, demuxer_.videoTimeBaseNum(),
+                demuxer_.videoTimeBaseDen(),
+                static_cast<ID3D12Device*>(desc.d3d12Device),
+                static_cast<ID3D12CommandQueue*>(desc.d3d12Queue));
+            if (decoderOpen) {
+                veyra::log::info("source-file", "D3D12VA decode active (shared device)");
+            } else {
+                veyra::log::warn("source-file", "D3D12VA open failed; falling back to software decode (explicit)");
+            }
         }
     }
     if (!decoderOpen) {
@@ -176,6 +194,7 @@ bool MediaFileSource::open(const SourceOpenDesc& desc)
     info_.nominalRateDen = demuxer_.nominalRateDen();
     info_.timestampQuantum = demuxer_.videoTimeBaseDen() > 0 ? double(demuxer_.videoTimeBaseNum()) / demuxer_.videoTimeBaseDen() : 0;
     info_.hardwareDecodeActive = decoder_.hardwareActive();
+    info_.videoDecodePath = decoder_.decodePathName();
     info_.containerName = demuxer_.formatName();
     info_.videoCodecName = avcodec_get_name(params->codec_id);
     info_.videoPixelFormatName = params->format >= 0 && av_get_pix_fmt_name(static_cast<AVPixelFormat>(params->format))
@@ -366,6 +385,20 @@ SourceReadStatus MediaFileSource::read(pipeline::FramePacket& out, const AVFrame
     // The canonical linear working texture is produced by the graph's
     // ingress conversion; the source hands over the decoded frame view.
     out.color.resource = nullptr;
+    // Hardware surfaces that do not travel inside the AVFrame (D3D11VA) are
+    // published per frame; every other path clears the field so the ingress
+    // never sees a stale texture from an earlier frame.
+    if (decoder_.usingD3D11Frames()) {
+        const auto& view = decoder_.hardwareSurface();
+        out.hardwareSurface.texture = view.texture;
+        out.hardwareSurface.subresourceIndex = view.subresourceIndex;
+        out.hardwareSurface.waitFence = view.waitFence;
+        out.hardwareSurface.waitValue = view.waitValue;
+        out.hardwareSurface.textureWidth = view.textureWidth;
+        out.hardwareSurface.textureHeight = view.textureHeight;
+    } else {
+        out.hardwareSurface = pipeline::HardwareSurfaceInput{};
+    }
 
     ++framesRead_;
     if (decodedFrame != nullptr) { *decodedFrame = frame; }
