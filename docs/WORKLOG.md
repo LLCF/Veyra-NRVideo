@@ -22,8 +22,11 @@ FSR **超分**（id 207）是另一个功能，保留不动。
 **打包与验证**（`scripts/package-portable.ps1`，输出 `E:\App`）：
 
 - 包：`E:\App\Veyra-1.4.0-win64-portable`（110 文件 / 0.67 GB 解压）+
-  `Veyra-1.4.0-win64-portable.zip` 470,005,039 字节，
-  SHA256 `ED6A604542895FA740608A77434B73416BDF66B7846811111391E22329CF87B6`；
+  `Veyra-1.4.0-win64-portable.zip` 470,010,842 字节，
+  SHA256 `DFB8650E8E1B7B73902D9E136D21654691D69E0991F557DDAB054F76BB4CE7D6`
+  （**rev2**：第一版包里的 RELEASE_NOTES 还是"按功能区汇总"的老版，补完逐条问题清单后重打了包；
+  旧包留在 `E:\App\Veyra-1.4.0-win64-portable.rev1` 与 `…zip.rev1`，另有第一次失败留下的
+  `….incomplete-20260917`，都可以删）；
 - `Veyra.exe` ProductVersion/FileVersion = **1.4.0**；
 - `scripts/acceptance/portable-smoke.ps1 -Package E:\App\Veyra-1.4.0-win64-portable …` → **PASS**；
 - 打包前：全量编译 **197/197** 链接成功、`delivery.ps1` **DELIVERY SHORT GATE PASS**
