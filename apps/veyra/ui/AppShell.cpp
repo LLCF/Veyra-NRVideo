@@ -824,6 +824,57 @@ else if(colorStep==57){
     if(colorStep==58)veyra::log::info("color-ui-test","preset deleted; colour page back to no stored looks");
 }
 else if(colorStep==58){
+    colorStep=59;
+}
+// Colour grading wheels (professional layout): dragging inside the disc must set
+// hue+saturation, the luminance bar must set luminance, and a double-click must
+// put the zone back to neutral.
+else if(colorStep==59){
+    POINT point{};
+    const auto wheel=colourControl(veyra::ui::colourWheelControlId(0));
+    veyra::ui::settingsColorScrollToTest(veyra::ui::colourWheelControlId(0));
+    if(wheel&&veyra::ui::settingsColorWheelTestPoint(0,120.0f,80.0f,point)){
+        SendMessageW(wheel,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(point.x,point.y));
+        SendMessageW(wheel,WM_LBUTTONUP,0,MAKELPARAM(point.x,point.y));
+        colorStep=60;
+    }else{
+        veyra::log::info("color-ui-test","colour wheel control missing");
+        colorStep=-1;
+    }
+}
+else if(colorStep==60){
+    const auto& grading=colourSnapshot.desired.color.grading[0];
+    const bool dialed=std::abs(grading.hue-120.0f)<6.0f&&std::abs(grading.saturation-80.0f)<8.0f;
+    veyra::log::info("color-ui-test",std::format("colour wheel drag hue={:.1f} saturation={:.1f} pass={}",grading.hue,grading.saturation,dialed));
+    colorStep=dialed?61:-1;
+}
+else if(colorStep==61){
+    POINT point{};
+    const auto wheel=colourControl(veyra::ui::colourWheelControlId(0));
+    if(wheel&&veyra::ui::settingsColorWheelTestBarPoint(0,-50.0f,point)){
+        SendMessageW(wheel,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(point.x,point.y));
+        SendMessageW(wheel,WM_LBUTTONUP,0,MAKELPARAM(point.x,point.y));
+    }
+    colorStep=62;
+}
+else if(colorStep==62){
+    const auto& grading=colourSnapshot.desired.color.grading[0];
+    const bool shifted=std::abs(grading.luminance+50.0f)<8.0f;
+    veyra::log::info("color-ui-test",std::format("colour wheel luminance bar={:.1f} pass={}",grading.luminance,shifted));
+    colorStep=shifted?63:-1;
+}
+else if(colorStep==63){
+    const auto wheel=colourControl(veyra::ui::colourWheelControlId(0));
+    if(wheel)SendMessageW(wheel,WM_LBUTTONDBLCLK,0,MAKELPARAM(6,6));
+    colorStep=64;
+}
+else if(colorStep==64){
+    const auto& grading=colourSnapshot.desired.color.grading[0];
+    const bool reset=grading.hue==0.0f&&grading.saturation==0.0f&&grading.luminance==0.0f;
+    veyra::log::info("color-ui-test",std::format("colour wheel double-click reset pass={}",reset));
+    colorStep=reset?65:-1;
+}
+else if(colorStep==65){
     auto edit=colourControl(1300);
     const bool beforeVisible=edit&&IsWindowVisible(edit);
     const bool beforeMask=(preferences.load().colourFoldMask&1u)!=0u;

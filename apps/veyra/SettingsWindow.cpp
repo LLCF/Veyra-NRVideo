@@ -14,6 +14,7 @@
 #include <iomanip>
 #include <array>
 #include <cmath>
+#include <map>
 namespace veyra::ui {
 namespace {
 HWND window=nullptr,body=nullptr;engine::EngineController* controller=nullptr;HFONT font=nullptr;
@@ -129,6 +130,9 @@ std::vector<ColorParam> colorParams;
 constexpr int colorLabelId(int i){return 1200+i;}
 constexpr int colorEditId(int i){return 1300+i;}
 constexpr int colorSliderId(int i){return 1400+i;}
+// Colour wheels (4 zones) and their class name; ids sit above the button block.
+constexpr int colorWheelId(int zone){return 840+zone;}
+constexpr const wchar_t* kColorWheelClass=L"VeyraColorWheel";
 constexpr int kColorMaxParams=100;
 engine::ColorSettings colourTarget(){
     return (enhancementEnabled?controller->snapshot().desired:configuredSettings).color;
@@ -208,8 +212,10 @@ void saveColourFoldState(){
     if(!store_.save(preferences,nullptr))veyra::log::warn("color-ui","fold state not saved");
 }
 void layoutColorPage(){
-    auto place=[&](int id,int y,int height,bool hidden){
-        for(auto& entry:items)if(GetDlgCtrlID(entry.h)==id){entry.y=y;entry.height=height;entry.hidden=hidden;return;}
+    RECT bodyRect{};GetClientRect(body,&bodyRect);
+    const int bodyWidthDip=MulDiv(bodyRect.right,96,veyra::ui::layoutDpi(window));
+    auto place=[&](int id,int y,int height,bool hidden,int x=-1,int w=-2){
+        for(auto& entry:items)if(GetDlgCtrlID(entry.h)==id){entry.y=y;entry.height=height;entry.hidden=hidden;if(x>=0)entry.x=x;if(w!=-2)entry.w=w;return;}
     };
     int y=12;
     place(800,y,36,false);y+=42;
@@ -224,6 +230,18 @@ void layoutColorPage(){
         const auto title=std::format(L"{}  {}",collapsed?L"▸":L"▾",colorSectionName(section));
         putText(810+section,title.c_str());
         y+=38;
+        // Four colour wheels in a 2x2 grid lead the colour-grading section, like
+        // a professional grading panel; blending/balance keep their slider rows.
+        if(section==4){
+            // body width is not in scope here; the viewport width is enough to
+            // split the wheel grid into two columns.
+            const int cellWidth=std::max<int>(dip(window,120),(bodyWidthDip-24-8)/2);
+            place(colorWheelId(0),y,190,collapsed,12,cellWidth);
+            place(colorWheelId(1),y,190,collapsed,12+cellWidth+8,cellWidth);
+            place(colorWheelId(2),y+196,190,collapsed,12,cellWidth);
+            place(colorWheelId(3),y+196,190,collapsed,12+cellWidth+8,cellWidth);
+            y+=400;
+        }
         for(size_t i=0;i<colorParams.size();++i){
             const auto& param=colorParams[i];
             if(param.section!=section)continue;
@@ -260,6 +278,7 @@ void syncColorControls(){
     }
     if(auto space=item(819))if(int(SendMessageW(space,CB_GETCURSEL,0,0))!=colour.lutInputSpace)SendMessageW(space,CB_SETCURSEL,WPARAM(colour.lutInputSpace),0);
     check(820,colour.blackWhite?BST_CHECKED:BST_UNCHECKED);
+    for(int zone=0;zone<engine::kColorGradingZones;++zone)if(auto wheel=item(colorWheelId(zone)))InvalidateRect(wheel,nullptr,FALSE);
     syncingColour=false;
 }
 bool applyColour(const engine::ColorSettings& colour,bool autoEnable,bool record=true){
@@ -291,7 +310,153 @@ std::wstring pickColourSave(const wchar_t* filter,const wchar_t* title,const wch
     dialog.lpstrTitle=title;dialog.lpstrDefExt=L"vpcolor";dialog.Flags=OFN_OVERWRITEPROMPT|OFN_PATHMUSTEXIST|OFN_NOCHANGEDIR;
     if(!GetSaveFileNameW(&dialog))return {};
     return buffer;
-}bool colourFieldEdited(int index,float value){
+}
+// ---------------------------------------------------------------------------
+// Colour wheel (colour-grading zones). One control per zone: a hue/saturation
+// disc, a luminance bar under it and a numeric readout - the professional
+// grading layout. GDI+ draws on the same alpha surface as the rest of the panel.
+// ---------------------------------------------------------------------------
+Gdiplus::Bitmap* hueDisc(int size){
+    static std::map<int,Gdiplus::Bitmap*> cache;
+    const auto found=cache.find(size);
+    if(found!=cache.end())return found->second;
+    auto* bitmap=new Gdiplus::Bitmap(size,size,PixelFormat32bppPARGB);
+    const float radius=size*0.5f;
+    for(int y=0;y<size;++y)for(int x=0;x<size;++x){
+        const float dx=(float(x)+0.5f)-radius,dy=(float(y)+0.5f)-radius;
+        const float distance=std::sqrt(dx*dx+dy*dy)/radius;
+        if(distance>1.0f){bitmap->SetPixel(x,y,Gdiplus::Color(0,0,0,0));continue;}
+        float hue=std::atan2(dy,dx)*57.2957795f;
+        if(hue<0)hue+=360.0f;
+        const float saturation=std::min(distance,1.0f);
+        const float hp=hue/60.0f,c=saturation,k=c*(1.0f-std::abs(std::fmod(hp,2.0f)-1.0f));
+        float r=0,g=0,b=0;
+        if(hp<1){r=c;g=k;}else if(hp<2){r=k;g=c;}else if(hp<3){g=c;b=k;}
+        else if(hp<4){g=k;b=c;}else if(hp<5){r=k;b=c;}else{r=c;b=k;}
+        const float m=1.0f-c;
+        bitmap->SetPixel(x,y,Gdiplus::Color(255,BYTE((r+m)*255.0f),BYTE((g+m)*255.0f),BYTE((b+m)*255.0f)));
+    }
+    cache[size]=bitmap;
+    return bitmap;
+}
+struct WheelGeometry{int size,cx,cy,barLeft,barRight,barY;};
+WheelGeometry wheelGeometry(HWND h,const RECT& r){
+    WheelGeometry geometry{};
+    const int width=int(r.right-r.left);
+    // Room for the zone name above, and the luminance bar plus its readout below.
+    geometry.size=std::max<int>(dip(h,56),std::min<int>(width-dip(h,22),int(r.bottom-r.top)-dip(h,76)));
+    geometry.cx=r.left+width/2;
+    geometry.cy=r.top+dip(h,20)+geometry.size/2;
+    geometry.barLeft=r.left+dip(h,14);
+    geometry.barRight=r.right-dip(h,14);
+    geometry.barY=geometry.cy+geometry.size/2+dip(h,18);
+    return geometry;
+}
+void wheelApply(int zone,float hue,float saturation,float luminance,bool record){
+    auto colour=colourTarget();
+    if(zone<0||zone>=engine::kColorGradingZones)return;
+    if(hue>=0)colour.grading[std::size_t(zone)].hue=std::clamp(hue,0.0f,360.0f);
+    if(saturation>=0)colour.grading[std::size_t(zone)].saturation=std::clamp(saturation,0.0f,100.0f);
+    if(luminance>-999)colour.grading[std::size_t(zone)].luminance=std::clamp(luminance,-100.0f,100.0f);
+    applyColour(colour,true,record);
+}
+void paintColorWheel(HWND h,HDC dc,RECT r){
+    const int zone=GetDlgCtrlID(h)-colorWheelId(0);
+    if(zone<0||zone>=engine::kColorGradingZones)return;
+    const auto colour=colourTarget();
+    const auto& wheel=colour.grading[std::size_t(zone)];
+    fillSurface(dc,r,h);
+    const auto geometry=wheelGeometry(h,r);
+    AlphaGraphics drawing(dc);
+    auto& graphics=drawing.get();
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    if(auto* disc=hueDisc(geometry.size))graphics.DrawImage(disc,geometry.cx-geometry.size/2,geometry.cy-geometry.size/2,geometry.size,geometry.size);
+    Gdiplus::Pen ring(color(RGB(58,60,63)),float(dip(h,1)));
+    graphics.DrawEllipse(&ring,geometry.cx-geometry.size/2,geometry.cy-geometry.size/2,geometry.size,geometry.size);
+    const float angle=wheel.hue*0.0174532925f,radius=wheel.saturation/100.0f*geometry.size*0.5f;
+    const float dotX=geometry.cx+std::cos(angle)*radius,dotY=geometry.cy+std::sin(angle)*radius;
+    const int dotRadius=dip(h,6);
+    RECT dotRing{int(dotX)-dotRadius-1,int(dotY)-dotRadius-1,int(dotX)+dotRadius+1,int(dotY)+dotRadius+1};
+    roundRect(dc,dotRing,RGB(14,15,16),dotRadius+1);
+    RECT dot{int(dotX)-dotRadius,int(dotY)-dotRadius,int(dotX)+dotRadius,int(dotY)+dotRadius};
+    roundRect(dc,dot,RGB(245,247,249),dotRadius);
+    // Luminance bar: accent above the centre, neutral below, so the direction is
+    // readable without labels.
+    const int mid=(geometry.barLeft+geometry.barRight)/2;
+    RECT track{geometry.barLeft,geometry.barY-dip(h,2),geometry.barRight,geometry.barY+dip(h,2)};
+    roundRect(dc,track,line,dip(h,3));
+    const float fraction=(std::clamp(wheel.luminance,-100.0f,100.0f)+100.0f)/200.0f;
+    const int handle=geometry.barLeft+int((geometry.barRight-geometry.barLeft)*fraction);
+    if(handle>mid){RECT fill{mid,geometry.barY-dip(h,2),handle,geometry.barY+dip(h,2)};roundRect(dc,fill,accent,dip(h,3));}
+    else if(handle<mid){RECT fill{handle,geometry.barY-dip(h,2),mid,geometry.barY+dip(h,2)};roundRect(dc,fill,secondary,dip(h,3));}
+    const int thumbRadius=dip(h,5);
+    RECT thumb{handle-thumbRadius,geometry.barY-thumbRadius,handle+thumbRadius,geometry.barY+thumbRadius};
+    roundRect(dc,thumb,RGB(242,244,246),thumbRadius);
+    wchar_t name[64]{};GetWindowTextW(h,name,64);
+    wchar_t readout[96]{};swprintf_s(readout,L"H %d°   S %d   L %+d",int(std::lround(wheel.hue)),int(std::lround(wheel.saturation)),int(std::lround(wheel.luminance)));
+    const auto previous=SelectObject(dc,font);
+    SetBkMode(dc,TRANSPARENT);
+    RECT title{r.left,r.top+dip(h,2),r.right,r.top+dip(h,17)};
+    SetTextColor(dc,textColor);DrawTextW(dc,name,-1,&title,DT_CENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
+    RECT values{r.left,geometry.barY+dip(h,7),r.right,geometry.barY+dip(h,23)};
+    SetTextColor(dc,secondary);DrawTextW(dc,readout,-1,&values,DT_CENTER|DT_SINGLELINE);
+    SelectObject(dc,previous);
+}
+LRESULT CALLBACK colorWheelProc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
+    if(msg==WM_ERASEBKGND)return 1;
+    if(msg==WM_PAINT||msg==WM_PRINTCLIENT){PaintBuffer paint(h,reinterpret_cast<HDC>(wp));paintColorWheel(h,paint.dc,paint.rect);return 0;}
+    if(msg==WM_LBUTTONDBLCLK){
+        wheelApply(GetDlgCtrlID(h)-colorWheelId(0),0,0,0,true);
+        syncColorControls();
+        return 0;
+    }
+    if(msg==WM_LBUTTONDOWN||(msg==WM_MOUSEMOVE&&GetCapture()==h)||msg==WM_LBUTTONUP){
+        RECT r{};GetClientRect(h,&r);
+        const auto geometry=wheelGeometry(h,r);
+        const int x=GET_X_LPARAM(lp),y=GET_Y_LPARAM(lp);
+        if(msg==WM_LBUTTONDOWN){
+            SetFocus(h);SetCapture(h);
+            const float dx=float(x-geometry.cx),dy=float(y-geometry.cy);
+            const bool inDisc=std::sqrt(dx*dx+dy*dy)<=geometry.size*0.5f+float(dip(h,6));
+            const bool onBar=std::abs(y-geometry.barY)<=dip(h,10);
+            SetPropW(h,L"veyra.wheelmode",HANDLE(uintptr_t(onBar&&!inDisc?2:(inDisc?1:0))));
+        }
+        const int mode=int(uintptr_t(GetPropW(h,L"veyra.wheelmode")));
+        if(mode==1){
+            const float dx=float(x-geometry.cx),dy=float(y-geometry.cy);
+            float hue=std::atan2(dy,dx)*57.2957795f;if(hue<0)hue+=360.0f;
+            const float saturation=std::min(1.0f,std::sqrt(dx*dx+dy*dy)/(geometry.size*0.5f))*100.0f;
+            wheelApply(GetDlgCtrlID(h)-colorWheelId(0),hue,saturation,-999,false);
+            InvalidateRect(h,nullptr,FALSE);
+        }else if(mode==2){
+            const float fraction=std::clamp(float(x-geometry.barLeft)/std::max(1,geometry.barRight-geometry.barLeft),0.0f,1.0f);
+            wheelApply(GetDlgCtrlID(h)-colorWheelId(0),-1,-1,fraction*200.0f-100.0f,false);
+            InvalidateRect(h,nullptr,FALSE);
+        }
+        if(msg==WM_LBUTTONUP){
+            ReleaseCapture();
+            RemovePropW(h,L"veyra.wheelmode");
+            colourHistoryPush(colourTarget());
+            InvalidateRect(h,nullptr,FALSE);
+        }
+        return 0;
+    }
+    if(msg==WM_SETCURSOR){SetCursor(LoadCursorW(nullptr,IDC_ARROW));return TRUE;}
+    return DefWindowProcW(h,msg,wp,lp);
+}
+void registerColorWheelClass(){
+    static bool registered=false;
+    if(registered)return;
+    registered=true;
+    WNDCLASSW classDescription{};
+    classDescription.style=CS_DBLCLKS;
+    classDescription.lpfnWndProc=colorWheelProc;
+    classDescription.hInstance=GetModuleHandleW(nullptr);
+    classDescription.lpszClassName=kColorWheelClass;
+    classDescription.hCursor=LoadCursorW(nullptr,IDC_ARROW);
+    RegisterClassW(&classDescription);
+}
+bool colourFieldEdited(int index,float value){
     if(index<0||size_t(index)>=colorParams.size())return false;
     auto colour=colourTarget();
     if(!std::isfinite(value)||value<colorParams[size_t(index)].min||value>colorParams[size_t(index)].max){
@@ -803,11 +968,13 @@ case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.
         // blending and balance controls.
         {
             static const wchar_t* zones[engine::kColorGradingZones]={L"阴影",L"中间调",L"高光",L"全局"};
-            for(int zone=0;zone<engine::kColorGradingZones;++zone){
-                colorParams.push_back({4,composed(std::wstring(zones[zone])+L" · 色相"),0,360,ColorTarget::GradingHue,nullptr,zone,0.0f,4});
-                colorParams.push_back({4,composed(std::wstring(zones[zone])+L" · 饱和度"),0,100,ColorTarget::GradingSaturation,nullptr,zone});
-                colorParams.push_back({4,composed(std::wstring(zones[zone])+L" · 明亮度"),-100,100,ColorTarget::GradingLuminance,nullptr,zone});
-            }
+            registerColorWheelClass();
+            // The thirty-six zone sliders (4 zones x hue/sat/lum) are replaced by
+            // four colour wheels - the professional grading layout. The model,
+            // the shader and the preset schema are unchanged; only the control
+            // that edits them is.
+            for(int zone=0;zone<engine::kColorGradingZones;++zone)
+                add(L"VeyraColorWheel",zones[zone],colorWheelId(zone),0,2,12,0,-1,208);
             colorParams.push_back({4,L"混合",0,100,ColorTarget::Scalar,&engine::ColorSettings::gradingBlending,0,50.0f});
             colorParams.push_back({4,L"平衡",-100,100,ColorTarget::Scalar,&engine::ColorSettings::gradingBalance,0});
         }
@@ -981,6 +1148,39 @@ case WM_DESTROY:KillTimer(h,1);DeleteObject(font);window=nullptr;body=nullptr;it
 }
 engine::EnhancementSettings defaultSettings(){loadStore();return store.defaultSettings();}
 HWND settingsControlForTest(int id){return item(id);}
+bool settingsColorWheelTestPoint(int zone,float hue,float saturation,POINT& out){
+    const auto wheel=item(colorWheelId(zone));
+    if(!wheel)return false;
+    RECT r{};GetClientRect(wheel,&r);
+    const auto geometry=wheelGeometry(wheel,r);
+    const float angle=hue*0.0174532925f;
+    const float radius=std::clamp(saturation,0.0f,100.0f)/100.0f*geometry.size*0.5f;
+    out.x=LONG(geometry.cx+std::cos(angle)*radius);
+    out.y=LONG(geometry.cy+std::sin(angle)*radius);
+    return true;
+}
+bool settingsColorWheelTestBarPoint(int zone,float luminance,POINT& out){
+    const auto wheel=item(colorWheelId(zone));
+    if(!wheel)return false;
+    RECT r{};GetClientRect(wheel,&r);
+    const auto geometry=wheelGeometry(wheel,r);
+    const float fraction=(std::clamp(luminance,-100.0f,100.0f)+100.0f)/200.0f;
+    out.x=LONG(geometry.barLeft+(geometry.barRight-geometry.barLeft)*fraction);
+    out.y=LONG(geometry.barY);
+    return true;
+}
+int colourWheelControlId(int zone){return colorWheelId(zone);}
+void settingsColorScrollToTest(int id){
+    if(!window||!body)return;
+    for(auto& entry:items)if(GetDlgCtrlID(entry.h)==id&&entry.page==2){
+        RECT r{};GetClientRect(window,&r);
+        const int height=MulDiv(r.bottom,96,veyra::ui::layoutDpi(window))-128;
+        if(entry.y<scroll)scroll=entry.y;
+        if(entry.y+entry.height>scroll+height)scroll=entry.y+entry.height-height;
+        arrange();
+        return;
+    }
+}
 int colourParamEditId(const wchar_t* label){
     if(!label)return -1;
     for(size_t i=0;i<colorParams.size();++i)if(std::wcscmp(colorParams[i].label,label)==0)return colorEditId(int(i));

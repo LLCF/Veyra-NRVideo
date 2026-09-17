@@ -1,5 +1,29 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-17 色彩页 UI：颜色分级四色轮（专业型第二批）
+
+把颜色分级从 12 条滑块（4 区 × 色相/饱和度/明亮度）换成**四个自绘色轮**，就是专业调色面板的样子：
+
+- 新增窗口类 `VeyraColorWheel`（`colorWheelProc`）：色相/饱和度圆盘（GDI+，按尺寸缓存位图）、
+  可拖动的白点（含中心十字位）、圆盘下方的**明亮度条**（中点起算，向上橙色、向下灰色，方向一眼可读）、
+  区域名在盘上方、`H xxx° S xx L ±xx` 读数在条下方；
+- 交互：盘内拖动 = 色相+饱和度；亮度条拖动 = 明亮度；**双击复位**该区；拖动期间不写撤销历史，
+  松手时压入一条历史（避免一次拖动塞满 32 步栈）；
+- 布局：2×2 网格（每格 190 高），后面接“混合/平衡”两条滑块；模型/着色器/预设 schema 完全没动，
+  只是换了编辑这 12 个字段的控件；
+- 测试钩子：`colourWheelControlId` / `settingsColorWheelTestPoint` / `settingsColorWheelTestBarPoint` /
+  `settingsColorScrollToTest`（几何只写一处，烟测按色相/饱和度要坐标）。
+
+**验证**：`--smoke-color` **exit 0**，新增三步断言全部通过——
+`colour wheel drag hue=120.1 saturation=79.8 pass=true`（目标 120/80）、
+`colour wheel luminance bar=-50.0 pass=true`、`colour wheel double-click reset pass=true`；
+`veyra_ui_contract_tests` exit 0（384 布局用例）。
+
+真机截图：`logs/color/ui-preview-wheels2.png`。
+
+**下一批**：真曲线编辑器（网格 + 可拖控制点，RGB/R/G/B 通道）、混色器“校正”下拉 + 8 色圆点条、
+分组眼睛 bypass（schema v19）、分区图标与间距抛光。
+
 ## 2026-09-17 色彩页 UI：专业型排版第一步（渐变轨道 + 数值文本 + 交互补全）
 
 用户反馈“全是滑条、没有专业感”，对着 Lightroom / 专业调色面板重做色彩页的观感与交互。
