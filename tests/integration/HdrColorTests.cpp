@@ -51,6 +51,34 @@ int wmain(int argc,wchar_t** argv){
   pipeline::ColorDescription color;color.pixelFormat=pipeline::SourcePixelFormat::P010;color.transfer=hlg?pipeline::TransferFunction::HLG:pipeline::TransferFunction::PQ;color.matrix=pipeline::YuvMatrix::BT2020NCL;
   pipeline::EnhanceGraph::FrameOutputs out;bool ok=graph.process(f,0,true,out,1,&color);double error=0;
   if(ok&&!native){sink::RgbaImage image;ok=sink::readRgba8(ctx,ring,graph.videoFrameResource(out.videoSlot),image);if(ok){for(unsigned i=0;i<3;++i){double m=hdrToneTests::luminance(nits[i],1000);double expected=m<=.0031308?12.92*m:1.055*pow(m,1/2.4)-.055;double actual=image.pixels[(i*22+5)*4]/255.0;error=std::max(error,std::abs(expected-actual));}ok=error<.012;}}
+  if(ok&&!native){
+   // Plan §5.1/§5.2 on HDR content. (a) Exposure is a scene-linear multiply that
+   // happens *before* tone mapping, so +1 EV must match the independent BT.2390
+   // reference evaluated on doubled luminance. (b) A LUT whose declared input
+   // space cannot mean anything on HDR content (sRGB display reference) must be
+   // refused with a visible notice instead of being applied silently.
+   pipeline::EnhanceGraph gradeGraph(ctx,ring);pipeline::EnhanceGraphDesc ggd=gd;ggd.color.enabled=true;ggd.color.exposure=1.0f;
+   pipeline::EnhanceGraph::FrameOutputs gradeOut,lutOut;sink::RgbaImage gradeImage,lutImage;double gradeError=1;
+   bool graded=gradeGraph.initialize(ggd)&&gradeGraph.createViews();
+   pipeline::EnhanceGraph lutGraph(ctx,ring);pipeline::EnhanceGraphDesc lgd=ggd;
+   lgd.color.lutStrength=100.0f;lgd.color.lutInputSpace=engine::ColorSettings::kLutInputSrgb;
+   const bool named=lgd.color.setLutName(L"hdr-input-space-probe.cube");
+   bool refused=named&&lutGraph.initialize(lgd)&&lutGraph.createViews();
+   if(graded){
+    graded=gradeGraph.process(f,0,true,gradeOut,1,&color)&&sink::readRgba8(ctx,ring,gradeGraph.videoFrameResource(gradeOut.videoSlot),gradeImage);
+    if(graded){gradeError=0;for(unsigned i=0;i<3;++i){
+     const double m=hdrToneTests::luminance(std::min(nits[i]*2,1000.0),1000);
+     const double expected=m<=.0031308?12.92*m:1.055*pow(m,1/2.4)-.055;
+     const double actual=gradeImage.pixels[(i*22+5)*4]/255.0;gradeError=std::max(gradeError,std::abs(expected-actual));}
+     graded=gradeError<.014;}
+   }
+   if(refused)refused=!lutGraph.colorLutNotice().empty();
+   if(refused)refused=lutGraph.process(f,0,true,lutOut,1,&color)&&sink::readRgba8(ctx,ring,lutGraph.videoFrameResource(lutOut.videoSlot),lutImage);
+   if(refused)refused=graded&&lutImage.pixels==gradeImage.pixels;
+   std::cout<<"HDR_TONE_GRADE hlg="<<hlg<<" full="<<full<<" linearError="<<gradeError<<" lutInputSpaceRefused="<<refused<<" pass="<<(graded&&refused)<<std::endl;
+   failures+=!(graded&&refused);
+   gradeOut={};lutOut={};ring.drainQueue();gradeGraph.shutdown();lutGraph.shutdown();
+  }
   if(ok&&native){
    auto* texture=graph.videoFrameResource(out.videoSlot);auto desc=texture->GetDesc();D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};UINT64 size=0;ctx.device()->GetCopyableFootprints(&desc,0,1,0,&footprint,nullptr,nullptr,&size);
    D3D12_HEAP_PROPERTIES hp{};hp.Type=D3D12_HEAP_TYPE_READBACK;D3D12_RESOURCE_DESC bd{};bd.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;bd.Width=size;bd.Height=1;bd.DepthOrArraySize=1;bd.MipLevels=1;bd.SampleDesc.Count=1;bd.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;

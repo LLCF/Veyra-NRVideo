@@ -64,7 +64,7 @@ struct Graph {
         gd.color.enabled=colorEnabled;
         return g.initialize(gd)&&g.createViews();
     }
-    bool startWithLut(const std::wstring& lutName){
+    bool startWithLut(const std::wstring& lutName,int inputSpace=engine::ColorSettings::kLutInputSrgb){
         gfx::DeviceContextDesc device;Status st;
         if(!ctx.initialize(device,st)||!ring.initialize(ctx.device(),ctx.directQueue(),ctx.fence(),ctx.fenceEvent(),4,st))return false;
         up=true;
@@ -74,7 +74,7 @@ struct Graph {
         gd.color.enabled=true;
         if(!gd.color.setLutName(lutName))return false;
         gd.color.lutStrength=100.0f;
-        gd.color.lutInputSpace=engine::ColorSettings::kLutInputSrgb;
+        gd.color.lutInputSpace=inputSpace;
         return g.initialize(gd)&&g.createViews();
     }
     bool apply(const engine::EnhancementSettings& settings){return g.applySettings(settings);}
@@ -176,6 +176,18 @@ int wmain(){
         }
         check(ok,"a .cube imported into runtime_local/luts resolves when the graph is built");
         if(ok)check(center(graded).r<center(baseline).r-20,"the imported halving LUT darkens the frame through the 3D sampler");
+        // A PQ input space means nothing on SDR content: it must be refused with
+        // a visible notice, and the frame must come out exactly as without a LUT.
+        if(getenv("VEYRA_SKIP_LUT_SPACE_CASE")==nullptr){
+            Graph mismatched;
+            Frame third;
+            sink::RgbaImage ungraded;
+            bool refused=third.make(188,188,188)&&mismatched.startWithLut(L"gpu-probe-halve.cube",engine::ColorSettings::kLutInputPq)&&mismatched.render(third,ungraded);
+            check(refused&&!mismatched.g.colorLutNotice().empty(),
+                "a PQ LUT on SDR content is refused with a notice instead of applied silently");
+            if(refused)check(std::abs(center(ungraded).r-center(baseline).r)<=1,
+                "the refused LUT leaves the frame identical to the no-LUT render");
+        }
         std::filesystem::remove(source,ec);
     }
     if(failures){std::printf("FAIL: colour grade GPU contract (%d checks)\n",failures);return 1;}
