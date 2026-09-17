@@ -42,7 +42,7 @@ bool legacyBackends(const std::filesystem::path& path) {
    if(version>=7&&(value.audioSync!=AudioSyncMode::Manual||value.audioOffsetMs!=137))return false;
    if(!store.put(L"legacy",value,true))return false;
    std::ifstream file(path);std::string magic;int savedVersion=0;file>>magic>>savedVersion;
-   if(magic!="VEYRA_PRESETS"||savedVersion!=17)return false;
+   if(magic!="VEYRA_PRESETS"||savedVersion!=18)return false;   // schema v18 adds the colour block
    PresetStore reloaded(path);
    if(!reloaded.load()||reloaded.defaultSettings()!=value)return false;
   }else{
@@ -63,8 +63,25 @@ int main(int argc,char** argv){if(argc!=2)return 2;using namespace veyra::engine
  }
  s.srTarget=veyra::pipeline::SrTarget::Uhd8K;
  s.audioSync=AudioSyncMode::Manual;s.audioOffsetMs=137;
- s.nrRuntime=NrRuntime::Community;s.captureCompatible=true;s.lowLatency=true;s.forceSdrPreview=true;
+s.nrRuntime=NrRuntime::Community;s.captureCompatible=true;s.lowLatency=true;s.forceSdrPreview=true;
+// Colour grade round-trips through schema v18 (plan P1: named colour presets).
+s.color.temperature=-40;s.color.tint=7.5f;s.color.exposure=1.25f;s.color.contrast=-12.5f;s.color.highlights=18;s.color.shadows=-22;
+s.color.whites=9;s.color.blacks=-4;s.color.vibrance=33;s.color.saturation=-8;
+s.color.paramHighlights=20;s.color.paramShadows=-25;s.color.splitHighlights=-15;s.color.splitMidtones=12;s.color.splitShadows=-6;
+s.color.curves[0].count=3;s.color.curves[0].points[1]={0.25f,0.35f};s.color.curves[0].points[2]={1,1};
+s.color.curves[2].count=2;s.color.curves[2].points[0]={0,0.05f};s.color.curves[2].points[1]={0.95f,1};
+s.color.mixerHue[3]=25.5f;s.color.mixerSaturation[0]=-60;s.color.mixerLuminance[5]=12;
+s.color.blackWhite=true;s.color.blackWhiteMix[2]=-33.5f;
+s.color.grading[1]={210.5f,45,-20};s.color.gradingBlending=62.5f;s.color.gradingBalance=-18;
+s.color.calibrationShadowTint=9.5f;s.color.calibrationHue[1]=-22;s.color.calibrationSaturation[2]=17.5f;
+ok=ok&&s.color.setLutName(L"film.cube");s.color.lutStrength=75;s.color.lutInputSpace=1;
 ok=ok&&a.put(L"test",s)&&a.setDefault(0)&&!a.put(L"test",s);PresetStore b(p);ok=ok&&b.load()&&b.defaultSettings()==s&&b.rename(0,L"renamed")&&b.defaultSettings()==s;
+// Colour validation guards the same ranges the panel exposes.
+auto badGrading=s;badGrading.color.grading[2].hue=400;ok=ok&&!b.put(L"invalid grading hue",badGrading);
+auto badCurve=s;badCurve.color.curves[1].count=3;badCurve.color.curves[1].points[1]={0.6f,0.5f};badCurve.color.curves[1].points[2]={0.2f,0.7f};ok=ok&&!b.put(L"unsorted curve",badCurve);
+auto badLut=s;badLut.color.lutInputSpace=3;ok=ok&&!b.put(L"invalid lut space",badLut);
+auto badExposure=s;badExposure.color.exposure=6;ok=ok&&!b.put(L"invalid exposure",badExposure);
+ok=ok&&b.entries().size()==1&&b.defaultSettings()==s;
  
  auto badTarget=s;badTarget.srTarget=static_cast<veyra::pipeline::SrTarget>(3);ok=ok&&!b.put(L"invalid target",badTarget);
  

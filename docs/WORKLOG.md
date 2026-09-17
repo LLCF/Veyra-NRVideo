@@ -1,5 +1,27 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-17 色彩页 P1：T2a 色彩数据模型 + 预设 schema v18
+
+- 新增 `include/veyra/engine/ColorSettings.h`：LR 对齐的 P1 色彩模型（白平衡、亮、存在感、参数/点曲线 5 通道、
+  混色器 HSL 8 色、黑白混色器、颜色分级 4 区 + 混合/平衡、校准、3D LUT 引用与强度/输入空间），
+  默认值全中性，`validate()` 覆盖每个控件范围、曲线点必须按 x 递增；`neutral()` 供"未调色直接跳过 pass"使用；
+- LUT 引用用**定长宽字符缓冲 + 文件名校验**（禁路径分隔符）而不是 `std::wstring`：
+  `EnhancementSettings` 要能进导出作业的共享内存头（`ExportJobManager` 的
+  `static_assert(is_trivially_copyable_v<Shared>)`），绝对路径在跨进程导出里也是错的，导出端按名字在
+  `runtime_local/luts` 解析；
+- `EnhancementSettings` 增加 `ColorSettings color`，`validate()` 转发；**加入 `sameVideoConfiguration()` 的
+  排除清单**：改调色只更新 uniform/资源，不重建图（P1 验收项之一）；
+- `PresetStore` schema v17 → **v18**：每条记录行尾追加色彩块（`writeColorSettings`/`readColorSettings`，
+  UTF-8，由 PresetStore 负责 LUT 名字的宽窄转换）；v1–v17 旧文件仍可读，新版本读到旧文件走默认色彩；
+- `tests/unit/RepairPresetTests.cpp`：全字段往返加入色彩（含曲线、分级、混色器、黑白、校准、LUT），
+  负例覆盖"分级色相 400 / 曝光 6 / LUT 空间 3 / 曲线点乱序"必须被拒绝；legacy 迁移用例的版本断言改为 18。
+
+命令与结果：构建 exit 0；`veyra_repair_preset_tests <新文件>` → `legacy/current backend migration cases=66` +
+`preset roundtrip, all fields, ...=1`（exit 0）；`scripts/gates/delivery.ps1` → `DELIVERY SHORT GATE PASS`
+（`logs/delivery/fa493da345634e74b7f866115d6bc879/result.json`，覆盖导出作业与共享内存头）。
+
+未完成：T2b（全浮点调色 pass + `gpuGradeP95Ms` 计时）、T3–T6。
+
 ## 2026-09-17 色彩页 P1：T0 删预设入口 + T1 NR 剔除区羽化（含两个设置记忆缺陷修复）
 
 目标（用户指令）：按 `docs/COLOR_TAB_LR_FEATURE_PLAN_2026-09-17.md` v3 开工，先落 T0/T1。

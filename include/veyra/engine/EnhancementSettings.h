@@ -6,6 +6,7 @@
 #include <string_view>
 #include "veyra/pipeline/ResolutionPlan.h"
 #include "veyra/source/CaptureBuffer.h"
+#include "veyra/engine/ColorSettings.h"
 namespace veyra::engine {
 enum class FrameGenerationBackend { Dlss, XeSS, Fsr };
 // Frame generation that runs inside the present sink (external frame
@@ -127,6 +128,9 @@ struct EnhancementSettings {
     // default (NVENC CONSTQP / MFT quality mode). Only the export job consumes
     // it: preview never re-encodes.
     uint32_t exportBitrateMbps=0;
+    // Lightroom-aligned colour grade. Live: the engine uploads it per frame, so
+    // changing it never rebuilds the graph (see sameVideoConfiguration below).
+    ColorSettings color;
     pipeline::NrSizePolicy nrPolicy=pipeline::NrSizePolicy::Realtime;
     FlowQuality flow=FlowQuality::Balanced;
     OpticalFlowBackend opticalFlowBackend=OpticalFlowBackend::Nvidia;
@@ -146,6 +150,8 @@ struct EnhancementSettings {
         // Export-only fields: changing the bitrate must never invalidate the
         // running preview graph (the controller would otherwise rebuild it).
         video.exportBitrateMbps=other.exportBitrateMbps;
+        // Colour grade: uniform-only update, never a graph rebuild.
+        video.color=other.color;
         return video==other;
     }
     void rejectVideoRequest(const EnhancementSettings& attempted,const EnhancementSettings& previous) {
@@ -183,6 +189,7 @@ struct EnhancementSettings {
         // 0 = auto quality; explicit values are capped at 300 Mbps so a typo
         // cannot ask a driver for a nonsense rate.
         if(exportBitrateMbps>300)return "export bitrate out of range";
+        if(auto error=color.validate();!error.empty())return error;
         if(!pipeline::validNrSizePolicy(nrPolicy))return "invalid NR size policy";
         if(flow<FlowQuality::Performance||flow>FlowQuality::Quality||content<ContentRate::Transport||content>ContentRate::Capture60To30)return "invalid flow/content mode";
         return {};
