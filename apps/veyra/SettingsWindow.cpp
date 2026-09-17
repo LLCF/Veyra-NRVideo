@@ -2,7 +2,10 @@
 #include "ui/Theme.h"
 #include "ui/SettingHelp.h"
 #include "ui/UiPreferenceStore.h"
+#include <commdlg.h>
 #include "veyra/engine/PresetStore.h"
+#include "veyra/engine/ColorLookStore.h"
+#include "veyra/engine/ColorLut.h"
 #include "veyra/RuntimePaths.h"
 #include "veyra/gfx/XessMfgUnlock.h"
 #include <filesystem>
@@ -58,12 +61,12 @@ void loadStore(){if(!loaded){store.load();loaded=true;}}
 // rows instead of relying on static y offsets. The fold mask is persisted in
 // ui-preferences.v1 with the rest of the UI state.
 // ---------------------------------------------------------------------------
-constexpr int kColorSections=6;
+constexpr int kColorSections=7;
 void message(const std::wstring& text);
 bool submit(engine::EnhancementSettings s);
 uint32_t colorFoldMask=0;
 std::wstring colorSectionName(int section){
-    static const wchar_t* names[kColorSections]={L"亮",L"颜色",L"曲线",L"混色器",L"颜色分级",L"校准"};
+    static const wchar_t* names[kColorSections]={L"亮",L"颜色",L"曲线",L"混色器",L"颜色分级",L"校准",L"LUT"};
     return section>=0&&section<kColorSections?names[section]:L"色彩";
 }
 // Which field of ColorSettings a row edits. Scalars use the member pointer;
@@ -128,6 +131,46 @@ engine::ColorSettings colourUndo;
 bool colourUndoValid=false;
 int colorPageContentHeight=0;
 bool syncingColour=false;
+// Named colour looks + the .cube list shown in the colour page.
+std::vector<std::wstring> colourLookNames;
+std::vector<std::wstring> colourLutNames;
+int selectedColourLook=-1;
+// Rebuild the preset combo box. `select` re-selects a named look (used after
+// saving/importing so the new preset stays highlighted instead of silently
+// falling back to "no preset selected").
+void refreshColourLooks(const std::wstring& select={}){
+    engine::ColorLookStore lookStore(runtime::localDataDirectory());
+    lookStore.load();
+    colourLookNames.clear();
+    // The controls live on the scrolling `body` panel, not directly on `window`,
+    // so they must be addressed through their own handle (SendDlgItemMessageW
+    // only walks direct children and silently left this combo empty).
+    const auto combo=item(803);
+    if(!window||!combo)return;
+    SendMessageW(combo,CB_RESETCONTENT,0,0);
+    SendMessageW(combo,CB_ADDSTRING,0,LPARAM(L"（未选择预设）"));
+    int selection=0;
+    for(const auto& look:lookStore.entries()){
+        colourLookNames.push_back(look.name);
+        SendMessageW(combo,CB_ADDSTRING,0,LPARAM(look.name.c_str()));
+        if(!select.empty()&&look.name==select)selection=int(colourLookNames.size());
+    }
+    SendMessageW(combo,CB_SETCURSEL,WPARAM(selection),0);
+    selectedColourLook=selection-1;
+}
+void refreshColourLuts(){
+    engine::ColorLutStore lutStore(runtime::localDataDirectory());
+    colourLutNames=lutStore.list();
+    const auto combo=item(817);
+    if(!window||!combo)return;
+    SendMessageW(combo,CB_RESETCONTENT,0,0);
+    SendMessageW(combo,CB_ADDSTRING,0,LPARAM(L"不使用 LUT"));
+    for(const auto& name:colourLutNames)SendMessageW(combo,CB_ADDSTRING,0,LPARAM(name.c_str()));
+    int selection=0;
+    const auto current=colourTarget().lutNameString();
+    for(size_t i=0;i<colourLutNames.size();++i)if(colourLutNames[i]==current)selection=int(i)+1;
+    SendMessageW(combo,CB_SETCURSEL,WPARAM(selection),0);
+}
 std::wstring windowText(HWND h){wchar_t buffer[256]{};GetWindowTextW(h,buffer,256);return buffer;}
 void loadColourFoldState(){
     const auto preferences=veyra::ui::UiPreferenceStore(runtime::localDataDirectory()).load();
@@ -145,6 +188,9 @@ void layoutColorPage(){
     };
     int y=12;
     place(800,y,36,false);y+=42;
+    // Preset toolbar: which look, a name to save under, and the actions.
+    place(803,y,200,false);place(804,y,180,false);y+=38;
+    place(805,y,32,false);place(806,y,32,false);place(807,y,32,false);place(808,y,32,false);place(809,y,32,false);y+=40;
     place(801,y,32,false);place(802,y,32,false);y+=40;
     for(int section=0;section<kColorSections;++section){
         const bool collapsed=(colorFoldMask>>section)&1u;
@@ -159,6 +205,11 @@ void layoutColorPage(){
             place(colorEditId(int(i)),y-2,26,collapsed);
             place(colorSliderId(int(i)),y+24,16,collapsed);
             if(!collapsed)y+=46;
+        }
+        if(section==6){
+            place(817,y,200,collapsed);y+=32;
+            place(818,y,32,collapsed);y+=36;
+            place(819,y,200,collapsed);y+=32;
         }
         y+=8;
     }
@@ -177,6 +228,7 @@ void syncColorControls(){
             if(SendMessageW(slider,TBM_GETPOS,0,0)!=scaled)SendMessageW(slider,TBM_SETPOS,TRUE,LPARAM(scaled));
         }
     }
+    if(auto space=item(819))if(int(SendMessageW(space,CB_GETCURSEL,0,0))!=colour.lutInputSpace)SendMessageW(space,CB_SETCURSEL,WPARAM(colour.lutInputSpace),0);
     syncingColour=false;
 }
 bool applyColour(const engine::ColorSettings& colour,bool autoEnable){
@@ -187,14 +239,36 @@ bool applyColour(const engine::ColorSettings& colour,bool autoEnable){
     if(!(settings.color==previous)&&!submit(settings))return false;
     return true;
 }
-bool colourFieldEdited(int index,float value){
+// Native file pickers for the colour page. They run modal on the UI thread, which
+// is what a settings dialog is expected to do.
+std::wstring pickColourFile(const wchar_t* filter,const wchar_t* title){
+    wchar_t buffer[32768]{};
+    OPENFILENAMEW dialog{sizeof(dialog)};
+    dialog.hwndOwner=window;dialog.lpstrFilter=filter;dialog.lpstrFile=buffer;dialog.nMaxFile=32768;
+    dialog.lpstrTitle=title;dialog.Flags=OFN_FILEMUSTEXIST|OFN_PATHMUSTEXIST|OFN_NOCHANGEDIR;
+    if(!GetOpenFileNameW(&dialog))return {};
+    return buffer;
+}
+std::wstring pickColourSave(const wchar_t* filter,const wchar_t* title,const wchar_t* suggested){
+    wchar_t buffer[32768]{};if(suggested)wcsncpy_s(buffer,suggested,_TRUNCATE);
+    OPENFILENAMEW dialog{sizeof(dialog)};
+    dialog.hwndOwner=window;dialog.lpstrFilter=filter;dialog.lpstrFile=buffer;dialog.nMaxFile=32768;
+    dialog.lpstrTitle=title;dialog.lpstrDefExt=L"vpcolor";dialog.Flags=OFN_OVERWRITEPROMPT|OFN_PATHMUSTEXIST|OFN_NOCHANGEDIR;
+    if(!GetSaveFileNameW(&dialog))return {};
+    return buffer;
+}bool colourFieldEdited(int index,float value){
     if(index<0||size_t(index)>=colorParams.size())return false;
     auto colour=colourTarget();
     if(!std::isfinite(value)||value<colorParams[size_t(index)].min||value>colorParams[size_t(index)].max){
         message(L"数值超出范围；仍使用上次有效值");syncColorControls();return false;
     }
     colorParams[size_t(index)].set(colour,value);
-    if(!applyColour(colour,true)){syncColorControls();return false;}
+    if(!applyColour(colour,true)){
+        veyra::log::warn("color-ui",std::format("colour edit rejected index={} value={:.3f}",index,value));
+        syncColorControls();
+        return false;
+    }
+    veyra::log::info("color-ui",std::format("colour edit applied index={} value={:.3f}",index,value));
     syncColorControls();
     return true;
 }
@@ -392,6 +466,87 @@ LRESULT CALLBACK proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
         arrange();
         return 0;
     }
+    // --- colour presets + the .cube picker (T5-b) ---------------------------
+    if(msg==WM_COMMAND&&LOWORD(wp)>=805&&LOWORD(wp)<=809&&HIWORD(wp)==BN_CLICKED){
+        const int id=LOWORD(wp);
+        engine::ColorLookStore lookStore(runtime::localDataDirectory());
+        if(id==805){
+            wchar_t name[64]{};GetWindowTextW(item(804),name,64);
+            auto colour=colourTarget();colour.enabled=true;
+            if(lookStore.load()&&lookStore.put(name,colour,true)){
+                refreshColourLooks(name);
+                message(L"已保存色彩预设（同名会覆盖）。可以导出成 .vpcolor 分享。");
+            }else message(L"保存失败："+lookStore.error());
+        }else if(id==806){
+            const int index=int(SendMessageW(item(803),CB_GETCURSEL,0,0));
+            if(lookStore.load()&&index>=1&&size_t(index-1)<lookStore.entries().size()){
+                const auto& colour=lookStore.entries()[size_t(index-1)].color;
+                const bool applied=applyColour(colour,true);
+                veyra::log::info("color-ui",std::format("preset apply index={} exposure={:.3f} lut={} accepted={}",
+                    index,colour.exposure,colour.lutNameString().empty()?0:1,applied));
+                if(applied){
+                    syncColorControls();refreshColourLuts();
+                    message(L"已应用该色彩预设（只改色彩，不动 NR/超分/补帧）。");
+                }else message(L"设置正在切换，请稍后再试。");
+            }else{
+                veyra::log::info("color-ui",std::format("preset apply rejected index={} entries={}",index,lookStore.entries().size()));
+                message(L"先在列表里选一个预设。");
+            }
+        }else if(id==807){
+            const int index=int(SendMessageW(item(803),CB_GETCURSEL,0,0));
+            if(lookStore.load()&&index>=1&&lookStore.erase(size_t(index-1))){
+                refreshColourLooks();
+                message(L"已删除该色彩预设。");
+            }else message(L"删除失败："+lookStore.error());
+        }else if(id==808){
+            const int index=int(SendMessageW(item(803),CB_GETCURSEL,0,0));
+            const auto path=pickColourSave(L"Veyra 色彩预设 (*.vpcolor)\0*.vpcolor\0所有文件 (*.*)\0*.*\0\0",L"导出色彩预设",L"look.vpcolor");
+            if(!path.empty()&&lookStore.load()&&lookStore.exportFile(size_t(std::max(0,index-1)),path))message(L"已导出 .vpcolor。");
+            else if(!path.empty())message(L"导出失败："+lookStore.error());
+        }else{
+            const auto path=pickColourFile(L"Veyra 色彩预设 (*.vpcolor)\0*.vpcolor\0所有文件 (*.*)\0*.*\0\0",L"导入色彩预设");
+            if(!path.empty()){
+                std::wstring name;
+                if(lookStore.load()&&lookStore.importFile(path,name)){refreshColourLooks(name);message(L"已导入预设："+name);}
+                else message(L"导入失败："+lookStore.error());
+            }
+        }
+        return 0;
+    }
+    if(msg==WM_COMMAND&&LOWORD(wp)==817&&HIWORD(wp)==CBN_SELCHANGE){
+        const int index=int(SendMessageW(item(817),CB_GETCURSEL,0,0));
+        auto colour=colourTarget();colour.enabled=true;
+        if(index<=0)colour.clearLut();
+        else if(size_t(index-1)<colourLutNames.size()&&!colour.setLutName(colourLutNames[size_t(index-1)])){message(L"LUT 名字非法。");return 0;}
+        if(index>0&&colour.lutStrength<=0.0f)colour.lutStrength=100.0f;
+        if(!applyColour(colour,false))message(L"设置正在切换，请稍后再试。");
+        else message(index<=0?L"已停用 LUT。":L"已选择 LUT；管线会重建一次，短暂停顿正常。");
+        syncColorControls();
+        return 0;
+    }
+    if(msg==WM_COMMAND&&LOWORD(wp)==819&&HIWORD(wp)==CBN_SELCHANGE){
+        const int index=int(SendMessageW(item(819),CB_GETCURSEL,0,0));
+        auto colour=colourTarget();
+        colour.lutInputSpace=std::clamp(index,0,2);
+        if(applyColour(colour,true))message(L"已切换 LUT 输入空间（日志会记录）。");
+        return 0;
+    }
+    if(msg==WM_COMMAND&&LOWORD(wp)==818&&HIWORD(wp)==BN_CLICKED){
+        const auto path=pickColourFile(L"Cube LUT (*.cube)\0*.cube\0所有文件 (*.*)\0*.*\0\0",L"导入 .cube LUT");
+        if(!path.empty()){
+            engine::ColorLutStore lutStore(runtime::localDataDirectory());
+            std::wstring name;std::string error;
+            if(lutStore.importFile(path,name,error)&&!name.empty()){
+                auto colour=colourTarget();colour.enabled=true;
+                colour.setLutName(name);
+                if(colour.lutStrength<=0.0f)colour.lutStrength=100.0f;
+                refreshColourLuts();
+                if(!applyColour(colour,false))message(L"LUT 已导入，但设置正在切换；稍后重选即可。");
+                else message(L"已导入并选择 LUT："+name+L"（已写入 manifest）。");
+            }else message(L"导入失败："+std::wstring(error.begin(),error.end()));
+        }
+        return 0;
+    }
     if(msg==WM_COMMAND&&!populating&&!syncingColour&&LOWORD(wp)>=colorEditId(0)&&LOWORD(wp)<colorEditId(0)+kColorMaxParams&&HIWORD(wp)==EN_CHANGE){
         const int index=LOWORD(wp)-colorEditId(0);
         if(index<int(colorParams.size())){
@@ -506,7 +661,26 @@ case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.
                 colorParams.push_back({5,composed(std::wstring(primaries[primary])+L" · 饱和度"),-100,100,ColorTarget::CalibrationSaturation,nullptr,primary});
             }
         }
+        // LUT: the .cube selection, its strength and the input-space choice. The
+        // strength row is a normal parameter; the two combos are placed by
+        // layoutColorPage().
+        colorParams.push_back({6,L"LUT 强度",0,100,ColorTarget::Scalar,&engine::ColorSettings::lutStrength,0});
         for(int section=0;section<kColorSections;++section)add(L"BUTTON",L"",810+section,BS_PUSHBUTTON|WS_TABSTOP,2,12,12,-1,32);
+        // Preset toolbar.
+        combo(803,2,0,{});add(L"EDIT",L"",804,ES_AUTOHSCROLL|WS_TABSTOP,2,12,0,-1,26);send(804,EM_SETLIMITTEXT,48,0);
+        button(L"保存预设",805,2,12,0,96);button(L"应用",806,2,12,0,80);button(L"删除",807,2,12,0,80);
+        button(L"导出",808,2,12,0,80);button(L"导入",809,2,12,0,80);
+        SetPropW(item(804),L"veyra.tip",HANDLE(L"给当前色彩设置起个名字，点“保存预设”存下来；导出会生成 .vpcolor 文件，可以发给别人导入。"));
+        SetPropW(item(805),L"veyra.tip",HANDLE(L"把当前色彩设置保存为命名预设。同名会覆盖。"));
+        SetPropW(item(806),L"veyra.tip",HANDLE(L"把选中的预设应用到当前画面（只改色彩，不动 NR/超分/补帧）。"));
+        SetPropW(item(807),L"veyra.tip",HANDLE(L"删除选中的色彩预设。"));
+        // LUT section: choose an imported .cube, import a new one, pick its input
+        // space (the strength row is registered as a normal parameter).
+        combo(817,2,0,{});button(L"导入 .cube",818,2,12,0,140);combo(819,2,0,{L"Cineon Log（创作者 LUT 默认）",L"sRGB 显示参考",L"PQ（HDR）"});
+        SetPropW(item(817),L"veyra.tip",HANDLE(L"选择 runtime_local/luts 里已导入的 .cube。切换会重建管线，短暂停顿正常。"));
+        SetPropW(item(818),L"veyra.tip",HANDLE(L"从磁盘导入 .cube：校验通过后复制到 runtime_local/luts，并写入 manifest（含 SHA-256）。"));
+        SetPropW(item(819),L"veyra.tip",HANDLE(L"LUT 期望的输入空间。创作者 LUT 多数是 Cineon Log；sRGB 显示参考用于 SDR 内容；PQ 给 HDR 用。选错会提示并由日志记录。"));
+        refreshColourLooks();refreshColourLuts();
         for(size_t i=0;i<colorParams.size();++i){
             const auto& param=colorParams[i];
             add(L"STATIC",param.label,colorLabelId(int(i)),0,2,12,0,180,24);

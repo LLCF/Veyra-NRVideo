@@ -29,6 +29,7 @@
 #include <shlobj.h>
 #include <filesystem>
 #include <format>
+#include "veyra/engine/ColorLookStore.h"
 #include <string>
 #include <chrono>
 #include <atomic>
@@ -742,6 +743,8 @@ if(uiStep==7&&elapsed>5900){holdOriginal=false;compareMode=0;updateComparison();
 if(smokeColor&&startTick){const auto elapsed=GetTickCount64()-startTick;
 const auto colourSnapshot=engine.snapshot();
 auto colourControl=[](int id){return veyra::ui::settingsControlForTest(id);};
+// Progress heartbeat: a stalled UI tick shows up as a gap in these lines.
+{static uint64_t colourHeartbeat=0;if(elapsed/2000!=colourHeartbeat){colourHeartbeat=elapsed/2000;veyra::log::info("color-ui-test",std::format("tick elapsed={} step={} exposure={:.3f}",elapsed,colorStep,colourSnapshot.desired.color.exposure));}}
 if(colorStep==0&&elapsed>1500){
     if(uiState.mode==veyra::ui::Mode::Daily)switchMode();
     selectInspector(2);layout();
@@ -769,7 +772,38 @@ else if(colorStep==40){colorStep=(colourSnapshot.desired.color.exposure==1.0f)?5
 else if(colorStep==5){const int editId=veyra::ui::colourParamEditId(L"混合");if(auto edit=colourControl(editId))SetWindowTextW(edit,L"77.00");colorStep=editId>0?50:-1;}
 else if(colorStep==50){colorStep=(colourSnapshot.desired.color.gradingBlending==77.0f)?51:(elapsed>9500?-1:50);
     if(colorStep==51)veyra::log::info("color-ui-test","T4 the colour grading row reached the engine");}
+// Named colour presets: save the current look, clear a value, apply the preset,
+// then delete it - the same three actions the panel exposes.
 else if(colorStep==51){
+    if(auto edit=colourControl(804))SetWindowTextW(edit,L"烟测预设");
+    SendMessageW(colourControl(805),BM_CLICK,0,0);
+    colorStep=52;
+}
+else if(colorStep==52){
+    veyra::engine::ColorLookStore store(veyra::runtime::localDataDirectory());
+    store.load();
+    const bool saved=!store.entries().empty()&&store.entries().back().name==L"烟测预设";
+    if(auto edit=colourControl(1300))SetWindowTextW(edit,L"0.00");
+    colorStep=saved?53:-1;
+    veyra::log::info("color-ui-test",std::format("preset saved={} count={} step={}",saved,store.entries().size(),colorStep));
+}
+else if(colorStep==53&&colourSnapshot.desired.color.exposure==0.0f){SendMessageW(colourControl(806),BM_CLICK,0,0);colorStep=54;}
+else if(colorStep==53&&elapsed>9000){
+    veyra::log::info("color-ui-test",std::format("preset apply waiting: desiredExposure={:.3f} configuredExposure={:.3f} elapsed={}",
+        colourSnapshot.desired.color.exposure,uiState.configured.color.exposure,elapsed));
+    colorStep=-1;
+}
+else if(colorStep==54){colorStep=(colourSnapshot.desired.color.exposure==1.0f)?55:(elapsed>14000?-1:54);
+    if(colorStep==55)veyra::log::info("color-ui-test","preset applied: exposure came back through the engine");}
+else if(colorStep==55){SendMessageW(colourControl(807),BM_CLICK,0,0);colorStep=56;}
+else if(colorStep==56){
+    veyra::engine::ColorLookStore store(veyra::runtime::localDataDirectory());
+    store.load();
+    const bool deleted=store.entries().empty();
+    colorStep=deleted?57:(elapsed>16000?-1:56);
+    if(colorStep==57)veyra::log::info("color-ui-test","preset deleted; colour page back to no stored looks");
+}
+else if(colorStep==57){
     auto edit=colourControl(1300);
     const bool beforeVisible=edit&&IsWindowVisible(edit);
     const bool beforeMask=(preferences.load().colourFoldMask&1u)!=0u;

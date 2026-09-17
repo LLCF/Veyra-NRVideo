@@ -65,9 +65,10 @@ add_library(veyra_base STATIC
   src/base/FileIdentity.cpp
   src/base/RuntimePaths.cpp
   src/base/ThunkHook.cpp
-  # .cube parsing + the runtime LUT store: low level, no D3D12, shared by the
-  # ingest pipeline and the settings/import paths.
+  # .cube parsing, the runtime LUT store and named colour looks: low level, no
+  # D3D12, shared by the ingest pipeline and the settings/import paths.
   src/engine/ColorLut.cpp
+  src/engine/ColorLookStore.cpp
 )
 veyra_apply_warnings(veyra_base)
 target_compile_options(veyra_base PUBLIC /utf-8)
@@ -696,6 +697,13 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
   target_compile_definitions(veyra_color_lut_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   target_include_directories(veyra_color_lut_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_link_libraries(veyra_color_lut_tests PRIVATE veyra_base bcrypt)
+  # Named colour looks + .vpcolor export/import (CPU only).
+  add_executable(veyra_color_look_tests tests/unit/ColorLookTests.cpp src/engine/ColorLookStore.cpp)
+  target_compile_features(veyra_color_look_tests PRIVATE cxx_std_20)
+  target_compile_options(veyra_color_look_tests PRIVATE /utf-8)
+  target_compile_definitions(veyra_color_look_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_include_directories(veyra_color_look_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_link_libraries(veyra_color_look_tests PRIVATE veyra_base)
   target_compile_features(veyra_repair_preset_tests PRIVATE cxx_std_20)
   target_compile_options(veyra_repair_preset_tests PRIVATE /utf-8)
   target_compile_definitions(veyra_repair_preset_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)

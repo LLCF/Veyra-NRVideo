@@ -1,5 +1,47 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-17 色彩页 P1：T5-b 命名色彩预设 + `.vpcolor` + 修两个空下拉（真机烟测通过）
+
+新增 `include/veyra/engine/ColorLookStore.h` + `src/engine/ColorLookStore.cpp`：
+
+- 文件 `runtime_local/color-looks.v1`，头 `VEYRA_COLOR_LOOKS 1`，每行 `"名字" <ColorSettings 块>`
+  （复用 `ColorSettings.h` 里的共享读写，和 PresetStore v18 是同一套参数块，不会两处漂移）；
+- 保存走临时文件 + `MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH` 原子替换，写失败回滚内存表并
+  保留原文件；遇到损坏行**拒绝覆盖原文件**并报错；名字去空白、拒路径分隔符与控制字符、上限 64 套；
+- `.vpcolor` 导入导出：导出写 `VEYRA_COLOR_LOOK <名>` + 同一参数块；导入校验魔数/版本/名字/尾部残余；
+- 15 项单测 `veyra_color_look_tests`（保存/覆盖/删除/列举/上限/轮转/`.vpcolor` 往返/坏文件保留原文件）
+  → exit 0。
+
+色彩页新增 LUT 组与预设工具条（id 803 预设下拉 / 804 名字 / 805 保存 / 806 应用 / 807 删除 /
+808 导出 / 809 导入，LUT 817 下拉 / 818 导入 `.cube` / 819 输入空间），全部走原生文件对话框。
+
+**修掉两个真机 bug（都是烟测抓出来的产品缺陷，不是测试问题）**
+
+1. **预设下拉和 LUT 下拉永远是空的**：`refreshColourLooks()` / `refreshColourLuts()` 用
+   `SendDlgItemMessageW(window,803/817,...)`，而这两个控件挂在滚动面板 `body` 上，
+   不是 `window` 的直接子窗口 → `CB_RESETCONTENT/CB_ADDSTRING` 全部静默失败、
+   `CB_GETCURSEL` 返回 -1。改为用控件自身句柄发消息。用户侧表现就是"下拉点开没东西、
+   点应用提示先选一个预设"。
+2. **保存后选中项被清空**：`refreshColourLooks()` 固定把选择重置到"（未选择预设）"，
+   保存/导入完立刻点应用必然落空。现在保存/导入后自动选回刚写入的那一项。
+
+另外给 806 应用路径加了 `[color-ui] preset apply index=… exposure=… lut=… accepted=…` 日志，
+并在烟测里加了 2 秒一条的进度心跳（`tick elapsed=… step=… exposure=…`），
+用来区分"UI 线程卡住"和"状态机停在某一步"——本轮就是靠它排除了前者。
+
+**真机烟测**（RTX 5070，`%TEMP%\veyra-p1-fixture.mp4` 1280×720@30 12s）：
+`veyra.exe <clip> --smoke-color --smoke-seconds 18` → **exit 0**，日志序列完整：
+总开关 → 曝光 1.00 到引擎 → 一键还原 → 撤销 → 混合 77 → 保存预设(count=1) →
+应用预设(index=1 exposure=1.000 accepted=true) → 删除 → 折叠位记忆 → 总开关回关。
+
+**回归**：`veyra_color_grade_tests` 23/23 exit 0；`veyra_color_grade_gpu_tests` 10/10 exit 0；
+`veyra_color_lut_tests` exit 0；`veyra_color_look_tests` exit 0；`veyra_ui_contract_tests` exit 0；
+`veyra_repair_preset_tests` 全通过（注意要传**文件路径**，传目录会 exit 1）；
+`veyra_repair_contract_tests` 191/0。
+
+**未做（T6）**：`GpuStage::Grade` 独立计时（融合派发无法单独打点，须用 A/B 对比如实报告）、
+HDR 标准处理与 MaxCLL/MaxFALL 重算、预览/截图/导出三入口像素一致性、全量交付闸门与报告。
+
 ## 2026-09-17 色彩页 P1：T5-a `.cube` 解析、导入与引擎侧解析（GPU 验收通过）
 
 新增 `include/veyra/engine/ColorLut.h` + `src/engine/ColorLut.cpp`（放在 `veyra_base`，供
