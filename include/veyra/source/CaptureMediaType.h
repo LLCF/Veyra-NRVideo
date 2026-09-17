@@ -52,7 +52,11 @@ inline bool captureMediaLayout(const AM_MEDIA_TYPE& type,CaptureMediaLayout& out
     out.packing=capturePacking(type.subtype);
     switch(out.packing){
     case CapturePacking::Yuy2:case CapturePacking::Uyvy:case CapturePacking::Yvyu:
-        if(out.width%2)return false;out.format=AV_PIX_FMT_YUYV422;out.rowBytes=out.width*2;break;
+        if(out.width%2)return false;
+        // N1: keep the driver's true packing in the frame contract and unpack
+        // on the GPU; only the legacy CPU-unpack diagnostic maps to YUY2.
+        out.format=out.packing==CapturePacking::Uyvy?AV_PIX_FMT_UYVY422:out.packing==CapturePacking::Yvyu?AV_PIX_FMT_YVYU422:AV_PIX_FMT_YUYV422;
+        out.rowBytes=out.width*2;break;
     case CapturePacking::Nv12:case CapturePacking::Nv21:case CapturePacking::I420:case CapturePacking::Yv12:
     case CapturePacking::P010:case CapturePacking::P016:
         if(out.width%2||out.height%2)return false;
@@ -60,20 +64,22 @@ inline bool captureMediaLayout(const AM_MEDIA_TYPE& type,CaptureMediaLayout& out
         out.format=out.planes==3?AV_PIX_FMT_YUV420P:out.packing==CapturePacking::P010?AV_PIX_FMT_P010:out.packing==CapturePacking::P016?AV_PIX_FMT_P016:AV_PIX_FMT_NV12;
         out.rowBytes=out.width*((out.format==AV_PIX_FMT_P010||out.format==AV_PIX_FMT_P016)?2:1);break;
     case CapturePacking::Bgr32:case CapturePacking::Bgra32:case CapturePacking::Bgr24:case CapturePacking::Rgb555:case CapturePacking::Rgb565:
-        out.format=AV_PIX_FMT_BGR0;out.bottomUp=bm.biHeight>0;
+        out.format=out.packing==CapturePacking::Bgr24?AV_PIX_FMT_BGR24:out.packing==CapturePacking::Rgb555?AV_PIX_FMT_RGB555LE:out.packing==CapturePacking::Rgb565?AV_PIX_FMT_RGB565LE:AV_PIX_FMT_BGR0;
+        out.bottomUp=bm.biHeight>0;
         out.rowBytes=out.width*(out.packing==CapturePacking::Bgr24?3:(out.packing==CapturePacking::Rgb555||out.packing==CapturePacking::Rgb565)?2:4);break;
     default:return false;
     }
     const unsigned rows=out.planes>1?out.height*3/2:out.height;
+    const bool rgbDib=out.format==AV_PIX_FMT_BGR0||out.format==AV_PIX_FMT_BGR24||out.format==AV_PIX_FMT_RGB555LE||out.format==AV_PIX_FMT_RGB565LE;
     out.stride=out.rowBytes;
-    if(out.format==AV_PIX_FMT_BGR0)out.stride=(out.stride+3)&~3u;
+    if(rgbDib)out.stride=(out.stride+3)&~3u;
     if(bm.biSizeImage){
         // Fixed uncompressed allocation may include per-row padding. Reject
         // ambiguous/incomplete layouts instead of reading subsequent rows wrong.
         if(bm.biSizeImage%rows||bm.biSizeImage/rows<out.stride)return false;
         out.stride=bm.biSizeImage/rows;
     }
-    if(out.format==AV_PIX_FMT_BGR0&&out.stride%4)return false;
+    if(rgbDib&&out.stride%4)return false;
     if((out.planes==3||out.format==AV_PIX_FMT_P010||out.format==AV_PIX_FMT_P016)&&out.stride%2)return false;
     out.sampleBytes=size_t(out.stride)*rows;
     if(out.planes>1){
@@ -111,6 +117,17 @@ inline bool captureMediaLayout(const AM_MEDIA_TYPE& type,CaptureMediaLayout& out
     }
     return true;
 }
+// N1 rollback switch (diagnostic): map a packed capture layout back to the
+// legacy BGR0 / YUY2 target the old per-pixel CPU conversion produced. The
+// device still delivers the packed bytes; copyCaptureSample then converts on
+// the callback thread exactly as it did before N1.
+inline bool captureLegacyCpuLayout(CaptureMediaLayout& layout){
+    switch(layout.packing){
+    case CapturePacking::Uyvy:case CapturePacking::Yvyu:layout.format=AV_PIX_FMT_YUYV422;return true;
+    case CapturePacking::Bgr24:case CapturePacking::Rgb555:case CapturePacking::Rgb565:layout.format=AV_PIX_FMT_BGR0;return true;
+    default:return false;
+    }
+}
 // flipVertical is the manual capture override: it inverts whatever the DIB
 // header claims (and reverses chroma rows for planar YUV), so a device whose
 // declared orientation does not match its samples can still be watched.
@@ -120,13 +137,25 @@ inline bool copyCaptureSample(const CaptureMediaLayout& layout,const uint8_t* sr
     if(layout.planes>1&&(!dst.data[1]||dst.linesize[1]<int(layout.chromaRowBytes)))return false;
     if(layout.planes>2&&(!dst.data[2]||dst.linesize[2]<int(layout.chromaRowBytes)))return false;
     const bool flip=layout.bottomUp!=flipVertical;
-    for(unsigned y=0;y<layout.height;++y){
-        const auto* s=src+size_t(flip?layout.height-1-y:y)*layout.stride;auto* d=dst.data[0]+ptrdiff_t(y)*dst.linesize[0];
-        if(layout.packing==CapturePacking::Bgr24){for(unsigned x=0;x<layout.width;++x){d[x*4]=s[x*3];d[x*4+1]=s[x*3+1];d[x*4+2]=s[x*3+2];d[x*4+3]=255;}}
-        else if(layout.packing==CapturePacking::Rgb555||layout.packing==CapturePacking::Rgb565){
+    // Fast path: no row reorder and no per-pixel conversion, so the whole
+    // plane is one contiguous copy (single-plane layouts only).
+    const bool rowConvert=(layout.format==AV_PIX_FMT_BGR0&&(layout.packing==CapturePacking::Bgr24||layout.packing==CapturePacking::Rgb555||layout.packing==CapturePacking::Rgb565))||
+        (layout.format==AV_PIX_FMT_YUYV422&&(layout.packing==CapturePacking::Uyvy||layout.packing==CapturePacking::Yvyu));
+    if(!flip&&!rowConvert&&layout.planes==1&&size_t(dst.linesize[0])==size_t(layout.stride)){
+        std::memcpy(dst.data[0],src,size_t(layout.stride)*layout.height);
+        return true;
+    }
+    // When rows are flipped, read the source ascending and write the
+    // destination descending: the read stream keeps the hardware prefetcher
+    // (walking the source backwards cost ~2x on the 4K RGB24 case).
+    for(unsigned sourceRow=0;sourceRow<layout.height;++sourceRow){
+        const unsigned dstRow=flip?layout.height-1-sourceRow:sourceRow;
+        const auto* s=src+size_t(sourceRow)*layout.stride;auto* d=dst.data[0]+ptrdiff_t(dstRow)*dst.linesize[0];
+        if(layout.format==AV_PIX_FMT_BGR0&&layout.packing==CapturePacking::Bgr24){for(unsigned x=0;x<layout.width;++x){d[x*4]=s[x*3];d[x*4+1]=s[x*3+1];d[x*4+2]=s[x*3+2];d[x*4+3]=255;}}
+        else if(layout.format==AV_PIX_FMT_BGR0&&(layout.packing==CapturePacking::Rgb555||layout.packing==CapturePacking::Rgb565)){
             const bool six=layout.packing==CapturePacking::Rgb565;
             for(unsigned x=0;x<layout.width;++x){const unsigned v=s[x*2]|(unsigned(s[x*2+1])<<8);const unsigned b=v&31,g=(v>>5)&(six?63:31),r=(v>>(six?11:10))&31;d[x*4]=uint8_t((b<<3)|(b>>2));d[x*4+1]=uint8_t(six?(g<<2)|(g>>4):(g<<3)|(g>>2));d[x*4+2]=uint8_t((r<<3)|(r>>2));d[x*4+3]=255;}
-        }else if(layout.packing==CapturePacking::Uyvy||layout.packing==CapturePacking::Yvyu){
+        }else if(layout.format==AV_PIX_FMT_YUYV422&&(layout.packing==CapturePacking::Uyvy||layout.packing==CapturePacking::Yvyu)){
             const bool uy=layout.packing==CapturePacking::Uyvy;for(unsigned x=0;x<layout.rowBytes;x+=4){d[x]=s[x+(uy?1:0)];d[x+1]=s[x+(uy?0:3)];d[x+2]=s[x+(uy?3:2)];d[x+3]=s[x+(uy?2:1)];}
         }else std::memcpy(d,s,layout.rowBytes);
     }

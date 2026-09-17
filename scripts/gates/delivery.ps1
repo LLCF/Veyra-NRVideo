@@ -30,7 +30,12 @@ function Run([string]$Name,[string]$Exe,[string[]]$Argv,[int]$Limit=30,[int]$Exp
         if($PortablePlayer -and $Exe -eq $PlayerExe){$env:PATH="$env:SystemRoot/System32;$env:SystemRoot"}
         $workingDirectory=$Root
         if($PortablePlayer -and $Exe -eq $PlayerExe){$workingDirectory=Split-Path $Exe}
-        $p=Start-Process -FilePath $Exe -ArgumentList @($Argv|ForEach-Object{'"'+$_.Replace('"','\"')+'"'}) -WorkingDirectory $workingDirectory -PassThru -WindowStyle $windowStyle -RedirectStandardOutput "$dir/$Name.stdout.log" -RedirectStandardError "$dir/$Name.stderr.log"
+        # A test with no arguments is valid; Start-Process rejects an empty
+        # -ArgumentList, so only pass it when there is something to pass.
+        $startArgs=@{FilePath=$Exe;WorkingDirectory=$workingDirectory;PassThru=$true;WindowStyle=$windowStyle;RedirectStandardOutput="$dir/$Name.stdout.log";RedirectStandardError="$dir/$Name.stderr.log"}
+        $forwarded=@($Argv|ForEach-Object{'"'+$_.Replace('"','\"')+'"'})
+        if($forwarded.Count -gt 0){$startArgs.ArgumentList=$forwarded}
+        $p=Start-Process @startArgs
     } finally {$env:PATH=$savedPath}
     $processHandle=$p.Handle
     if(-not $p.WaitForExit($timeout*1000)){Stop-Process -Id $p.Id -Force;throw "$Name timeout"}
@@ -50,6 +55,9 @@ try{
     $log=Get-Content "$dir/player.stdout.log" -Raw
     Check player-sync ($log -match 'smoke frames=(\d+).*generated=(\d+).*failed=false.*absLatenessP95Ms=([\d.]+)' -and [int]$Matches[1] -gt 60 -and [int]$Matches[2] -gt 0 -and [double]$Matches[3] -le 50) 'real-time profile 4K ingress, generated frames, observed abs lateness P95 <=50ms'
     Run controls $PlayerExe @($clip1080,'--nr','--realtime','--smoke-seconds','6','--smoke-controls','--smoke-save',"$dir/snapshot.jpg") 20
+    # Colour page (T3): master switch, slider -> engine wiring, one-click reset
+    # with undo, accordion folding and its ui-preferences persistence.
+    Run color-page $PlayerExe @($clip1080,'--smoke-color','--smoke-seconds','12') 25
     $controlLog=Get-Content "$dir/controls.stdout.log" -Raw
     Check paused-seek ($controlLog -match 'seek done' -and $controlLog -match 'controlsStep=4' -and (Test-Path "$dir/snapshot.jpg")) 'pause / seek while paused / resume / real WIC JPEG'
     Run image $PlayerExe @("$dir/enhanced.png",'--nr','--smoke-seconds','3') 15
@@ -73,6 +81,12 @@ try{
     }
     Run cancel $PlayerExe @($clip4k,'--nr','--export-out',"$dir/cancel.mp4",'--cancel-after-ms','3000') 15 3
     Check cancel-not-success ((-not (Test-Path "$dir/cancel.mp4")) -and (Test-Path "$dir/cancel.mp4.partial")) 'cancel drains with live callback; never promotes incomplete output'
+    # Compressed capture payload decoder: the exact backend the capture worker
+    # uses, driven with local H.264/HEVC elementary streams. Exits 0 with an
+    # explicit SKIP when the git-ignored local corpus is absent.
+    Run capture-decode "$bin/veyra_capture_compressed_tests.exe" @() 30
+    $decodeLog=Get-Content "$dir/capture-decode.stdout.log" -Raw
+    Check capture-decode-result (($decodeLog -match 'ALL PASS') -or ($decodeLog -match 'SKIP')) 'hardware+software decode parity for H.264/HEVC, or an explicit skip'
     Check test-budget ($timer.Elapsed.TotalSeconds -lt 300) "$($timer.Elapsed.TotalSeconds)s; short validation is not endurance proof"
     $result=[ordered]@{runId=$run;status='software_short_gate_passed';capture='awaiting_user_capture_test';distribution='not_assessed_by_software_gate';seconds=$timer.Elapsed.TotalSeconds;exeHash=(Get-FileHash $PlayerExe -Algorithm SHA256).Hash;checks=$checks}
     $result|ConvertTo-Json -Depth 8|Set-Content "$dir/result.json" -Encoding UTF8

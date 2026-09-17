@@ -3,6 +3,11 @@
 #include "veyra/source/CaptureTiming.h"
 #include "veyra/source/CaptureMediaType.h"
 #include "veyra/source/NativeCaptureSink.h"
+#include "veyra/source/CaptureBuffer.h"
+#include "veyra/source/CaptureFormatRank.h"
+#include "veyra/source/CaptureCodec.h"
+#include "veyra/source/CaptureCompressedDecoder.h"
+#include "veyra/source/AverMediaAudioSwitch.h"
 #include "veyra/pipeline/ColorMetadata.h"
 #include "veyra/Log.h"
 #include "veyra/sink/AudioFormat.h"
@@ -13,8 +18,15 @@
 #include <dvdmedia.h>
 #include <ks.h>
 #include <ksmedia.h>
+#include <d3d12.h>
 #include <wrl/client.h>
+extern "C" {
+#include <libavcodec/avcodec.h>
+}
+#include <vector>
 #include <algorithm>
+#include <deque>
+#include <thread>
 #include <array>
 #include <cstdint>
 #include <mutex>
@@ -38,6 +50,81 @@ struct __declspec(uuid("6B652FFF-11FE-4FCE-92AD-0266B5D7C78F")) ISampleGrabber:I
 const CLSID SampleGrabberClass={0xc1f400a0,0x3f08,0x11d3,{0x9f,0x0b,0x00,0x60,0x08,0x03,0x9e,0x37}};
 const CLSID NullRendererClass={0xc1f400a4,0x3f08,0x11d3,{0x9f,0x0b,0x00,0x60,0x08,0x03,0x9e,0x37}};
 void freeType(AM_MEDIA_TYPE* t,bool pointer=true){if(!t)return;CoTaskMemFree(t->pbFormat);if(t->pUnk)t->pUnk->Release();if(pointer)CoTaskMemFree(t);}
+// MPEG2VIDEOINFO carries the codec's sequence header (SPS/PPS) for compressed
+// capture formats. Drivers are inconsistent: some store Annex-B with start
+// codes, some store 4-byte length-prefixed NAL units, some an
+// AVCDecoderConfigurationRecord / HEVCDecoderConfigurationRecord. Normalize
+// everything to the Annex-B form the FFmpeg decoders consume. An empty result
+// means the caller relies on the bitstream's in-band parameter sets, and a
+// decoder that still cannot start falls back to the RGB32 compatibility path.
+std::vector<uint8_t> captureCompressedExtradata(const AM_MEDIA_TYPE& type,CaptureCodec codec){
+    std::vector<uint8_t> result;
+    if(codec==CaptureCodec::None||codec==CaptureCodec::Mjpeg)return result;
+    if(type.formattype!=FORMAT_MPEG2Video||!type.pbFormat||type.cbFormat<sizeof(MPEG2VIDEOINFO))return result;
+    const auto& info=*reinterpret_cast<const MPEG2VIDEOINFO*>(type.pbFormat);
+    const size_t bytes=size_t(info.cbSequenceHeader);
+    if(bytes<4||bytes>256*1024)return result;
+    if(offsetof(MPEG2VIDEOINFO,dwSequenceHeader)+bytes>size_t(type.cbFormat))return result;
+    const uint8_t* data=reinterpret_cast<const uint8_t*>(info.dwSequenceHeader);
+    const auto appendNal=[&result](const uint8_t* nal,size_t length){
+        result.insert(result.end(),{0,0,0,1});
+        result.insert(result.end(),nal,nal+length);
+    };
+    // Already Annex-B (start code with 3 or 4 bytes).
+    if(data[0]==0&&data[1]==0&&(data[2]==1||(data[2]==0&&data[3]==1))){result.assign(data,data+bytes);return result;}
+    // AVCDecoderConfigurationRecord: version 1, SPS/PPS length-prefixed lists.
+    if(codec==CaptureCodec::H264&&data[0]==1&&bytes>=7){
+        size_t offset=5;
+        const unsigned spsCount=data[offset++]&0x1f;
+        for(unsigned i=0;i<spsCount;++i){
+            if(offset+2>bytes)return {};
+            const size_t length=(size_t(data[offset])<<8)|data[offset+1];offset+=2;
+            if(!length||offset+length>bytes)return {};
+            appendNal(data+offset,length);offset+=length;
+        }
+        if(offset>=bytes)return {};
+        const unsigned ppsCount=data[offset++];
+        for(unsigned i=0;i<ppsCount;++i){
+            if(offset+2>bytes)return {};
+            const size_t length=(size_t(data[offset])<<8)|data[offset+1];offset+=2;
+            if(!length||offset+length>bytes)return {};
+            appendNal(data+offset,length);offset+=length;
+        }
+        return result;
+    }
+    // HEVCDecoderConfigurationRecord: version 1, array of NAL units.
+    if(codec==CaptureCodec::Hevc&&data[0]==1&&bytes>=23){
+        const unsigned arrayCount=data[22];
+        size_t offset=23;
+        for(unsigned i=0;i<arrayCount;++i){
+            if(offset+3>bytes)return {};
+            const unsigned nalType=data[offset]&0x3f;++offset;
+            const unsigned count=(unsigned(data[offset])<<8)|data[offset+1];offset+=2;
+            for(unsigned j=0;j<count;++j){
+                if(offset+2>bytes)return {};
+                const size_t length=(size_t(data[offset])<<8)|data[offset+1];offset+=2;
+                if(!length||offset+length>bytes)return {};
+                // Keep VPS(32)/SPS(33)/PPS(34) only; other arrays are optional.
+                if(nalType==32||nalType==33||nalType==34)appendNal(data+offset,length);
+                offset+=length;
+            }
+        }
+        return result;
+    }
+    // Consecutive 4-byte length-prefixed NAL units.
+    std::vector<uint8_t> converted;
+    size_t offset=0;
+    while(offset+4<=bytes){
+        const size_t length=(size_t(data[offset])<<24)|(size_t(data[offset+1])<<16)|(size_t(data[offset+2])<<8)|size_t(data[offset+3]);
+        offset+=4;
+        if(!length||offset+length>bytes)return {};
+        converted.insert(converted.end(),{0,0,0,1});
+        converted.insert(converted.end(),data+offset,data+offset+length);
+        offset+=length;
+    }
+    if(offset!=bytes||converted.empty())return {};
+    return converted;
+}
 std::wstring propertyString(IMoniker* moniker,LPCOLESTR property){
     if(!moniker)return {};
     ComPtr<IPropertyBag> bag;VARIANT value;VariantInit(&value);std::wstring result;
@@ -89,6 +176,11 @@ std::wstring encodePath(std::wstring_view value){
     for(const wchar_t character:value){const uint16_t unit=static_cast<uint16_t>(character);for(int shift=12;shift>=0;shift-=4)encoded.push_back(digits[(unit>>shift)&0xF]);}return encoded;
 }
 std::string pathTag(std::wstring_view value){const auto encoded=encodePath(value);std::string tag;tag.reserve(encoded.size());for(const wchar_t character:encoded)tag.push_back(static_cast<char>(character));return tag;}
+// Audio devices are selected by ordinal in the legacy path form, so the log has
+// to carry the friendly name: without it a field log cannot say which endpoint
+// actually produced the samples.
+std::string narrowForLog(const std::wstring& value){if(value.empty())return {};const int size=WideCharToMultiByte(CP_UTF8,0,value.c_str(),int(value.size()),nullptr,0,nullptr,nullptr);if(size<=0)return {};std::string out(size_t(size),'\0');WideCharToMultiByte(CP_UTF8,0,value.c_str(),int(value.size()),out.data(),size,nullptr,nullptr);return out;}
+std::wstring filterName(IBaseFilter* filter){if(!filter)return {};FILTER_INFO info{};if(FAILED(filter->QueryFilterInfo(&info)))return {};std::wstring name=info.achName;if(info.pGraph)info.pGraph->Release();return name;}
 int hexValue(wchar_t character){if(character>=L'0'&&character<=L'9')return character-L'0';if(character>=L'A'&&character<=L'F')return character-L'A'+10;if(character>=L'a'&&character<=L'f')return character-L'a'+10;return -1;}
 bool decodePath(std::wstring_view encoded,std::wstring& value){
     if(encoded.size()%4!=0)return false;value.clear();value.reserve(encoded.size()/4);
@@ -138,9 +230,49 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
     std::shared_ptr<sink::BitstreamAudioSink> audioPassthrough;
     bool audioSessionDeferred=false;
     std::wstring audioBitstreamKind;
+    // Read-only IEC 61937 probe on the PCM carrier. AVerMedia cards can deliver
+    // the Dolby stream inside a media type that still says PCM, and the same
+    // card downmixes to real 2.0 when passthrough is not armed - only the bytes
+    // tell the two apart. Observational: it never changes what is played.
+    std::shared_ptr<sink::Iec61937Probe> carrierProbe;
+    // AVerMedia GC553G2 / GC553PRO / GC575 only forward compressed HDMI audio
+    // after the installed vendor component arms non-PCM passthrough. The
+    // component is loaded from the user's own OBS installation (never
+    // redistributed); see AverMediaAudioSwitch.h for the measured behaviour.
+    AverMediaAudioSwitch averMediaSwitch;
+    // "Use the video device's built-in audio" is unrecoverable when the video
+    // filter has no audio pin at all: retrying that is pure log noise.
+    bool embeddedAudioUnavailable=false;
     // 0 automatic, 1 PCM only, 2 bitstream preferred (see
     // engine::CaptureAudioIngress). Read when the audio graph is built.
     unsigned audioIngressMode=0;
+    // Video-pin allocator policy (0 auto, 1 minimum, 2 driver default); read
+    // when the capture graph is built. See CaptureBuffer.h.
+    unsigned bufferMode=0;
+    // N1 diagnostic: legacy per-pixel CPU unpack instead of GPU unpack.
+    bool cpuUnpack=false;
+    // MPEG chain stage 2: MJPEG direct-connect + our own FFmpeg decode backend.
+    // Decoding happens on the DirectShow callback thread for now (one decoder);
+    // a bounded parallel decode queue is a later refinement.
+    bool compressedPath=false;CaptureCodec codec=CaptureCodec::None;
+    CaptureCompressedDecoder compressedDecoder;
+    ID3D12Device* decodeDevice=nullptr;ID3D12CommandQueue* decodeQueue=nullptr;
+    uint64_t compressedDecoded=0,compressedErrors=0;
+    // D3D12VA frames are decoder-owned surfaces, so they travel through their
+    // own mailbox slot instead of the preallocated NV12 buffer.
+    AVFrame* pendingHardware=nullptr;AVFrame* hardwareRead=nullptr;bool pendingIsHardware=false;
+    // Decode worker: keeps the DirectShow callback cheap (payload copy only)
+    // and lets the decode overlap with graph work. The worker owns workerFrame
+    // and swaps it into the mailbox once a frame is ready.
+    struct CompressedSample{std::vector<uint8_t> payload;double time=0;Clock::time_point arrival;REFERENCE_TIME start=0,end=0;bool completeTime=false,bad=false;};
+    std::deque<CompressedSample> compressedQueue;size_t compressedQueueLimit=3;
+    std::thread decodeThread;std::condition_variable decodeWake;bool decodeStop=false;
+    AVFrame* workerFrame=nullptr;uint64_t compressedDropped=0;double lastCallbackTime=0;
+    // NV12 frames the decode worker may write into. A frame enters this pool
+    // only when it was never delivered, or when a read() call released it
+    // (the caller's ownership ends at the next read), so a frame the caller
+    // still holds is never overwritten underneath it.
+    std::vector<AVFrame*> compressedFree;
     // Manual capture flip; read by the DirectShow callback thread.
     std::atomic<bool> verticalFlip{false};
     std::unique_ptr<WasapiAudioInput> wasapi;
@@ -149,30 +281,104 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
     SourceInfo info;CaptureMediaLayout layout;Clock::time_point lastFrame;
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id,void** pp)override{if(!pp)return E_POINTER;*pp=nullptr;if(id==IID_IUnknown||id==__uuidof(ISampleGrabberCB)){*pp=static_cast<ISampleGrabberCB*>(this);AddRef();return S_OK;}return E_NOINTERFACE;}
     ULONG STDMETHODCALLTYPE AddRef()override{return ++refs;}ULONG STDMETHODCALLTYPE Release()override{return --refs;}
+    // Decode worker loop: pop a compressed payload, decode it with our own
+    // backend (software MJPEG / D3D12VA for H.264/HEVC/AV1/VP9), then hand the
+    // result to the mailbox. No source lock is held during decoding.
+    void decodeLoop(){
+        for(;;){
+            CompressedSample sample;AVFrame* target=nullptr;
+            {
+                std::unique_lock lock(mutex);
+                // The worker needs both a payload and a frame it may write
+                // into; the pool is refilled by read() releasing the caller's
+                // previous frame.
+                decodeWake.wait(lock,[&]{return decodeStop||(!compressedQueue.empty()&&workerFrame!=nullptr);});
+                if(decodeStop)return; // close() clears the queue; do not decode without a write target
+                sample=std::move(compressedQueue.front());compressedQueue.pop_front();
+                target=workerFrame;workerFrame=nullptr;
+            }
+            AVFrame* decodedFrame=nullptr;bool hardware=false;
+            const bool produced=compressedDecoder.decode(sample.payload.data(),sample.payload.size(),
+                int64_t(sample.time*1e7),target,&decodedFrame,hardware);
+            if(!produced){
+                // A decoder that needs more input before it can emit a frame is
+                // normal for the first payload; a real error is not.
+                if(!compressedDecoder.waitingForInput())++compressedErrors;
+                std::lock_guard lock(mutex);
+                workerFrame=target; // no output consumed the frame
+                continue;
+            }
+            {
+                std::lock_guard lock(mutex);
+                if(hardware){
+                    AVFrame* cloned=av_frame_clone(decodedFrame);
+                    if(!cloned){++compressedErrors;workerFrame=target;continue;}
+                    if(pending)++dropped;          // mailbox semantics: newest wins
+                    if(pendingHardware)av_frame_free(&pendingHardware);
+                    pendingHardware=cloned;
+                    workerFrame=target;
+                }else{
+                    // The caller only releases its frame on the next read, so
+                    // a replaced pending frame goes back to the pool instead of
+                    // being reused directly.
+                    if(pending){compressedFree.push_back(pendingFrame);++dropped;}
+                    pendingFrame=target;
+                    if(!compressedFree.empty()){workerFrame=compressedFree.back();compressedFree.pop_back();}
+                }
+                pendingIsHardware=hardware;
+                pending=true;pendingTime=sample.time;pendingArrival=sample.arrival;
+                pendingDuration=captureDuration(sample.start,sample.end,sample.completeTime,nominalDuration100ns);
+                pendingDiscontinuity=sample.bad;
+                ++compressedDecoded;
+                if((compressedDecoded%600)==0)log::info("capture-decode",std::format("decoded={} errors={} queueDrops={} backend={} (decode worker)",compressedDecoded,compressedErrors,compressedDropped,compressedDecoder.backendName()));
+            }
+            wake.notify_one();decodeWake.notify_one();
+        }
+    }
     HRESULT STDMETHODCALLTYPE SampleCB(double time,IMediaSample* sample)override{
         const auto arrival=Clock::now();BYTE* data=nullptr;
         REFERENCE_TIME sampleStart=0,sampleEnd=0;
         const bool sampleTime=sample&&sample->GetTime(&sampleStart,&sampleEnd)==S_OK;
         const bool valid=sample&&std::isfinite(time)&&SUCCEEDED(sample->GetPointer(&data))&&data&&
-            sample->GetActualDataLength()>=LONG(layout.sampleBytes);
+            (compressedPath?sample->GetActualDataLength()>0:sample->GetActualDataLength()>=LONG(layout.sampleBytes));
+        bool enqueued=false;
         {
             std::lock_guard lock(mutex);
-            if(!valid||!pendingFrame){callbackError=true;}
+            // The compressed path decodes in its own worker and keeps its own
+            // frame pool, so the preallocated NV12 mailbox is legitimately
+            // empty between reads; only the native path requires it here.
+            if(!valid||(!compressedPath&&!pendingFrame)){callbackError=true;}
             else {
                 // Copy directly into our bounded mailbox; read() swaps frames
                 // under this lock, so the frame consumed by the GPU is untouched.
-                if(!copyCaptureSample(layout,data,size_t(sample->GetActualDataLength()),*pendingFrame,verticalFlip.load())){callbackError=true;wake.notify_one();return S_OK;}
-                if(pending)++dropped;
-                // Inspect consecutive callbacks, not consecutive mailbox reads.
-                // Preserve a driver/clock break when its sample is overwritten.
-                pendingDiscontinuity=captureDiscontinuity(pending,pendingDiscontinuity,
-                    sample->IsDiscontinuity()==S_OK,received>0,pendingTime,time,info.averageFps);
-                pending=true;pendingTime=time;pendingArrival=arrival;
-                pendingDuration=captureDuration(sampleStart,sampleEnd,sampleTime,nominalDuration100ns);
+                // Compressed payloads are decoded by our own backend instead of
+                // being expanded by the system graph's decoder/color converter.
+                if(compressedPath){
+                    // MPEG chain: the callback only copies the compressed
+                    // payload; the decode worker produces the NV12 frame.
+                    const auto* payload=reinterpret_cast<const uint8_t*>(data);
+                    const size_t bytes=size_t(sample->GetActualDataLength());
+                    if(compressedQueue.size()>=compressedQueueLimit){compressedQueue.pop_front();++compressedDropped;++dropped;}
+                    CompressedSample entry;entry.payload.assign(payload,payload+bytes);
+                    entry.time=time;entry.arrival=arrival;entry.start=sampleStart;entry.end=sampleEnd;entry.completeTime=sampleTime;
+                    entry.bad=captureDiscontinuity(!compressedQueue.empty()||pending,pendingDiscontinuity,sample->IsDiscontinuity()==S_OK,received>0,lastCallbackTime,time,info.averageFps);
+                    pendingDiscontinuity=entry.bad;lastCallbackTime=time;
+                    compressedQueue.push_back(std::move(entry));enqueued=true;
+                }else{
+                    if(!copyCaptureSample(layout,data,size_t(sample->GetActualDataLength()),*pendingFrame,verticalFlip.load())){callbackError=true;wake.notify_one();return S_OK;}
+                    if(pending)++dropped;
+                    // Inspect consecutive callbacks, not consecutive mailbox reads.
+                    // Preserve a driver/clock break when its sample is overwritten.
+                    pendingDiscontinuity=captureDiscontinuity(pending,pendingDiscontinuity,
+                        sample->IsDiscontinuity()==S_OK,received>0,pendingTime,time,info.averageFps);
+                    pending=true;pendingTime=time;pendingArrival=arrival;
+                    pendingDuration=captureDuration(sampleStart,sampleEnd,sampleTime,nominalDuration100ns);
+                }
                 if(!received)firstArrival=arrival;
                 ++received;latestArrival=arrival;
             }
         }
+        if(enqueued)decodeWake.notify_one();
         wake.notify_one();return S_OK;
     }
     HRESULT STDMETHODCALLTYPE BufferCB(double,BYTE*,long)override{return E_NOTIMPL;}
@@ -214,12 +420,17 @@ std::vector<CaptureFormat> enumerateFormats(IAMStreamConfig* config){
         if(bitmap&&bitmap->biWidth>0&&bitmap->biWidth<=3840&&std::abs(int64_t(bitmap->biHeight))>0&&std::abs(int64_t(bitmap->biHeight))<=2160&&duration>0){unsigned width=bitmap->biWidth,height=unsigned(std::abs(int64_t(bitmap->biHeight)));double fps=1e7/duration;
             const auto pixel=capturePixelName(type->subtype);CaptureMediaLayout layout;const bool valid=captureMediaLayout(*type,layout);const bool knownRaw=capturePacking(type->subtype)!=CapturePacking::Unknown;
             const wchar_t* support=valid?((layout.format==AV_PIX_FMT_P010||layout.format==AV_PIX_FMT_P016)?L"原生 · SDR":L"原生"):knownRaw?L"布局/颜色暂不支持":L"需系统解码/转换";
+            // N3: latency tier + recommended rank; compressed/unknown sorts last.
+            const auto tier=valid?captureFormatTier(layout.packing):CaptureFormatTier::Decoded;
+            const int rank=valid?captureFormatRank(layout.packing):captureFormatRank(CapturePacking::Unknown);
             wchar_t subtype[40]{},formatType[40]{};StringFromGUID2(type->subtype,subtype,40);StringFromGUID2(type->formattype,formatType,40);
             const auto key=std::format(L"{}:{}:{}:{}:{}:{}:{}",width,bitmap->biHeight,duration,subtype,formatType,bitmap->biBitCount,bitmap->biCompression);
-            out.push_back({i,width,height,fps,std::format(L"{} x {} @ {:.2f} fps · {} · {} [format {}]",width,height,fps,pixel,support,i),key});
+            out.push_back({i,width,height,fps,std::format(L"{} x {} @ {:.2f} fps · {} · {} · {} [format {}]",width,height,fps,pixel,support,captureFormatTierLabel(tier),i),key,rank,int(tier)});
         }
         freeType(type);
     }
+    // Recommended order first; equal ranks keep the driver's enumeration order.
+    std::stable_sort(out.begin(),out.end(),[](const CaptureFormat& a,const CaptureFormat& b){return a.rank<b.rank;});
     return out;
 }
 std::vector<CaptureFormat> CaptureCardSource::formats(unsigned device){ComPtr<IGraphBuilder> g;ComPtr<ICaptureGraphBuilder2>b;ComPtr<IBaseFilter>f;ComPtr<IAMStreamConfig>c;if(!configuration(device,g,b,f,c))return {};return enumerateFormats(c.Get());}
@@ -233,10 +444,24 @@ void CaptureCardSource::setAudioIngress(unsigned mode){
     log::info("capture-audio-ingress",std::format("mode={} ({}) takes effect on the next connect",clamped,
         clamped==1?"PCM only":clamped==2?"bitstream preferred":"automatic"));
 }
+void CaptureCardSource::setBufferMode(unsigned mode){
+    auto& p=*p_;
+    const unsigned clamped=mode>2?0:mode;
+    if(p.bufferMode==clamped)return;
+    p.bufferMode=clamped;
+    const auto policy=static_cast<CaptureBufferMode>(clamped);
+    log::info("capture-buffer",std::format("mode={} ({}) takes effect on the next connect",clamped,captureBufferModeKey(policy)));
+}
 void CaptureCardSource::setVerticalFlip(bool enabled){
     auto& p=*p_;
     if(p.verticalFlip.exchange(enabled)==enabled)return;
     log::info("capture-flip",std::format("manual vertical flip={} (applies to the next sample; ingest only)",enabled?1:0));
+}
+void CaptureCardSource::setCpuUnpack(bool enabled){
+    auto& p=*p_;
+    if(p.cpuUnpack==enabled)return;
+    p.cpuUnpack=enabled;
+    log::warn("capture-unpack",std::format("legacy CPU per-pixel unpack={} (diagnostic; takes effect on the next connect)",enabled?1:0));
 }
 bool CaptureCardSource::setAudioGain(float gain){
     if(p_->wasapi){p_->wasapi->setGain(gain);return p_->wasapi->snapshot().available;}
@@ -289,14 +514,61 @@ bool CaptureCardSource::configure(const SourceOpenDesc& desc){close();p_->lastAu
         }
     }
     const bool direct=nativeSupported&&!desc.legacyCaptureRgbForDiagnostic;
+    const CaptureCodec codec=captureCodecOf(native->subtype);
+    unsigned compressedWidth=0,compressedHeight=0;int64_t compressedDuration=0;
+    // MPEG chain: every compressed subtype (MJPEG/H.264/HEVC/AV1/VP9) now
+    // bypasses the system decoder stack; our own backend decodes it. Any
+    // failure below falls back to the RGB32 compatibility path.
+    const bool compressedPath=!direct&&!nativeSupported&&codec!=CaptureCodec::None&&!desc.legacyCaptureRgbForDiagnostic;
+    if(compressedPath){p.compressedPath=true;p.codec=codec;}
     AM_MEDIA_TYPE connected{};
-    if(direct){
+    if(compressedPath){
+        ComPtr<IPin> input,output;
+        hr=createCompressedCaptureSink(*native,[&p](IMediaSample* sample){REFERENCE_TIME a=0,b=0;const auto timeHr=sample->GetTime(&a,&b);if(FAILED(timeHr))return timeHr;return p.SampleCB(double(a)/1e7,sample);},p.grabFilter,input);
+        if(SUCCEEDED(hr))hr=p.graph->AddFilter(p.grabFilter.Get(),L"Compressed frame mailbox");
+        if(SUCCEEDED(hr))hr=p.builder->FindPin(p.device.Get(),PINDIR_OUTPUT,&PIN_CATEGORY_CAPTURE,&MEDIATYPE_Video,FALSE,0,&output);
+        if(SUCCEEDED(hr))suggestCaptureVideoBuffering(output.Get(),4,512*1024);
+        if(SUCCEEDED(hr))hr=p.graph->ConnectDirect(output.Get(),input.Get(),native);
+        if(SUCCEEDED(hr))hr=input->ConnectionMediaType(&connected);
+        if(SUCCEEDED(hr)){
+            if(connected.formattype==FORMAT_VideoInfo2&&connected.cbFormat>=sizeof(VIDEOINFOHEADER2)){const auto& v=*reinterpret_cast<const VIDEOINFOHEADER2*>(connected.pbFormat);compressedWidth=unsigned(v.bmiHeader.biWidth);compressedHeight=unsigned(std::abs(int64_t(v.bmiHeader.biHeight)));compressedDuration=int64_t(v.AvgTimePerFrame);}
+            else if(connected.formattype==FORMAT_VideoInfo&&connected.cbFormat>=sizeof(VIDEOINFOHEADER)){const auto& v=*reinterpret_cast<const VIDEOINFOHEADER*>(connected.pbFormat);compressedWidth=unsigned(v.bmiHeader.biWidth);compressedHeight=unsigned(std::abs(int64_t(v.bmiHeader.biHeight)));compressedDuration=int64_t(v.AvgTimePerFrame);}
+            if(!compressedWidth||!compressedHeight||compressedWidth%2||compressedHeight%2){log::warn("capture-decode","compressed dimensions unusable; falling back to the RGB32 compatibility path");hr=VFW_E_INVALIDMEDIATYPE;}
+        }
+        if(SUCCEEDED(hr)){
+            const auto extradata=captureCompressedExtradata(*native,codec);
+            if(!p.compressedDecoder.open(codec,compressedWidth,compressedHeight,extradata.data(),extradata.size(),
+                static_cast<ID3D12Device*>(desc.d3d12Device),static_cast<ID3D12CommandQueue*>(desc.d3d12Queue))){
+                log::warn("capture-decode",std::format("no usable decoder for codec={}; falling back to the RGB32 compatibility path",captureCodecKey(codec)));
+                hr=VFW_E_INVALIDMEDIATYPE;
+            }else{
+                // Keep the shared device/queue alive for the decode worker.
+                if(desc.d3d12Device){p.decodeDevice=static_cast<ID3D12Device*>(desc.d3d12Device);p.decodeDevice->AddRef();}
+                if(desc.d3d12Queue){p.decodeQueue=static_cast<ID3D12CommandQueue*>(desc.d3d12Queue);p.decodeQueue->AddRef();}
+            }
+        }
+        log::info("capture-decode",std::format("compressed ConnectDirect codec={} subtype=0x{:08X} size={}x{} hr=0x{:08X}",captureCodecKey(codec),native->subtype.Data1,compressedWidth,compressedHeight,uint32_t(hr)));
+        if(FAILED(hr)){log::warn("capture-decode","compressed direct connect failed; retrying the RGB32 compatibility path");SourceOpenDesc retry=desc;retry.legacyCaptureRgbForDiagnostic=true;return configure(retry);}
+    }else if(direct){
+        // N4: suggest the video-pin allocator size before ConnectDirect. The
+        // suggestion is advisory; a refusal keeps the driver's defaults and is
+        // reported after the connect instead of failing the device.
+        const auto bufferPolicy=static_cast<CaptureBufferMode>(p.bufferMode);
+        const long suggestedBuffers=captureDesiredVideoBuffers(bufferPolicy,long(nativeLayout.width),long(nativeLayout.height));
         ComPtr<IPin> input,output;
         hr=createNativeCaptureSink(*native,[&p](IMediaSample* sample){REFERENCE_TIME a=0,b=0;const auto timeHr=sample->GetTime(&a,&b);if(FAILED(timeHr))return timeHr;return p.SampleCB(double(a)/1e7,sample);},p.grabFilter,input);
         if(SUCCEEDED(hr))hr=p.graph->AddFilter(p.grabFilter.Get(),L"Native frame mailbox");
         if(SUCCEEDED(hr))hr=p.builder->FindPin(p.device.Get(),PINDIR_OUTPUT,&PIN_CATEGORY_CAPTURE,&MEDIATYPE_Video,FALSE,0,&output);
+        if(SUCCEEDED(hr)&&suggestedBuffers>0)suggestCaptureVideoBuffering(output.Get(),suggestedBuffers,LONG(nativeLayout.sampleBytes));
         if(SUCCEEDED(hr))hr=p.graph->ConnectDirect(output.Get(),input.Get(),native);
         if(SUCCEEDED(hr))hr=input->ConnectionMediaType(&connected);
+        if(SUCCEEDED(hr)){
+            ALLOCATOR_PROPERTIES actual{};
+            const auto allocatorHr=queryCaptureAllocatorProperties(input.Get(),actual);
+            const bool negotiated=suggestedBuffers>0;
+            const bool honored=negotiated&&SUCCEEDED(allocatorHr)&&actual.cBuffers==suggestedBuffers;
+            log::info("capture-buffer",std::format("mode={} requested={} actual buffers={} bytes={} align={} hr=0x{:08X} {}",captureBufferModeKey(bufferPolicy),suggestedBuffers,actual.cBuffers,actual.cbBuffer,actual.cbAlign,uint32_t(allocatorHr),!negotiated?"(driver default)":honored?"(driver honored)":"(driver ignored; negotiation not applied)"));
+        }
         log::info("capture",std::format("native ConnectDirect subtype=0x{:08X} hr=0x{:08X} converters=0",native->subtype.Data1,uint32_t(hr)));
     }else{
         log::warn("capture",std::format("explicit RGB32 compatibility path subtype=0x{:08X} diagnostic={} (decoder/color converter may be inserted)",requestedSubtype.Data1,desc.legacyCaptureRgbForDiagnostic));
@@ -310,11 +582,38 @@ bool CaptureCardSource::configure(const SourceOpenDesc& desc){close();p_->lastAu
         if(SUCCEEDED(hr))hr=p.builder->RenderStream(&PIN_CATEGORY_CAPTURE,&MEDIATYPE_Video,p.device.Get(),p.grabFilter.Get(),p.nullFilter.Get());
         if(SUCCEEDED(hr))hr=p.grab->GetConnectedMediaType(&connected);
     }
-    freeType(native);const bool layoutValid=SUCCEEDED(hr)&&captureMediaLayout(connected,p.layout);freeType(&connected,false);
+    bool layoutValid=false;
+    if(compressedPath){
+        freeType(native);freeType(&connected,false);
+        p.layout={};
+        p.layout.width=compressedWidth;p.layout.height=compressedHeight;
+        p.layout.planes=2;p.layout.format=AV_PIX_FMT_NV12;
+        p.layout.rowBytes=p.layout.width;p.layout.stride=p.layout.rowBytes;p.layout.chromaStride=p.layout.stride;p.layout.chromaRowBytes=p.layout.rowBytes;
+        p.layout.chromaOffset=size_t(p.layout.stride)*p.layout.height;
+        p.layout.sampleBytes=p.layout.chromaOffset+size_t(p.layout.chromaStride)*(p.layout.height/2);
+        p.layout.duration=compressedDuration;
+        AVFrame probe{};probe.format=AV_PIX_FMT_NV12;probe.width=int(p.layout.width);probe.height=int(p.layout.height);
+        p.layout.color=pipeline::resolveFrameColor(probe);
+        if(codec==CaptureCodec::Mjpeg){
+            // JPEG planes are full-range by definition and our MJPEG software
+            // decoder emits full-range NV12 (the pre-MPEG colour contract).
+            p.layout.color.range=pipeline::ColorRange::Full;
+            p.layout.color.transfer=pipeline::TransferFunction::SRGB;
+            p.layout.color.preserveSdrCodeValues=true;
+        }
+        // Compressed video keeps the standard limited-range NV12 contract as
+        // its declared fallback; the bitstream's own VUI metadata overrides it
+        // per frame through resolveFrameColor().
+        p.layout.color.rangeAssumed=p.layout.color.matrixAssumed=p.layout.color.transferAssumed=true;
+        layoutValid=true;
+    }else{
+        freeType(native);layoutValid=SUCCEEDED(hr)&&captureMediaLayout(connected,p.layout);freeType(&connected,false);
+    }
     if(!layoutValid){log::error("capture",std::format("unsupported negotiated layout/connect failure hr=0x{:08X}",uint32_t(hr)));return false;}
+    if(p.cpuUnpack&&captureLegacyCpuLayout(p.layout))log::warn("capture-unpack",std::format("legacy CPU unpack path active packing={} format={} (per-pixel conversion stays on the callback thread)",int(p.layout.packing),int(p.layout.format)));
     const unsigned colorOverride=selection.colorOverride;
     if(colorOverride>2)return false;
-    if(colorOverride){
+    if(colorOverride&&!compressedPath){
         if(p.layout.format!=AV_PIX_FMT_P010&&p.layout.format!=AV_PIX_FMT_P016){log::error("capture-color","Explicit HDR requires P010/P016; select a 10/16-bit capture format");return false;}
         p.layout.color.transfer=colorOverride==1?pipeline::TransferFunction::PQ:pipeline::TransferFunction::HLG;
         p.layout.color.matrix=pipeline::YuvMatrix::BT2020NCL;p.layout.color.primaries=pipeline::ColorPrimaries::BT2020;
@@ -329,6 +628,15 @@ bool CaptureCardSource::configure(const SourceOpenDesc& desc){close();p_->lastAu
         if(!p.wasapi->configure(selection.audioPath)){p.wasapi.reset();p.audioError=L"WASAPI 音频端点ID无效；视频继续运行";}
         log::info("capture-audio","binding=wasapi shared=1 explicitEndpoint=1 videoClock=ingress-host-estimate");
     }else if(audio!=kCaptureAudioDisabled){
+        if(audio>=0){
+            // Resolve the DirectShow device identity before the graph is built.
+            // The AVerMedia switch is keyed on the device path, and it has to
+            // happen first so media-type enumeration sees the post-switch state.
+            std::wstring audioName,audioPath;
+            if(selection.stable)audioPath=selection.audioPath;
+            else{auto list=monikers(true);if(size_t(audio)<list.size()){audioName=propertyString(list[size_t(audio)].Get(),L"FriendlyName");audioPath=monikerPath(list[size_t(audio)].Get());}}
+            if(!audioPath.empty())applyVendorAudioSwitch(audioName,audioPath);
+        }
         const bool audioReady=connectDirectShowAudio(desc);
         if(!audioReady){
             p.audioError=L"采集音频设备或 PCM 格式不可用；视频继续运行";
@@ -349,6 +657,23 @@ bool CaptureCardSource::configure(const SourceOpenDesc& desc){close();p_->lastAu
         (*f)->format=p.layout.format;(*f)->width=p.info.width;(*f)->height=p.info.height;
         if(av_frame_get_buffer(*f,32)<0)return false;
     }
+    if(compressedPath){
+        // Write targets: the frame the worker is filling plus one spare handed
+        // out by read(). Frames are never reused while the caller still owns
+        // them (see the pool contract in Impl).
+        // Four frames total (delivered / pending / worker / one spare). A
+        // larger pool was measured with two and three spares: the 4K18
+        // read-age effect was not monotonic (23.6 vs 25.2 ms across runs), so
+        // the extra memory buys nothing reproducible.
+        for(int i=0;i<2;++i){
+            AVFrame* frame=av_frame_alloc();if(!frame)return false;
+            frame->format=AV_PIX_FMT_NV12;frame->width=int(p.layout.width);frame->height=int(p.layout.height);
+            if(av_frame_get_buffer(frame,32)<0){av_frame_free(&frame);return false;}
+            if(i==0)p.workerFrame=frame;else p.compressedFree.push_back(frame);
+        }
+        p.decodeStop=false;p.decodeThread=std::thread([&p]{p.decodeLoop();});
+        log::info("capture-decode",std::format("decode worker started queue={} backend={} (single decode thread; the parallel pool is a later refinement)",p.compressedQueueLimit,p.compressedDecoder.backendName()));
+    }
     p.configured=true;
     reconnectDesc_=desc;reconnectInfo_=p.info;reconnectFormat_.clear();
     for(const auto& candidate:enumerateFormats(p.config.Get()))if(candidate.index==format){reconnectFormat_=candidate.key;break;}
@@ -358,6 +683,24 @@ bool CaptureCardSource::configure(const SourceOpenDesc& desc){close();p_->lastAu
     veyra::log::info("capture",std::format("configured {}x{} nominalFps={:.3f} upstreamSubtype=0x{:08X} formatHr=0x{:X} mailbox=1 ownedBuffers=2 deferredRun=1 audioDevice={}",
         p.info.width,p.info.height,p.info.averageFps,actual?unsigned(actual->subtype.Data1):0,unsigned(formatHr),audio));freeType(actual);
     return true;
+}
+bool CaptureCardSource::applyVendorAudioSwitch(const std::wstring& audioName,const std::wstring& audioPath){
+    auto& p=*p_;
+    if(!AverMediaAudioSwitch::isAverMediaDevicePath(audioPath)){
+        log::info("capture-audio-vendor",std::format("skipped: not an AVerMedia capture device (device=\"{}\")",narrowForLog(audioName)));
+        return false;
+    }
+    const bool applied=p.averMediaSwitch.apply(audioName,audioPath);
+    const auto& status=p.averMediaSwitch.status();
+    if(applied){
+        log::info("capture-audio-vendor",std::format("non-PCM switch armed device=\"{}\" component=\"{}\" chipFormat={} nonPcmNow={} monitoring={}",
+            narrowForLog(audioName),narrowForLog(status.componentRoot),status.chipAudioFormat,status.nonPcmActive?1:0,
+            p.averMediaSwitch.active()?1:0));
+    }else{
+        log::warn("capture-audio-vendor",std::format("non-PCM switch unavailable device=\"{}\" componentFound={} dllsLoaded={} detail=\"{}\"",
+            narrowForLog(audioName),status.componentFound?1:0,status.dllsLoaded?1:0,status.detail));
+    }
+    return applied;
 }
 bool CaptureCardSource::connectDirectShowAudio(const SourceOpenDesc& desc){
     auto& p=*p_;CaptureSelection selection;if(!parseCapturePath(desc.path,selection))return false;
@@ -373,10 +716,15 @@ bool CaptureCardSource::connectDirectShowAudio(const SourceOpenDesc& desc){
         if(!bound){log::warn("capture-audio",std::format("binding=separate failed mode={} audioIndex={} audioPathTag={}",audio,audio,pathTag(selection.audioPath)));return false;}
         hr=p.graph->AddFilter(audioFilter.Get(),L"Capture audio");
         if(FAILED(hr)){log::warn("capture-audio",std::format("binding=separate AddFilter hr=0x{:08X}",uint32_t(hr)));return false;}
-        p.audioFilter=audioFilter;log::info("capture-audio",std::format("binding=separate embedded=0 audioIndex={} audioPathTag={}",audio,audio,pathTag(selection.audioPath)));
+        p.audioFilter=audioFilter;log::info("capture-audio",std::format("binding=separate embedded=0 audioIndex={} audioPathTag={} device=\"{}\"",audio,audio,pathTag(selection.audioPath),narrowForLog(filterName(audioFilter.Get()))));
     }
     ComPtr<IPin> audioPin;hr=audioPinFor(p.builder.Get(),audioFilter.Get(),audioPin);
-    if(FAILED(hr)){log::warn("capture-audio",std::format("audio output pin not found embedded={} hr=0x{:08X}",embedded?1:0,uint32_t(hr)));return false;}
+    if(FAILED(hr)){
+        if(embedded)p.embeddedAudioUnavailable=true;
+        log::warn("capture-audio",std::format("audio output pin not found embedded={} hr=0x{:08X}{}",embedded?1:0,uint32_t(hr),
+            embedded?" (this video filter exposes no audio pin; select the separate audio device)":""));
+        return false;
+    }
     ComPtr<IEnumMediaTypes> types;hr=audioPin->EnumMediaTypes(&types);if(FAILED(hr)){log::warn("capture-audio",std::format("EnumMediaTypes hr=0x{:08X}",uint32_t(hr)));return false;}
     // Preserve the device's actual speaker layout. Enumeration order is
     // commonly stereo first even when native 5.1 is available.
@@ -440,9 +788,11 @@ if(audioTypes.empty()&&(!allowBitstream||bitstreamTypes.empty())){log::warn("cap
         sink::WavePcmFormat parsed{};
         if(type->formattype==FORMAT_WaveFormatEx&&type->pbFormat&&type->cbFormat>=sizeof(WAVEFORMATEX)&&sink::parseWavePcm(type->pbFormat,type->cbFormat,parsed)&&session->configure(parsed)){
             auto* target=session.get();
-            hr=createNativeAudioSink(*type,[target](IMediaSample* sample){
+            auto probe=std::make_shared<sink::Iec61937Probe>();
+            hr=createNativeAudioSink(*type,[target,probe](IMediaSample* sample){
                 BYTE* bytes=nullptr;REFERENCE_TIME begin=0,end=0;
                 if(FAILED(sample->GetPointer(&bytes))||FAILED(sample->GetTime(&begin,&end)))return VFW_E_SAMPLE_TIME_NOT_SET;
+                probe->feed(bytes,size_t(sample->GetActualDataLength()));
                 return target->push(bytes,size_t(sample->GetActualDataLength()),double(begin)/10000,sample->IsDiscontinuity()==S_OK)?S_OK:E_FAIL;
             },candidate,terminal);
             if(SUCCEEDED(hr))hr=p.graph->AddFilter(candidate.Get(),L"Veyra audio PCM");
@@ -451,7 +801,7 @@ if(audioTypes.empty()&&(!allowBitstream||bitstreamTypes.empty())){log::warn("cap
             // Some devices reject this advisory API, so do not fail capture.
             if(SUCCEEDED(hr))suggestCaptureAudioBuffering(audioPin.Get(),*reinterpret_cast<const WAVEFORMATEX*>(type->pbFormat));
             if(SUCCEEDED(hr))hr=p.graph->ConnectDirect(audioPin.Get(),terminal.Get(),type);
-            if(SUCCEEDED(hr)){p.audioSink=candidate;p.audioSession=std::move(session);connectedAudio=true;log::info("capture-audio",std::format("selected media type channels={} mask=0x{:X} rate={} containerBits={} validBits={} floating={}",parsed.layout.channels,parsed.layout.mask,parsed.wave.nSamplesPerSec,parsed.wave.wBitsPerSample,parsed.validBits,parsed.floating?1:0));}
+            if(SUCCEEDED(hr)){p.audioSink=candidate;p.audioSession=std::move(session);p.carrierProbe=probe;connectedAudio=true;log::info("capture-audio",std::format("selected media type channels={} mask=0x{:X} rate={} containerBits={} validBits={} floating={}",parsed.layout.channels,parsed.layout.mask,parsed.wave.nSamplesPerSec,parsed.wave.wBitsPerSample,parsed.validBits,parsed.floating?1:0));}
             else if(candidate)p.graph->RemoveFilter(candidate.Get());
             log::info("capture-audio",std::format("PCM ConnectDirect hr=0x{:X}",unsigned(hr)));
         }
@@ -589,6 +939,13 @@ bool CaptureCardSource::start(){
 void CaptureCardSource::recoverAudio(float gain,unsigned syncMode,int offsetMs){
     auto& p=*p_;if(!p.info.opened||!p.control||p.wasapi)return;
     CaptureSelection selection;if(!parseCapturePath(reconnectDesc_.path,selection)||!selection.stable||selection.audio==kCaptureAudioDisabled||selection.audio==kCaptureAudioWasapi)return;
+    // A video filter without an audio pin can never recover: in the field log
+    // this retried seven times over twenty seconds with an identical failure.
+    if(selection.audio==kCaptureAudioFromVideoDevice&&p.embeddedAudioUnavailable){
+        static bool reported=false;
+        if(!reported){reported=true;log::warn("capture-audio-reconnect","embedded audio pin is absent on this device; recovery disabled, select a separate audio device");}
+        return;
+    }
     const auto state=p.audioSession?p.audioSession->snapshot():sink::CaptureAudioState{};
     if(!p.audioRecovery.due(state.inputBlocks,GetTickCount64()))return;
     // DirectShow audio/video pins share one graph. Briefly stop it to mutate
@@ -647,12 +1004,29 @@ SourceReadStatus CaptureCardSource::read(pipeline::FramePacket& packet,const AVF
 SourceReadStatus CaptureCardSource::tryRead(pipeline::FramePacket& packet,const AVFrame** frame){return readWithWait(packet,frame,0);}
 SourceReadStatus CaptureCardSource::readWithWait(pipeline::FramePacket& packet,const AVFrame** frame,unsigned milliseconds){auto& p=*p_;*frame=nullptr;if(!p.info.opened)return SourceReadStatus::Error;
     long code=0;LONG_PTR a=0,b=0;while(p.events&&p.events->GetEvent(&code,&a,&b,0)==S_OK){if(code==EC_DEVICE_LOST||code==EC_ERRORABORT)log::warn("capture-reconnect",std::format("DirectShow event={} detail=0x{:X}",code,uint64_t(a)));p.events->FreeEventParams(code,a,b);if(code==EC_DEVICE_LOST||code==EC_ERRORABORT)return SourceReadStatus::Error;}
-    double time=0;uint32_t flags=0;uint64_t sequence=0;pipeline::Rational duration;
+    double time=0;uint32_t flags=0;uint64_t sequence=0;pipeline::Rational duration;AVFrame* delivered=nullptr;AVFrame* expiredHardware=nullptr;bool feedDecode=false;
     {
         std::unique_lock lock(p.mutex);if(milliseconds)p.wake.wait_for(lock,std::chrono::milliseconds(milliseconds),[&]{return p.pending||p.callbackError;});
         if(p.callbackError)return SourceReadStatus::Error;
         if(!p.pending)return Impl::Clock::now()-p.lastFrame>std::chrono::seconds(3)?SourceReadStatus::Error:SourceReadStatus::Waiting;
-        std::swap(p.frame,p.pendingFrame);p.pending=false;time=p.pendingTime;p.readArrival=p.pendingArrival;
+        if(p.pendingIsHardware){
+            // D3D12VA surfaces cannot be copied into the preallocated NV12
+            // buffer; the read slot owns the cloned frame and the previous one
+            // is released after the lock is dropped.
+            expiredHardware=p.hardwareRead;p.hardwareRead=p.pendingHardware;p.pendingHardware=nullptr;delivered=p.hardwareRead;
+        }else if(p.compressedPath){
+            // The caller's ownership of the previous frame ends with this read,
+            // so it goes back into the decode pool and the worker continues.
+            if(p.frame)p.compressedFree.push_back(p.frame);
+            p.frame=p.pendingFrame;p.pendingFrame=nullptr;delivered=p.frame;
+            if(p.workerFrame==nullptr&&!p.compressedFree.empty()){p.workerFrame=p.compressedFree.back();p.compressedFree.pop_back();feedDecode=true;}
+        }else{
+            // Native path keeps the original mailbox rotation: the frame the
+            // caller releases becomes the next ingest target, and pendingFrame
+            // must never be null here (SampleCB rejects that as an error).
+            std::swap(p.frame,p.pendingFrame);delivered=p.frame;
+        }
+        p.pending=false;time=p.pendingTime;p.readArrival=p.pendingArrival;
         duration=p.pendingDuration;
         p.readAgeMs=std::chrono::duration<double,std::milli>(Impl::Clock::now()-p.readArrival).count();
         if(!p.sequence)flags|=static_cast<uint32_t>(pipeline::FrameFlagBits::Open);
@@ -661,18 +1035,39 @@ SourceReadStatus CaptureCardSource::readWithWait(pipeline::FramePacket& packet,c
         if(p.forceDiscontinuity){flags|=static_cast<uint32_t>(pipeline::FrameFlagBits::Discontinuity);p.forceDiscontinuity=false;}
         p.lastDrop=p.dropped;p.lastPts=time;++p.sequence;sequence=p.received;
     }
-    p.frame->pts=static_cast<int64_t>(time*10000000);p.frame->duration=duration.isUnknown()?0:duration.to100ns();p.frame->time_base={1,10000000};packet={};packet.pts={p.frame->pts,10000000};packet.duration=duration;packet.colorInfo=p.info.color;packet.sourceKind=pipeline::SourceKind::CaptureCard;packet.sequence=sequence;packet.flags=flags;packet.sourceEpoch=1;
+    if(feedDecode)p.decodeWake.notify_one();
+    if(expiredHardware)av_frame_free(&expiredHardware);
+    if(delivered==nullptr)return SourceReadStatus::Error;
+    auto colorInfo=p.info.color;
+    if(p.compressedPath){
+        // Compressed video carries its own VUI metadata; the negotiated layout
+        // stays the declared fallback. D3D12VA surfaces report NV12 by
+        // contract (the capture ingress contract is 8-bit for this path).
+        colorInfo=pipeline::resolveFrameColor(*delivered,p.layout.color);
+        if(delivered->format==AV_PIX_FMT_D3D12&&colorInfo.pixelFormat==pipeline::SourcePixelFormat::Unknown)colorInfo.pixelFormat=pipeline::SourcePixelFormat::NV12;
+    }
+    delivered->pts=static_cast<int64_t>(time*10000000);delivered->duration=duration.isUnknown()?0:duration.to100ns();delivered->time_base={1,10000000};packet={};packet.pts={delivered->pts,10000000};packet.duration=duration;packet.colorInfo=colorInfo;packet.sourceKind=pipeline::SourceKind::CaptureCard;packet.sequence=sequence;packet.flags=flags;packet.sourceEpoch=1;
     packet.sequence+=receivedOffset_;packet.sourceEpoch=epoch_;
     packet.arrivalHost100ns=std::chrono::duration_cast<std::chrono::nanoseconds>(p.readArrival.time_since_epoch()).count()/100;
-    *frame=p.frame;p.lastFrame=Impl::Clock::now();return SourceReadStatus::Frame;
+    *frame=delivered;p.lastFrame=Impl::Clock::now();return SourceReadStatus::Frame;
 }
 void CaptureCardSource::close()noexcept{
     auto& p=*p_;if(p.control){const HRESULT hr=p.control->Stop();if(FAILED(hr))log::error("capture-close",std::format("Stop failed hr=0x{:08X}; releasing graph",uint32_t(hr)));}if(p.grab){const HRESULT hr=p.grab->SetCallback(nullptr,0);if(FAILED(hr))log::error("capture-close",std::format("detach callback hr=0x{:08X}",uint32_t(hr)));}
     if(p.wasapi)p.wasapi->stop();p.wasapi.reset();
+    p.averMediaSwitch.stop();p.embeddedAudioUnavailable=false;
     if(p.audioSession)p.audioSession->stop();p.audioError.clear();
     if(p.audioPassthrough)p.audioPassthrough->close();
     p.events.Reset();p.control.Reset();p.grab.Reset();p.nullFilter.Reset();p.grabFilter.Reset();p.audioSink.Reset();p.audioFilter.Reset();p.config.Reset();p.device.Reset();p.builder.Reset();p.graph.Reset();p.referenceClock.Reset();p.audioSession.reset();p.audioPassthrough.reset();
-    av_frame_free(&p.frame);av_frame_free(&p.pendingFrame);p.info={};
+    if(p.decodeThread.joinable()){{std::lock_guard lock(p.mutex);p.decodeStop=true;p.compressedQueue.clear();}p.decodeWake.notify_all();p.decodeThread.join();}
+    if(p.workerFrame)av_frame_free(&p.workerFrame);
+    for(auto*& frame:p.compressedFree)if(frame)av_frame_free(&frame);
+    p.compressedFree.clear();
+    av_frame_free(&p.frame);av_frame_free(&p.pendingFrame);
+    if(p.pendingHardware)av_frame_free(&p.pendingHardware);if(p.hardwareRead)av_frame_free(&p.hardwareRead);
+    p.compressedDecoder.close();
+    if(p.decodeDevice){p.decodeDevice->Release();p.decodeDevice=nullptr;}if(p.decodeQueue){p.decodeQueue->Release();p.decodeQueue=nullptr;}
+    p.pendingIsHardware=false;p.compressedPath=false;p.codec=CaptureCodec::None;p.compressedDecoded=p.compressedErrors=0;
+    p.info={};
     p.sequence=p.received=p.dropped=p.lastDrop=0;p.pending=p.callbackError=p.configured=p.forceDiscontinuity=false;p.lastPts=p.readAgeMs=0;
 }
 }

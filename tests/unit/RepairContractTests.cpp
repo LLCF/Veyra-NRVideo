@@ -8,9 +8,12 @@
 #include "veyra/engine/FrameFlowWindow.h"
 #include "veyra/engine/EnhancementDelayEstimate.h"
 #include "veyra/ThunkHook.h"
+#include "veyra/source/CaptureFormatRank.h"
 #include <iostream>
 #include <filesystem>
 #include <fstream>
+#include <algorithm>
+#include <vector>
 
 namespace {
 int thunkHookCalls = 0;
@@ -213,6 +216,41 @@ int main(){
         }
         settings.captureAudio=static_cast<engine::CaptureAudioIngress>(3);
         check(!settings.validate().empty(),"capture audio ingress outside the enum is rejected");
+    }
+    {
+        engine::EnhancementSettings settings;
+        check(settings.captureBuffer==veyra::source::CaptureBufferMode::Auto,"capture buffer mode defaults to auto");
+        for(auto mode:{veyra::source::CaptureBufferMode::Auto,veyra::source::CaptureBufferMode::Minimum,veyra::source::CaptureBufferMode::DriverDefault}){
+            settings.captureBuffer=mode;
+            check(settings.validate().empty(),"capture buffer modes validate");
+        }
+        settings.captureBuffer=static_cast<veyra::source::CaptureBufferMode>(3);
+        check(!settings.validate().empty(),"capture buffer mode outside the enum is rejected");
+        check(veyra::source::captureDesiredVideoBuffers(veyra::source::CaptureBufferMode::Auto,1920,1080)==2&&
+            veyra::source::captureDesiredVideoBuffers(veyra::source::CaptureBufferMode::Auto,3840,2160)==3&&
+            veyra::source::captureDesiredVideoBuffers(veyra::source::CaptureBufferMode::Minimum,3840,2160)==1&&
+            veyra::source::captureDesiredVideoBuffers(veyra::source::CaptureBufferMode::DriverDefault,1920,1080)==0,
+            "capture buffer policy: auto 2/3 by size, minimum 1, driver default none");
+    }
+    {
+        using veyra::source::CaptureFormatTier;
+        using veyra::source::CapturePacking;
+        check(veyra::source::captureFormatRank(CapturePacking::Nv12)<veyra::source::captureFormatRank(CapturePacking::Yuy2)&&
+            veyra::source::captureFormatRank(CapturePacking::Yuy2)<veyra::source::captureFormatRank(CapturePacking::Bgr24)&&
+            veyra::source::captureFormatRank(CapturePacking::Bgr24)<veyra::source::captureFormatRank(CapturePacking::Rgb565)&&
+            veyra::source::captureFormatRank(CapturePacking::Rgb565)<veyra::source::captureFormatRank(CapturePacking::Unknown),
+            "format rank: NV12 < YUY2 < RGB24 < RGB565 < decoded");
+        check(veyra::source::captureFormatTier(CapturePacking::Nv12)==CaptureFormatTier::Low&&
+            veyra::source::captureFormatTier(CapturePacking::Bgr24)==CaptureFormatTier::Medium&&
+            veyra::source::captureFormatTier(CapturePacking::Rgb565)==CaptureFormatTier::High&&
+            veyra::source::captureFormatTier(CapturePacking::Unknown)==CaptureFormatTier::Decoded,
+            "format tiers: low/medium/high/decoded");
+        check(veyra::source::captureFormatNeedsCostHint(CaptureFormatTier::High)&&veyra::source::captureFormatNeedsCostHint(CaptureFormatTier::Decoded)&&
+            !veyra::source::captureFormatNeedsCostHint(CaptureFormatTier::Medium),"cost hint only for high/decoded formats");
+        std::vector<CapturePacking> order{CapturePacking::Rgb565,CapturePacking::Unknown,CapturePacking::Yuy2,CapturePacking::Nv12};
+        std::stable_sort(order.begin(),order.end(),[](CapturePacking a,CapturePacking b){return veyra::source::captureFormatRank(a)<veyra::source::captureFormatRank(b);});
+        check(order[0]==CapturePacking::Nv12&&order[1]==CapturePacking::Yuy2&&order[2]==CapturePacking::Rgb565&&order[3]==CapturePacking::Unknown,
+            "recommended order: a device offering YUY2 and RGB565 lists YUY2 first");
     }
     check(engine::opticalFlowBackendName(engine::OpticalFlowBackend::Nvidia)=="NVIDIA_NVOF"&&engine::opticalFlowBackendName(engine::OpticalFlowBackend::AmdFidelityFx)=="AMD_FIDELITYFX_OF","optical-flow backend names identify every backend");
     s.model.intensity=std::numeric_limits<float>::quiet_NaN();check(!s.validate().empty(),"reject NaN transaction");

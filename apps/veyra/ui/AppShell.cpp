@@ -29,6 +29,7 @@
 #include <shlobj.h>
 #include <filesystem>
 #include <format>
+#include "veyra/engine/ColorLookStore.h"
 #include <string>
 #include <chrono>
 #include <atomic>
@@ -45,7 +46,10 @@ constexpr DWORD ShellStyle=WS_POPUP|WS_THICKFRAME|WS_MINIMIZEBOX|WS_MAXIMIZEBOX|
 // Daily-mode multiplier combo lists 2X/3X/4X/6X (index 0..3), which maps to
 // kFgMultiplierChoices[1..4]; index-independent so 5X can stay unoffered.
 uint32_t multiplierFromDailyIndex(int index){const int i=index+1;return (index>=0&&i<int(veyra::engine::kFgMultiplierChoiceCount))?veyra::engine::kFgMultiplierChoices[i]:2;}
-enum {Open=101,Play,Stop,Save,Nr,Sr,Fg,Seek,Info,Capture,Export,Realtime,Recent,Multiplier,Settings,OriginalHold,CompareToggle,Split,Reference,Fullscreen,ModeSwitch=220,Master,DailyPreset,Volume,Mute,Subtitle,SubtitleLoad,SubtitleSize,ImageOpen,InspectorDrawer,TabEnhance,TabFg,TabPresets,TabExport,JobProgress,Details,Brand,MediaTitle,TimeLabel,EmptyTitle,EmptyHint,ProRailVideo,ProRailCapture,WindowMin,WindowMax,WindowClose,FpsLabel,RemotePlay,TabAudio,VideoSurface=1000};
+// RetiredPresetSlot keeps the control-id numbering stable after the preset UI
+// was deleted (2026-09-17). It is intentionally never created: named colour
+// presets live in the colour page and carry look parameters only.
+enum {Open=101,Play,Stop,Save,Nr,Sr,Fg,Seek,Info,Capture,Export,Realtime,Recent,Multiplier,Settings,OriginalHold,CompareToggle,Split,Reference,Fullscreen,ModeSwitch=220,Master,RetiredPresetSlot,Volume,Mute,Subtitle,SubtitleLoad,SubtitleSize,ImageOpen,InspectorDrawer,TabEnhance,TabFg,TabColor,TabExport,JobProgress,Details,Brand,MediaTitle,TimeLabel,EmptyTitle,EmptyHint,ProRailVideo,ProRailCapture,WindowMin,WindowMax,WindowClose,FpsLabel,RemotePlay,TabAudio,VideoSurface=1000};
 veyra::engine::EngineController engine;
 #ifdef VEYRA_ENABLE_REMOTEPLAY
 veyra::remoteplay::ControllerInput remoteController;
@@ -58,9 +62,9 @@ HWND inspector=nullptr,metricLabel=nullptr,tooltips=nullptr,diagnosticPanel=null
 veyra::engine::EnhancementSettings lastSuccessful,jobExpected;bool haveSuccessful=false;uint64_t masterPendingRevision=0,masterPendingSession=0;bool masterPreviousEnabled=true;
 std::wstring smokeView;bool smokeViewApplied=false;
 std::wstring smokeDualOutput;bool smokeEmpty=false;DWORD modeGdiStart=0,modeHandlesStart=0;SIZE_T modePrivateStart=0;
-bool smokeDual=false,smokeDualPause=false,smokeMaster=false,smokeMasterReject=false,smokeAudio=false,smokeJob=false,smokeJobCancel=false,smokeJobExit=false;int dualStep=0,masterStep=0,audioStep=0,jobStep=0;double pausedPosition=-1,jobPosition=0;uint64_t pausedFrames=0;ULONGLONG jobPauseTick=0;HANDLE workerMapping=nullptr;
-void switchMode();void selectInspector(int);void refreshDailyPresets();
-bool applySettings(veyra::engine::EnhancementSettings s){if(masterPendingRevision)return false;uiState.configured=s;if(uiState.enhanced)engine.requestSettings(s);else {auto effective=engine.snapshot().desired;if(effective.captureCompatible!=s.captureCompatible||effective.forceSdrPreview!=s.forceSdrPreview||effective.captureFlipVertical!=s.captureFlipVertical){effective.captureCompatible=s.captureCompatible;effective.forceSdrPreview=s.forceSdrPreview;effective.captureFlipVertical=s.captureFlipVertical;engine.requestSettings(effective);}veyra::log::info("ui-settings","enhancement off: draft saved; presentation setting applied independently");}veyra::ui::settingsEnabled(uiState.enhanced,uiState.configured);return true;}
+bool smokeDual=false,smokeDualPause=false,smokeMaster=false,smokeMasterReject=false,smokeAudio=false,smokeJob=false,smokeJobCancel=false,smokeJobExit=false,smokeColor=false;int dualStep=0,masterStep=0,audioStep=0,jobStep=0,colorStep=0;double pausedPosition=-1,jobPosition=0;uint64_t pausedFrames=0;ULONGLONG jobPauseTick=0;HANDLE workerMapping=nullptr;
+void switchMode();void selectInspector(int);
+bool applySettings(veyra::engine::EnhancementSettings s){if(masterPendingRevision)return false;uiState.configured=s;if(uiState.enhanced)engine.requestSettings(s);else {auto effective=engine.snapshot().desired;if(effective.captureCompatible!=s.captureCompatible||effective.forceSdrPreview!=s.forceSdrPreview||effective.captureFlipVertical!=s.captureFlipVertical||effective.captureBuffer!=s.captureBuffer||!(effective.color==s.color)){effective.captureCompatible=s.captureCompatible;effective.forceSdrPreview=s.forceSdrPreview;effective.captureFlipVertical=s.captureFlipVertical;effective.captureBuffer=s.captureBuffer;effective.color=s.color;engine.requestSettings(effective);}veyra::log::info("ui-settings","enhancement off: draft saved; presentation setting applied independently");}veyra::ui::settingsEnabled(uiState.enhanced,uiState.configured);return true;}
 
 struct ToolbarItem{HWND hwnd;int width;};std::vector<ToolbarItem> toolbar;
 bool full=false,holdOriginal=false,referenceBase=false;int compareMode=0;float compareSplit=.5f;WINDOWPLACEMENT windowPlacement{sizeof(windowPlacement)};
@@ -269,7 +273,7 @@ LRESULT CALLBACK interaction(HWND h,UINT m,WPARAM w,LPARAM l,UINT_PTR id,DWORD_P
     if(id==VideoSurface&&m==WM_LBUTTONUP&&GetCapture()==h){ReleaseCapture();return 0;}
     return DefSubclassProc(h,m,w,l);
 }
-veyra::engine::PlayerOptions options(){return veyra::engine::PlayerOptions::from(engine.snapshot().desired);}
+veyra::engine::PlayerOptions options(){auto o=veyra::engine::PlayerOptions::from(engine.snapshot().desired);o.captureCpuUnpack=initialOptions.captureCpuUnpack;return o;}
 
 // Win32 dispatch reenters during move/resize and modal dialogs. Large path
 // buffers must be per-operation heap storage, never part of every WndProc frame.
@@ -279,7 +283,6 @@ ofn.Flags=OFN_EXPLORER|OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST|(save?OFN_OVERWRITEPROM
 return (save?GetSaveFileNameW(&ofn):GetOpenFileNameW(&ofn))?name.data():L"";}
 void openFile(const std::wstring& file){if(file.empty())return;cancelProtection();auto openOptions=options();if(file!=currentFile){openOptions.settings.protection={};uiState.configured.protection={};}auto ext=std::filesystem::path(file).extension().wstring();for(auto& c:ext)c=towlower(c);if((ext==L".png"||ext==L".jpg"||ext==L".jpeg")&&uiState.mode==veyra::ui::Mode::Daily)switchMode();engine.previewView({});currentFile=file;refreshSubtitleTracks(file);paused=false;SetWindowTextW(GetDlgItem(mainWindow,Play),L"暂停");engine.open(video,file,openOptions);SetWindowTextW(mainWindow,veyra::ui::windowTitleForSource(file).c_str());if(smokeSeconds<=0)WritePrivateProfileStringW(L"Player",L"最近打开",file.c_str(),(veyra::runtime::localDataDirectory()/"veyra.ini").wstring().c_str());}
 HWND control(const wchar_t* cls,const wchar_t* label,int id,DWORD style,int x,int y,int w,int h){auto hwnd=CreateWindowExW(0,cls,label,WS_CHILD|WS_VISIBLE|WS_CLIPSIBLINGS|style|(_wcsicmp(cls,L"STATIC")?WS_TABSTOP:0),x,y,w,h,mainWindow,reinterpret_cast<HMENU>(INT_PTR(id)),GetModuleHandleW(nullptr),nullptr);SendMessageW(hwnd,WM_SETFONT,reinterpret_cast<WPARAM>(font),TRUE);veyra::ui::themeControl(hwnd);if(id>=Open&&id<=Fullscreen&&id!=Seek)toolbar.push_back({hwnd,w});return hwnd;}
-void refreshDailyPresets(){auto h=GetDlgItem(mainWindow,DailyPreset);if(!h)return;SendMessageW(h,CB_RESETCONTENT,0,0);SendMessageW(h,CB_ADDSTRING,0,LPARAM(L"当前自定义设置"));for(auto& name:veyra::ui::presetNames())SendMessageW(h,CB_ADDSTRING,0,LPARAM(name.c_str()));SendMessageW(h,CB_SETCURSEL,0,0);}
 void selectInspector(int page){uiState.inspector=page;veyra::ui::settingsPage(page);for(int i=0;i<4;++i)veyra::ui::selected(GetDlgItem(mainWindow,TabEnhance+i),i==page);veyra::ui::selected(GetDlgItem(mainWindow,TabAudio),page==4);}
 void switchMode(){
     cancelProtection();
@@ -312,11 +315,11 @@ void layout(){
     put(WindowMin,w-124,14,32,32,!full&&pro);put(WindowMax,w-88,14,32,32,!full&&pro);put(WindowClose,w-52,14,32,32,!full&&pro);
     for(int id:{WindowMin,WindowMax,WindowClose})surface(GetDlgItem(mainWindow,id),background);
     put(InspectorDrawer,w-384,14,76,32,!full&&pro&&w<960);
-    put(Master,g.left+(w<960?120:190),14,116,32,!full&&pro);put(DailyPreset,g.left+318,14,172,200,!full&&pro&&w>=1080);
+    put(Master,g.left+(w<960?120:190),14,116,32,!full&&pro);
     put(Save,g.left+(w>=1080?502:w>=960?318:244),14,76,32,!full&&pro);
     put(ProRailVideo,12,92,44,44,!full&&pro);put(ProRailCapture,12,148,44,44,!full&&pro);put(ImageOpen,12,204,44,44,!full&&pro);
     for(int id:{ProRailVideo,ProRailCapture,ImageOpen})surface(GetDlgItem(mainWindow,id),RGB(16,17,18));
-    const int tabs[]={TabEnhance,TabFg,TabAudio,TabPresets,TabExport};for(int i=0;i<5;++i)put(tabs[i],g.right+12+i*((g.panelWidth-24)/5),g.top+12,(g.panelWidth-24)/5,32,rightVisible);
+    const int tabs[]={TabEnhance,TabFg,TabAudio,TabColor,TabExport};for(int i=0;i<5;++i)put(tabs[i],g.right+12+i*((g.panelWidth-24)/5),g.top+12,(g.panelWidth-24)/5,32,rightVisible);
     pos(inspector,g.right+12,g.top+56,g.panelWidth-24,g.statusTop-g.top-68,rightVisible);
     pos(liveStatusPanel,g.right,g.statusTop,g.panelWidth,h-g.statusTop-20,rightVisible);
     const bool transport=!full||fullControls;int barTop=full?h-88:g.bottom;int tx=full?16:g.left+16,tw=full?w-32:g.viewWidth-32;
@@ -469,7 +472,7 @@ control(L"BUTTON",L"采集",Capture,BS_PUSHBUTTON,690,10,75,30);control(L"BUTTON
 control(L"BUTTON",L"实时NR档",Realtime,BS_AUTOCHECKBOX,952,10,100,30);
 control(L"BUTTON",L"最近打开",Recent,BS_PUSHBUTTON,1072,10,75,30);
 auto mult=control(L"COMBOBOX",L"",Multiplier,CBS_DROPDOWNLIST,1150,10,70,180);for(auto label:{L"2X",L"3X",L"4X",L"6X"})SendMessageW(mult,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));{int sel=0;for(size_t i=1;i<veyra::engine::kFgMultiplierChoiceCount;++i)if(veyra::engine::kFgMultiplierChoices[i]==initialOptions.fgMultiplier)sel=int(i)-1;SendMessageW(mult,CB_SETCURSEL,sel,0);}
-control(L"BUTTON",L"参数与预设",Settings,BS_PUSHBUTTON,1225,10,100,30);
+control(L"BUTTON",L"参数与色彩",Settings,BS_PUSHBUTTON,1225,10,100,30);
 auto original=control(L"BUTTON",L"按住原图 V",OriginalHold,BS_PUSHBUTTON,0,0,110,30);SetWindowSubclass(original,interaction,OriginalHold,0);
 control(L"BUTTON",L"原图/增强切换",CompareToggle,BS_PUSHBUTTON,0,0,120,30);control(L"BUTTON",L"分屏拖动",Split,BS_PUSHBUTTON,0,0,95,30);
 auto ref=control(L"COMBOBOX",L"",Reference,CBS_DROPDOWNLIST,0,0,170,180);for(auto label:{L"对比：输入原画",L"对比：增强前底图"})SendMessageW(ref,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));SendMessageW(ref,CB_SETCURSEL,0,0);control(L"BUTTON",L"全屏",Fullscreen,BS_PUSHBUTTON,0,0,108,30);
@@ -483,10 +486,9 @@ auto brand=control(L"STATIC",L"",Brand,SS_CENTER,0,0,100,30);
 SetWindowSubclass(brand,veyra::ui::brandIconProc,Brand,0);
 control(L"BUTTON",L"专业模式",ModeSwitch,BS_PUSHBUTTON,0,0,164,36);
 control(L"BUTTON",L"增强已开启",Master,BS_PUSHBUTTON,0,0,126,36);
-control(L"COMBOBOX",L"",DailyPreset,CBS_DROPDOWNLIST,0,0,180,200);
 control(L"BUTTON",L"视频",ProRailVideo,BS_PUSHBUTTON,0,0,64,44);control(L"BUTTON",L"采集",ProRailCapture,BS_PUSHBUTTON,0,0,64,44);control(L"BUTTON",L"图片",ImageOpen,BS_PUSHBUTTON,0,0,64,44);control(L"BUTTON",L"参数",InspectorDrawer,BS_PUSHBUTTON,0,0,84,36);
 control(L"BUTTON",L"音频",TabAudio,BS_PUSHBUTTON,0,0,60,36);
-const wchar_t* tabs[]={L"增强",L"运动",L"预设",L"导出"};for(int i=0;i<4;++i)control(L"BUTTON",tabs[i],TabEnhance+i,BS_PUSHBUTTON,0,0,76,36);
+const wchar_t* tabs[]={L"增强",L"运动",L"色彩",L"导出"};for(int i=0;i<4;++i)control(L"BUTTON",tabs[i],TabEnhance+i,BS_PUSHBUTTON,0,0,76,36);
 control(L"BUTTON",L"音量",Mute,BS_PUSHBUTTON,0,0,54,36);auto vol=control(TRACKBAR_CLASSW,L"音量",Volume,TBS_HORZ|TBS_NOTICKS,0,0,80,26);SendMessageW(vol,TBM_SETRANGE,TRUE,MAKELPARAM(0,100));SendMessageW(vol,TBM_SETPOS,TRUE,100);
 control(L"BUTTON",L"字幕",Subtitle,BS_PUSHBUTTON,0,0,62,36);control(L"STATIC",L"尚未打开媒体",MediaTitle,SS_LEFT|SS_ENDELLIPSIS,0,0,250,26);control(L"STATIC",L"00:00 / 00:00",TimeLabel,SS_LEFT,0,0,200,20);
 control(L"STATIC",L"处理 0.0 fps",FpsLabel,SS_RIGHT,0,0,154,20);
@@ -499,7 +501,7 @@ veyra::ui::icon(GetDlgItem(hwnd,ProRailVideo),Icon::Video);veyra::ui::icon(GetDl
 veyra::ui::icon(GetDlgItem(hwnd,Recent),Icon::Recent);veyra::ui::icon(GetDlgItem(hwnd,Open),Icon::Video,true);veyra::ui::icon(GetDlgItem(hwnd,Capture),Icon::Capture,true);
 for(int id:{Open,Capture,Recent,Master,Save,Sr,ModeSwitch,WindowMin,WindowMax,WindowClose,Stop,Mute,Subtitle,Fullscreen,ProRailVideo,ProRailCapture,ImageOpen,Info})veyra::ui::ghost(GetDlgItem(hwnd,id));
 SetPropW(GetDlgItem(hwnd,Open),L"veyra.tip",HANDLE(L"打开视频 / 图片 · Ctrl+O"));SetPropW(GetDlgItem(hwnd,Capture),L"veyra.tip",HANDLE(L"连接采集卡"));SetPropW(GetDlgItem(hwnd,Sr),L"veyra.tip",HANDLE(L"超分辨率 · 专业面板选择 DLSS / RTX 视频超分"));
-inspector=veyra::ui::createSettingsPanel(hwnd,engine,applySettings);liveStatusPanel=veyra::ui::createLiveStatusPanel(hwnd,engine);selectInspector(uiPreferences.inspector);refreshDailyPresets();SendDlgItemMessageW(hwnd,Volume,TBM_SETPOS,TRUE,LPARAM(uiPreferences.volume*100));veyra::ui::marked(GetDlgItem(hwnd,Play));
+inspector=veyra::ui::createSettingsPanel(hwnd,engine,applySettings);liveStatusPanel=veyra::ui::createLiveStatusPanel(hwnd,engine);selectInspector(uiPreferences.inspector);SendDlgItemMessageW(hwnd,Volume,TBM_SETPOS,TRUE,LPARAM(uiPreferences.volume*100));veyra::ui::marked(GetDlgItem(hwnd,Play));
 for(auto [id,help]:std::initializer_list<std::pair<int,const wchar_t*>>{
  {Nr,L"实验性DLSS5 NR增强：重建画面细节，效果看素材，不是游戏原生集成。"},
  {Fg,L"开关补帧。专业模式可选倍率和后端；数字翻倍，显卡工作量也会涨。"},
@@ -507,7 +509,7 @@ for(auto [id,help]:std::initializer_list<std::pair<int,const wchar_t*>>{
  {Multiplier,L"选择补帧倍率。帧数不是越多越好，跟不上时会跳过过期机会。"},
  {Save,L"保存处理后的完整画面到系统图片文件夹的 Veyra Screenshots。SDR为PNG，HDR为保留高亮的JXR；只拍画面，不拍工具栏或驱动补帧。"},
  {Master,L"总增强开关。关闭后保留设置，重新开启不用重调配方。"},
- {DailyPreset,L"载入保存的增强预设，一键换口味。"},{Volume,L"播放音量，不改变音画同步偏移。"},{Mute,L"静音或恢复声音，让耳朵休息一下。"},
+ {Volume,L"播放音量，不改变音画同步偏移。"},{Mute,L"静音或恢复声音，让耳朵休息一下。"},
  {Subtitle,L"显示或隐藏字幕。字幕在增强后叠加，不让算法给字加戏。"},{SubtitleLoad,L"加载本地字幕文件。对白太快，给眼睛加个帮手。"},{SubtitleSize,L"调整字幕字号，不改变导出视频尺寸。"},
  {OriginalHold,L"查看原始画面对照，松开回到增强效果。眼见为实。"},{Reference,L"选择对照底图。低延迟NR先行时，NR前底图为原图缩放，不是独立超分对照。"},{CompareToggle,L"切换画面对比，方便看清到底改了哪里。"},{Split,L"拖动对比边界，两边当面对质。"},
  {Seek,L"拖动跳转；松手后等待解码和增强预热。跳转中保持目标位置，不会故意弹回。"}})SetPropW(GetDlgItem(hwnd,id),L"veyra.tip",HANDLE(help));
@@ -529,12 +531,11 @@ case WM_GETMINMAXINFO:{auto info=reinterpret_cast<MINMAXINFO*>(lp);info->ptMinTr
 case WM_CTLCOLORSTATIC:case WM_CTLCOLOREDIT:case WM_CTLCOLORBTN:case WM_CTLCOLORLISTBOX:return veyra::ui::colors(msg,wp,lp);
 case WM_APP+45:{if(masterPendingRevision)return 0;auto settings=uiState.enhanced?engine.snapshot().desired:uiState.configured;
     if(wp==213){auto current=engine.snapshot();if(uiState.mode!=veyra::ui::Mode::Professional||!current.running||!current.frames)return 0;bool space=false;for(auto q:settings.protection.regions)space|=q.empty();if(!space)return 0;cancelProtection();protectionArmed=true;SetFocus(video);return 1;}
-    if(wp==214){cancelProtection();settings.protection={};}else if(wp==206)settings.protection.enabled=lp==BST_CHECKED;else return 0;
+    if(wp==214){cancelProtection();settings.protection={};}else if(wp==206)settings.protection.enabled=lp==BST_CHECKED;else if(wp==222)settings.protection.featherPixels=float(std::clamp(int(lp),0,64));else return 0;
     return applySettings(settings)?1:0;}
 case WM_APP+44:{if(masterPendingRevision)return 0;auto setting=uiState.enhanced?engine.snapshot().desired:uiState.configured;const bool enabled=wp==202?lp>1:lp==BST_CHECKED;if(wp==200)setting.nr=enabled;else if(wp==201)setting.sr=enabled;else if(wp==202){bool allowed=false;for(auto m:veyra::engine::kFgMultiplierChoices)if(uint32_t(lp)==m)allowed=true;if(!allowed)return 0;setting.multiplier=uint32_t(lp);if(!setting.validate().empty())return 0;}else return 0;
     const bool enablesMaster=enabled&&!uiState.enhanced;if(enablesMaster){masterPreviousEnabled=false;uiState.enhanced=true;}applySettings(setting);if(auto pending=engine.snapshot();enablesMaster&&pending.running){masterPendingRevision=pending.desired.revision;masterPendingSession=pending.sessionId;}veyra::log::info("ui-feature",std::format("click={} enabled={} requestedRevision={} draft-independent=true",wp==200?"NR":wp==201?"SR":"FG",enabled,engine.snapshot().desired.revision));return 1;}
 case WM_APP+43:showDiagnostics=false;layout();return 0;
-case WM_APP+42:refreshDailyPresets();return 0;
 case WM_APP+41:switch(wp){case 501:startVideoExport(lp!=0);break;case 502:{auto path=fileDialog(true);if(!path.empty())engine.saveFrame(path);break;}case 503:jobPaused=!jobPaused;exportJob.pause(jobPaused);break;case 504:exportJob.cancel();break;case 505:preferWatching=lp==BST_CHECKED;break;}return 0;
 case WM_SIZE:cancelProtection();if(wp!=SIZE_MINIMIZED){endTransition();layout();}return 0;
 case WM_DROPFILES:{std::vector<wchar_t> file(32768);DragQueryFileW(reinterpret_cast<HDROP>(wp),0,file.data(),32768);DragFinish(reinterpret_cast<HDROP>(wp));openFile(file.data());layout();return 0;}
@@ -544,10 +545,9 @@ case Open:case ProRailVideo:case ImageOpen:openFile(fileDialog(false));layout();
 case ModeSwitch:switchMode();break;
 case WindowMin:ShowWindow(hwnd,SW_MINIMIZE);break;case WindowMax:toggleFullscreen();break;case WindowClose:SendMessageW(hwnd,WM_CLOSE,0,0);break;
 case Master:if(masterPendingRevision)break;masterPreviousEnabled=uiState.enhanced;if(uiState.enhanced)uiState.configured=engine.snapshot().desired;uiState.enhanced=!uiState.enhanced;veyra::ui::settingsEnabled(uiState.enhanced,uiState.configured);engine.requestSettings(uiState.effective());if(auto pending=engine.snapshot();pending.running){masterPendingRevision=pending.desired.revision;masterPendingSession=pending.sessionId;}break;
-case DailyPreset:if(HIWORD(wp)==CBN_SELCHANGE){veyra::engine::EnhancementSettings setting;auto index=SendDlgItemMessageW(hwnd,DailyPreset,CB_GETCURSEL,0,0);if(index>0&&veyra::ui::presetAt(size_t(index-1),setting))applySettings(setting);}break;
 case InspectorDrawer:uiState.drawer=!uiState.drawer;layout();break;
 case TabAudio:selectInspector(4);break;
-case TabEnhance:case TabFg:case TabPresets:case TabExport:selectInspector(LOWORD(wp)-TabEnhance);break;
+case TabEnhance:case TabFg:case TabColor:case TabExport:selectInspector(LOWORD(wp)-TabEnhance);break;
 case JobProgress:if(uiState.mode==veyra::ui::Mode::Daily)switchMode();uiState.drawer=true;selectInspector(3);layout();break;
 case Details:uiState.diagnostics=!uiState.diagnostics;SetWindowTextW(GetDlgItem(hwnd,Details),uiState.diagnostics?L"性能  ▴":L"性能  ▾");layout();break;
 case Mute:{auto s=engine.snapshot();engine.setVolume(s.volume,!s.muted);break;}
@@ -587,7 +587,7 @@ case RemotePlay:veyra::ui::showRemotePlayPanel(hwnd,[](veyra::source::RemotePlay
     }return result;
 },[]{engine.stop();},[]{return remoteController.calibrate();});break;
 #endif
-case Capture:case ProRailCapture:veyra::ui::showCapturePanel(hwnd,[](const std::wstring& path){openFile(path);layout();},[]{return (uiState.enhanced?engine.snapshot().desired:uiState.configured).forceSdrPreview;},[](bool enabled){auto s=uiState.enhanced?engine.snapshot().desired:uiState.configured;s.forceSdrPreview=enabled;return applySettings(s);},[]{return int((uiState.enhanced?engine.snapshot().desired:uiState.configured).captureAudio);},[](int mode){auto s=uiState.enhanced?engine.snapshot().desired:uiState.configured;s.captureAudio=static_cast<veyra::engine::CaptureAudioIngress>(std::clamp(mode,0,2));return applySettings(s);},[]{return (uiState.enhanced?engine.snapshot().desired:uiState.configured).captureFlipVertical;},[](bool enabled){auto s=uiState.enhanced?engine.snapshot().desired:uiState.configured;s.captureFlipVertical=enabled;return applySettings(s);});break;
+case Capture:case ProRailCapture:veyra::ui::showCapturePanel(hwnd,[](const std::wstring& path){openFile(path);layout();},[]{return (uiState.enhanced?engine.snapshot().desired:uiState.configured).forceSdrPreview;},[](bool enabled){auto s=uiState.enhanced?engine.snapshot().desired:uiState.configured;s.forceSdrPreview=enabled;return applySettings(s);},[]{return int((uiState.enhanced?engine.snapshot().desired:uiState.configured).captureAudio);},[](int mode){auto s=uiState.enhanced?engine.snapshot().desired:uiState.configured;s.captureAudio=static_cast<veyra::engine::CaptureAudioIngress>(std::clamp(mode,0,2));return applySettings(s);},[]{return (uiState.enhanced?engine.snapshot().desired:uiState.configured).captureFlipVertical;},[](bool enabled){auto s=uiState.enhanced?engine.snapshot().desired:uiState.configured;s.captureFlipVertical=enabled;return applySettings(s);},[]{return int((uiState.enhanced?engine.snapshot().desired:uiState.configured).captureBuffer);},[](int mode){auto s=uiState.enhanced?engine.snapshot().desired:uiState.configured;s.captureBuffer=static_cast<veyra::source::CaptureBufferMode>(std::clamp(mode,0,2));return applySettings(s);});break;
 case Export:if(uiState.mode==veyra::ui::Mode::Professional)startVideoExport(false);break;
 case Info:showDiagnostics=!showDiagnostics;layout();break;
 }return 0;
@@ -738,10 +738,174 @@ if(uiStep==5&&elapsed>4800){referenceBase=true;updateComparison();uiStep=6;}
 if(uiStep==6&&elapsed>5500){holdOriginal=true;updateComparison();uiStep=7;}
 if(uiStep==7&&elapsed>5900){holdOriginal=false;compareMode=0;updateComparison();veyra::log::info("ui-test",std::format("completed={} NR evaluations={} (no fullscreen NR re-create expected)",true,s.nrEvaluated));uiStep=8;}
 }
+// Colour page acceptance (T3): master switch, slider->engine wiring, one-click
+// reset with a single undo, accordion folding and its persistence.
+if(smokeColor&&startTick){const auto elapsed=GetTickCount64()-startTick;
+const auto colourSnapshot=engine.snapshot();
+auto colourControl=[](int id){return veyra::ui::settingsControlForTest(id);};
+// Progress heartbeat: a stalled UI tick shows up as a gap in these lines.
+{static uint64_t colourHeartbeat=0;if(elapsed/2000!=colourHeartbeat){colourHeartbeat=elapsed/2000;veyra::log::info("color-ui-test",std::format("tick elapsed={} step={} exposure={:.3f}",elapsed,colorStep,colourSnapshot.desired.color.exposure));}}
+if(colorStep==0&&elapsed>1500){
+    if(uiState.mode==veyra::ui::Mode::Daily)switchMode();
+    selectInspector(2);layout();
+    const auto master=colourControl(800);
+    const bool off=master&&SendMessageW(master,BM_GETCHECK,0,0)==BST_UNCHECKED;
+    colorStep=off?1:-1;
+    veyra::log::info("color-ui-test",std::format("page2 masterPresent={} defaultOff={} step={}",master?1:0,off,colorStep));
+}else if(colorStep==1&&colourSnapshot.desired.color.enabled){colorStep=2;veyra::log::info("color-ui-test","master switch applied");}
+else if(colorStep==1){if(elapsed>2500)SendMessageW(colourControl(800),BM_CLICK,0,0);}
+else if(colorStep==2){
+    if(auto edit=colourControl(1300))SetWindowTextW(edit,L"1.00");
+    colorStep=(colourSnapshot.desired.color.exposure==1.0f)?3:(elapsed>4000?-1:2);
+    if(colorStep==3)veyra::log::info("color-ui-test","exposure 1.00 reached the engine through the panel");
+}else if(colorStep==3){SendMessageW(colourControl(801),BM_CLICK,0,0);colorStep=30;}
+// The snapshot is taken once per tick, so the reset/undo results are observed on
+// the following tick instead of in the same one that clicked the button.
+else if(colorStep==30){colorStep=(colourSnapshot.desired.color.exposure==0.0f)?31:(elapsed>6000?-1:30);
+    if(colorStep==31)veyra::log::info("color-ui-test","one-click reset returned the grade to neutral");}
+else if(colorStep==31){SendMessageW(colourControl(802),BM_CLICK,0,0);colorStep=40;}
+else if(colorStep==40){colorStep=(colourSnapshot.desired.color.exposure==1.0f)?5:(elapsed>8000?-1:40);
+    if(colorStep==5)veyra::log::info("color-ui-test","undo restored the pre-reset values");}
+// T4 rows: the colour-grading "blending" slider belongs to a section that was
+// added after the first framework cut, so prove the composed rows reach the
+// engine too.
+else if(colorStep==5){const int editId=veyra::ui::colourParamEditId(L"混合");if(auto edit=colourControl(editId))SetWindowTextW(edit,L"77.00");colorStep=editId>0?50:-1;}
+else if(colorStep==50){colorStep=(colourSnapshot.desired.color.gradingBlending==77.0f)?51:(elapsed>9500?-1:50);
+    if(colorStep==51)veyra::log::info("color-ui-test","T4 the colour grading row reached the engine");}
+// Black & white mixer (T4): the switch must reach the engine and the per-band
+// row must then change the monochrome result instead of being an inert slider.
+else if(colorStep==51){
+    if(auto box=colourControl(820)){
+        SendMessageW(box,BM_CLICK,0,0);
+        veyra::log::info("color-ui-test",std::format("bw switch checkedAfter={}",int(SendMessageW(box,BM_GETCHECK,0,0))));
+    }else veyra::log::info("color-ui-test","bw switch missing");
+    colorStep=45;
+}
+else if(colorStep==45&&colourSnapshot.desired.color.blackWhite){colorStep=46;
+    veyra::log::info("color-ui-test","T4 the black and white mixer switch reached the engine");}
+else if(colorStep==45&&elapsed>11500){colorStep=-1;}
+else if(colorStep==46){
+    const int editId=veyra::ui::colourParamEditId(L"绿色 · 黑白");
+    if(auto edit=colourControl(editId))SetWindowTextW(edit,L"60.00");
+    colorStep=editId>0?47:-1;
+}
+else if(colorStep==47){
+    colorStep=(colourSnapshot.desired.color.blackWhiteMix[3]==60.0f)?52:(elapsed>12500?-1:47);
+    if(colorStep==52)veyra::log::info("color-ui-test","T4 the black and white band row reached the engine");}
+// Named colour presets: save the current look, clear a value, apply the preset,
+// then delete it - the same three actions the panel exposes.
+else if(colorStep==52){
+    if(auto edit=colourControl(804))SetWindowTextW(edit,L"烟测预设");
+    SendMessageW(colourControl(805),BM_CLICK,0,0);
+    colorStep=53;
+}
+else if(colorStep==53){
+    veyra::engine::ColorLookStore store(veyra::runtime::localDataDirectory());
+    store.load();
+    const bool saved=!store.entries().empty()&&store.entries().back().name==L"烟测预设";
+    if(auto edit=colourControl(1300))SetWindowTextW(edit,L"0.00");
+    colorStep=saved?54:-1;
+    veyra::log::info("color-ui-test",std::format("preset saved={} count={} step={}",saved,store.entries().size(),colorStep));
+}
+else if(colorStep==54&&colourSnapshot.desired.color.exposure==0.0f){SendMessageW(colourControl(806),BM_CLICK,0,0);colorStep=55;}
+else if(colorStep==54&&elapsed>9000){
+    veyra::log::info("color-ui-test",std::format("preset apply waiting: desiredExposure={:.3f} configuredExposure={:.3f} elapsed={}",
+        colourSnapshot.desired.color.exposure,uiState.configured.color.exposure,elapsed));
+    colorStep=-1;
+}
+else if(colorStep==55){colorStep=(colourSnapshot.desired.color.exposure==1.0f)?56:(elapsed>14000?-1:55);
+    if(colorStep==56)veyra::log::info("color-ui-test","preset applied: exposure came back through the engine");}
+else if(colorStep==56){SendMessageW(colourControl(807),BM_CLICK,0,0);colorStep=57;}
+else if(colorStep==57){
+    veyra::engine::ColorLookStore store(veyra::runtime::localDataDirectory());
+    store.load();
+    const bool deleted=store.entries().empty();
+    colorStep=deleted?58:(elapsed>16000?-1:57);
+    if(colorStep==58)veyra::log::info("color-ui-test","preset deleted; colour page back to no stored looks");
+}
+else if(colorStep==58){
+    colorStep=59;
+}
+// Colour grading wheels (professional layout): dragging inside the disc must set
+// hue+saturation, the luminance bar must set luminance, and a double-click must
+// put the zone back to neutral.
+else if(colorStep==59){
+    POINT point{};
+    const auto wheel=colourControl(veyra::ui::colourWheelControlId(0));
+    veyra::ui::settingsColorScrollToTest(veyra::ui::colourWheelControlId(0));
+    if(wheel&&veyra::ui::settingsColorWheelTestPoint(0,120.0f,80.0f,point)){
+        SendMessageW(wheel,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(point.x,point.y));
+        SendMessageW(wheel,WM_LBUTTONUP,0,MAKELPARAM(point.x,point.y));
+        colorStep=60;
+    }else{
+        veyra::log::info("color-ui-test","colour wheel control missing");
+        colorStep=-1;
+    }
+}
+else if(colorStep==60){
+    const auto& grading=colourSnapshot.desired.color.grading[0];
+    const bool dialed=std::abs(grading.hue-120.0f)<6.0f&&std::abs(grading.saturation-80.0f)<8.0f;
+    veyra::log::info("color-ui-test",std::format("colour wheel drag hue={:.1f} saturation={:.1f} pass={}",grading.hue,grading.saturation,dialed));
+    colorStep=dialed?61:-1;
+}
+else if(colorStep==61){
+    POINT point{};
+    const auto wheel=colourControl(veyra::ui::colourWheelControlId(0));
+    if(wheel&&veyra::ui::settingsColorWheelTestBarPoint(0,-50.0f,point)){
+        SendMessageW(wheel,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(point.x,point.y));
+        SendMessageW(wheel,WM_LBUTTONUP,0,MAKELPARAM(point.x,point.y));
+    }
+    colorStep=62;
+}
+else if(colorStep==62){
+    const auto& grading=colourSnapshot.desired.color.grading[0];
+    const bool shifted=std::abs(grading.luminance+50.0f)<8.0f;
+    veyra::log::info("color-ui-test",std::format("colour wheel luminance bar={:.1f} pass={}",grading.luminance,shifted));
+    colorStep=shifted?63:-1;
+}
+else if(colorStep==63){
+    const auto wheel=colourControl(veyra::ui::colourWheelControlId(0));
+    if(wheel)SendMessageW(wheel,WM_LBUTTONDBLCLK,0,MAKELPARAM(6,6));
+    colorStep=64;
+}
+else if(colorStep==64){
+    const auto& grading=colourSnapshot.desired.color.grading[0];
+    const bool reset=grading.hue==0.0f&&grading.saturation==0.0f&&grading.luminance==0.0f;
+    veyra::log::info("color-ui-test",std::format("colour wheel double-click reset pass={}",reset));
+    colorStep=reset?65:-1;
+}
+else if(colorStep==65){
+    auto edit=colourControl(1300);
+    const bool beforeVisible=edit&&IsWindowVisible(edit);
+    const bool beforeMask=(preferences.load().colourFoldMask&1u)!=0u;
+    RECT before{};GetWindowRect(colourControl(811),&before);
+    SendMessageW(colourControl(810),BM_CLICK,0,0);
+    RECT after{};GetWindowRect(colourControl(811),&after);
+    const bool afterVisible=edit&&IsWindowVisible(edit);
+    const auto persistedPreferences=preferences.load();
+    const bool afterMask=(persistedPreferences.colourFoldMask&1u)!=0u;
+    const bool collapsed=afterMask;
+    // Which section it starts in depends on what the last run persisted, so the
+    // check is "the state flipped and the geometry followed the flip". Window
+    // visibility is not asserted: the acceptance gate runs the app hidden, where
+    // IsWindowVisible is false for every child.
+    const bool consistent=(afterMask!=beforeMask);
+    const bool geometryOk=collapsed?(after.top<before.top):(after.top>before.top);
+    colorStep=(consistent&&geometryOk)?6:-1;
+    veyra::log::info("color-ui-test",std::format("fold collapsed={} persisted={} mask={} visibleBefore={} visibleAfter={} geometryOk={} step={}",collapsed,consistent,persistedPreferences.colourFoldMask,beforeVisible,afterVisible,geometryOk,colorStep));
+}else if(colorStep==6){SendMessageW(colourControl(810),BM_CLICK,0,0);SendMessageW(colourControl(800),BM_CLICK,0,0);colorStep=7;}
+else if(colorStep==7&&!colourSnapshot.desired.color.enabled){colorStep=8;veyra::log::info("color-ui-test","unfolded and master off; colour chain back to the zero-cost default");}
+else if(colorStep==7&&elapsed>9000){colorStep=-1;}
+}
 if(smokeSettings&&startTick){const auto elapsed=GetTickCount64()-startTick;
 if(settingsStep==0&&s.frames>20){auto change=s.desired;change.model.intensity=.6f;change.model.tone=.7f;change.residual.total=.4f;change.residual.color=.8f;engine.requestSettings(change);settingsStep=1;}
 if(settingsStep==1&&s.applied.model.intensity==.6f&&elapsed>3300){auto change=s.desired;change.sr=true;engine.requestSettings(change);settingsStep=2;}
 if(settingsStep==2&&s.applied.sr&&elapsed>4500){auto invalid=s.desired;invalid.model.intensity=2;const bool rejected=!engine.requestSettings(invalid);veyra::log::info("settings-test",std::format("invalid-rejected={} position={} revision={} settingsStep={}",rejected,s.position,s.applied.revision,settingsStep));settingsStep=rejected?3:-1;}
+// NR exclusion feather (id 222) must reach the engine through the panel's own
+// live-edit path, not just the shader: this is the control users complained was
+// missing while the hard 2 px default made the zones unusable.
+if(settingsStep==3&&elapsed>6000){SetWindowTextW(veyra::ui::settingsControlForTest(222),L"48");settingsStep=4;}
+if(settingsStep==4&&uiState.configured.protection.featherPixels==48){veyra::log::info("settings-test",std::format("exclusion-feather draft={} desired={} applied={} position={}",uiState.configured.protection.featherPixels,s.desired.protection.featherPixels,s.applied.protection.featherPixels,s.position));settingsStep=5;}
 }
 tickRepairChecks(hwnd,s);
 tickTransportChecks(hwnd,s);
@@ -762,8 +926,8 @@ if(smokeProtection&&startTick&&GetTickCount64()-startTick>1500){
         protectionStep=pass?4:-1;veyra::log::info("protection-ui-test",std::format("master-off unchanged-revision dirty-draft-preserved pass={}",pass));SendMessageW(hwnd,WM_COMMAND,Master,0);}
 
 }
-if(smokeSeconds>0&&startTick&&GetTickCount64()-startTick>ULONGLONG(smokeSeconds)*1000){veyra::log::info("app",std::format("smoke frames={} generated={} failed={} latenessMs={:.2f} absLatenessP95Ms={:.2f} controlsStep={} capture={} processedFps={:.2f} callbackFps={:.2f} captureDropped={} callbackToPresentReturnP95Ms={:.3f} schedulingWaitP95Ms={:.3f} processCpuP95Ms={:.3f} presentCpuP95Ms={:.3f} nrEvaluated={} nvofExecuted={}",s.frames,s.generated,s.failed,s.lateMs,s.lateP95Ms,smokeStep,s.capture,s.fps,s.captureFps,s.captureDropped,s.captureAgeP95Ms,s.schedulingWaitP95Ms,s.processCpuP95Ms,s.presentCpuP95Ms,s.nrEvaluated,s.nvofExecuted));resultCode=(s.frames>0||smokeEmpty)&&!s.failed&&(!smokeZoom||zoomStep==3)&&(!smokeProtection||protectionStep==4)&&(!smokeRepair||repairStep==10)&&(!smokeTransport||transportStep==10)&&(!smokeFgOnly||fgOnlyStep==4)&&(!smokeSettings||settingsStep==3)&&(!smokeRollback||settingsStep==3)&&(!smokeUi||uiStep==8)&&(!smokeDual||dualStep==40)&&(!smokeMaster||masterStep==3)&&(!smokeAudio||audioStep==4)&&(!(smokeJob||smokeJobCancel)||jobStep==4)&&(!smokeScreenshot||screenshotStep==2)?0:1;PostMessageW(hwnd,WM_CLOSE,0,0);}return 0;}
-case WM_CLOSE:endTransition();if(!closing&&smokeSeconds<=0&&exportJob.poll().active()&&MessageBoxW(hwnd,L"导出尚未完成。取消导出并退出？\n选择“否”返回播放器继续导出。",L"退出 Veyra",MB_YESNO|MB_DEFBUTTON2|MB_ICONQUESTION)!=IDYES)return 0;if(!closing&&smokeSeconds<=0){auto snapshot=engine.snapshot();WINDOWPLACEMENT placement{sizeof(placement)};if(full)placement=windowPlacement;else GetWindowPlacement(hwnd,&placement);auto r=placement.rcNormalPosition;uiPreferences.width=MulDiv(r.right-r.left,96,veyra::ui::layoutDpi(hwnd));uiPreferences.height=MulDiv(r.bottom-r.top,96,veyra::ui::layoutDpi(hwnd));uiPreferences.x=r.left;uiPreferences.y=r.top;uiPreferences.positioned=true;uiPreferences.volume=snapshot.volume;uiPreferences.muted=snapshot.muted;uiPreferences.subtitles=uiState.subtitles;uiPreferences.subtitleSize=subtitlePixels;uiPreferences.subtitleOutline=uiState.subtitleOutline;uiPreferences.subtitleBackground=uiState.subtitleBackground;uiPreferences.subtitleSecondLanguage=uiState.subtitleSecondLanguage;uiPreferences.subtitleMargin=uiState.subtitleMargin;uiPreferences.subtitleFont=uiState.subtitleFont;uiPreferences.inspector=uiState.inspector;const bool confirmed=snapshot.frames>0&&!snapshot.applying&&!snapshot.failed;if(!preferences.save(uiPreferences,haveSuccessful?&lastSuccessful:nullptr))veyra::log::warn("ui-preferences","preferences not saved; corrupt original preserved");}exportJob.cancel();closing=true;engine.stop();SetWindowTextW(statusBar,L"正在释放当前任务资源…");return 0;
+if(smokeSeconds>0&&startTick&&GetTickCount64()-startTick>ULONGLONG(smokeSeconds)*1000){veyra::log::info("app",std::format("smoke frames={} generated={} failed={} latenessMs={:.2f} absLatenessP95Ms={:.2f} controlsStep={} capture={} processedFps={:.2f} callbackFps={:.2f} captureDropped={} callbackToPresentReturnP95Ms={:.3f} schedulingWaitP95Ms={:.3f} processCpuP95Ms={:.3f} presentCpuP95Ms={:.3f} nrEvaluated={} nvofExecuted={}",s.frames,s.generated,s.failed,s.lateMs,s.lateP95Ms,smokeStep,s.capture,s.fps,s.captureFps,s.captureDropped,s.captureAgeP95Ms,s.schedulingWaitP95Ms,s.processCpuP95Ms,s.presentCpuP95Ms,s.nrEvaluated,s.nvofExecuted));resultCode=(s.frames>0||smokeEmpty)&&!s.failed&&(!smokeZoom||zoomStep==3)&&(!smokeProtection||protectionStep==4)&&(!smokeRepair||repairStep==10)&&(!smokeTransport||transportStep==10)&&(!smokeFgOnly||fgOnlyStep==4)&&(!smokeSettings||settingsStep==5)&&(!smokeColor||colorStep==8)&&(!smokeRollback||settingsStep==3)&&(!smokeUi||uiStep==8)&&(!smokeDual||dualStep==40)&&(!smokeMaster||masterStep==3)&&(!smokeAudio||audioStep==4)&&(!(smokeJob||smokeJobCancel)||jobStep==4)&&(!smokeScreenshot||screenshotStep==2)?0:1;PostMessageW(hwnd,WM_CLOSE,0,0);}return 0;}
+case WM_CLOSE:endTransition();if(!closing&&smokeSeconds<=0&&exportJob.poll().active()&&MessageBoxW(hwnd,L"导出尚未完成。取消导出并退出？\n选择“否”返回播放器继续导出。",L"退出 Veyra",MB_YESNO|MB_DEFBUTTON2|MB_ICONQUESTION)!=IDYES)return 0;if(!closing&&smokeSeconds<=0){auto snapshot=engine.snapshot();WINDOWPLACEMENT placement{sizeof(placement)};if(full)placement=windowPlacement;else GetWindowPlacement(hwnd,&placement);auto r=placement.rcNormalPosition;uiPreferences.width=MulDiv(r.right-r.left,96,veyra::ui::layoutDpi(hwnd));uiPreferences.height=MulDiv(r.bottom-r.top,96,veyra::ui::layoutDpi(hwnd));uiPreferences.x=r.left;uiPreferences.y=r.top;uiPreferences.positioned=true;uiPreferences.volume=snapshot.volume;uiPreferences.muted=snapshot.muted;uiPreferences.subtitles=uiState.subtitles;uiPreferences.subtitleSize=subtitlePixels;uiPreferences.subtitleOutline=uiState.subtitleOutline;uiPreferences.subtitleBackground=uiState.subtitleBackground;uiPreferences.subtitleSecondLanguage=uiState.subtitleSecondLanguage;uiPreferences.subtitleMargin=uiState.subtitleMargin;uiPreferences.subtitleFont=uiState.subtitleFont;uiPreferences.inspector=uiState.inspector;uiPreferences.colourFoldMask=preferences.load().colourFoldMask;veyra::log::warn("ui-preferences","preferences not saved; corrupt original preserved");}exportJob.cancel();closing=true;engine.stop();SetWindowTextW(statusBar,L"正在释放当前任务资源…");return 0;
 case WM_DESTROY:
 #ifdef VEYRA_ENABLE_REMOTEPLAY
 remoteController.stop();KillTimer(hwnd,ControllerTimer);
@@ -777,7 +941,11 @@ SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);INITCO
 CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
 initialOptions=veyra::engine::PlayerOptions::from(veyra::ui::defaultSettings());
 
-int argc=0;auto argv=CommandLineToArgvW(GetCommandLineW(),&argc);for(int i=1;i<argc;++i){const std::wstring arg=argv[i];if(arg==L"--export-worker"&&i+1<argc)workerMapping=reinterpret_cast<HANDLE>(_wcstoui64(argv[++i],nullptr,10));else if(arg==L"--smoke-view"&&i+1<argc)smokeView=argv[++i];else if(arg==L"--smoke-fg-only")smokeFgOnly=true;else if(arg==L"--smoke-transport")smokeTransport=true;else if(arg==L"--smoke-repair-ui")smokeRepair=true;else if(arg==L"--smoke-repair-ui-reject")smokeRepair=smokeRepairReject=true;else if(arg==L"--smoke-hover")smokeZoom=smokeHover=true;else if(arg==L"--smoke-protection")smokeProtection=true;else if(arg==L"--smoke-zoom")smokeZoom=true;else if(arg==L"--smoke-empty")smokeEmpty=true;else if(arg==L"--smoke-dual")smokeDual=true;else if(arg==L"--smoke-dual-pause"){smokeDual=smokeDualPause=true;}else if(arg==L"--smoke-master-reject")smokeMaster=smokeMasterReject=true;else if(arg==L"--smoke-master")smokeMaster=true;else if(arg==L"--smoke-audio")smokeAudio=true;else if(arg==L"--smoke-job-cancel")smokeJobCancel=true;else if(arg==L"--smoke-job-exit")smokeJobExit=true;else if(arg==L"--smoke-job")smokeJob=true;else if(arg==L"--smoke-dual-export"&&i+1<argc)smokeDualOutput=argv[++i];else if(arg==L"--smoke-seconds"&&i+1<argc)smokeSeconds=std::clamp(_wtoi(argv[++i]),1,240);else if(arg==L"--export-out"&&i+1<argc)exportOutput=argv[++i];else if(arg==L"--max-frames"&&i+1<argc)exportFrames=std::max(1,_wtoi(argv[++i]));else if(arg==L"--cancel-after-ms"&&i+1<argc)cancelAfterMs=std::clamp(_wtoi(argv[++i]),1,240000);else if(arg==L"--hevc")exportHevc=true;else if(arg==L"--bitrate-mbps"&&i+1<argc)initialOptions.settings.exportBitrateMbps=uint32_t(std::clamp(_wtoi(argv[++i]),0,300));else if(arg==L"--subtitle-primary"&&i+1<argc)subtitleRequestPrimary=std::clamp(_wtoi(argv[++i]),-1,64);else if(arg==L"--subtitle-secondary"&&i+1<argc)subtitleRequestSecondary=std::clamp(_wtoi(argv[++i]),-1,64);else if(arg==L"--subtitle-offset-ms"&&i+1<argc)subtitleRequestOffsetMs=std::clamp(_wtoi(argv[++i]),-30000,30000);else if(arg==L"--subtitle-font-size"&&i+1<argc)subtitlePixels=std::clamp(_wtoi(argv[++i]),16,56);else if(arg==L"--subtitle-no-outline")uiState.subtitleOutline=false;else if(arg==L"--subtitle-background")uiState.subtitleBackground=true;else if(arg==L"--subtitle-auto-align")subtitleRequestAutoAlign=true;else if(arg==L"--smoke-rollback-flow"){smokeRollback=true;smokeRollbackFlow=true;}else if(arg==L"--smoke-rollback")smokeRollback=true;else if(arg==L"--smoke-ui")smokeUi=true;else if(arg==L"--no-fg")initialOptions.fg=false;else if(arg==L"--smoke-settings")smokeSettings=true;else if(arg==L"--smoke-screenshot")smokeScreenshot=true;else if(arg==L"--smoke-controls")smokeControls=true;else if(arg==L"--smoke-save"&&i+1<argc)smokeSave=argv[++i];else if(arg==L"--native")initialOptions.realtime=false;else if(arg==L"--realtime")initialOptions.realtime=true;else if(arg==L"--fg")initialOptions.fg=true;else if(arg==L"--fg-multiplier"&&i+1<argc){initialOptions.fgMultiplier=std::clamp(_wtoi(argv[++i]),2,4);initialOptions.fg=true;}else if(arg==L"--capture-audio"&&i+1<argc)initialOptions.settings.captureAudio=static_cast<veyra::engine::CaptureAudioIngress>(std::clamp(_wtoi(argv[++i]),0,2));else if(arg==L"--flow-amd")initialOptions.settings.opticalFlowBackend=veyra::engine::OpticalFlowBackend::AmdFidelityFx;else if(arg==L"--flow-gpudis")initialOptions.settings.opticalFlowBackend=veyra::engine::OpticalFlowBackend::GpuDis;else if(arg==L"--video-sr"&&i+1<argc){initialOptions.settings.videoSrQuality=std::clamp(_wtoi(argv[++i]),1,5);initialOptions.sr=true;}else if(arg==L"--nr-ampere")initialOptions.settings.nrRuntime=veyra::engine::NrRuntime::Ampere;else if(arg==L"--nr-community")initialOptions.settings.nrRuntime=veyra::engine::NrRuntime::Community;else if(arg==L"--nr-original")initialOptions.settings.nrRuntime=veyra::engine::NrRuntime::Original;else if(arg==L"--sr")initialOptions.sr=true;else if(arg==L"--no-nr")initialOptions.nr=false;else if(arg==L"--nr")initialOptions.nr=true;else if(arg==L"--no-sr")initialOptions.sr=false;else autoInput=arg;}LocalFree(argv);
+int argc=0;auto argv=CommandLineToArgvW(GetCommandLineW(),&argc);for(int i=1;i<argc;++i){const std::wstring arg=argv[i];if(arg==L"--export-worker"&&i+1<argc)workerMapping=reinterpret_cast<HANDLE>(_wcstoui64(argv[++i],nullptr,10));else if(arg==L"--smoke-view"&&i+1<argc)smokeView=argv[++i];else if(arg==L"--smoke-fg-only")smokeFgOnly=true;else if(arg==L"--smoke-transport")smokeTransport=true;else if(arg==L"--smoke-repair-ui")smokeRepair=true;else if(arg==L"--smoke-repair-ui-reject")smokeRepair=smokeRepairReject=true;else if(arg==L"--smoke-hover")smokeZoom=smokeHover=true;else if(arg==L"--smoke-protection")smokeProtection=true;else if(arg==L"--smoke-zoom")smokeZoom=true;else if(arg==L"--smoke-empty")smokeEmpty=true;else if(arg==L"--smoke-dual")smokeDual=true;else if(arg==L"--smoke-dual-pause"){smokeDual=smokeDualPause=true;}else if(arg==L"--smoke-master-reject")smokeMaster=smokeMasterReject=true;else if(arg==L"--smoke-master")smokeMaster=true;else if(arg==L"--smoke-audio")smokeAudio=true;else if(arg==L"--smoke-job-cancel")smokeJobCancel=true;else if(arg==L"--smoke-job-exit")smokeJobExit=true;else if(arg==L"--smoke-job")smokeJob=true;else if(arg==L"--smoke-dual-export"&&i+1<argc)smokeDualOutput=argv[++i];else if(arg==L"--smoke-seconds"&&i+1<argc)smokeSeconds=std::clamp(_wtoi(argv[++i]),1,240);else if(arg==L"--export-out"&&i+1<argc)exportOutput=argv[++i];else if(arg==L"--max-frames"&&i+1<argc)exportFrames=std::max(1,_wtoi(argv[++i]));else if(arg==L"--cancel-after-ms"&&i+1<argc)cancelAfterMs=std::clamp(_wtoi(argv[++i]),1,240000);else if(arg==L"--hevc")exportHevc=true;else if(arg==L"--bitrate-mbps"&&i+1<argc)initialOptions.settings.exportBitrateMbps=uint32_t(std::clamp(_wtoi(argv[++i]),0,300));else if(arg==L"--subtitle-primary"&&i+1<argc)subtitleRequestPrimary=std::clamp(_wtoi(argv[++i]),-1,64);else if(arg==L"--subtitle-secondary"&&i+1<argc)subtitleRequestSecondary=std::clamp(_wtoi(argv[++i]),-1,64);else if(arg==L"--subtitle-offset-ms"&&i+1<argc)subtitleRequestOffsetMs=std::clamp(_wtoi(argv[++i]),-30000,30000);else if(arg==L"--subtitle-font-size"&&i+1<argc)subtitlePixels=std::clamp(_wtoi(argv[++i]),16,56);else if(arg==L"--subtitle-no-outline")uiState.subtitleOutline=false;else if(arg==L"--subtitle-background")uiState.subtitleBackground=true;else if(arg==L"--subtitle-auto-align")subtitleRequestAutoAlign=true;else if(arg==L"--smoke-rollback-flow"){smokeRollback=true;smokeRollbackFlow=true;}else if(arg==L"--smoke-rollback")smokeRollback=true;else if(arg==L"--smoke-ui")smokeUi=true;else if(arg==L"--no-fg")initialOptions.fg=false;else if(arg==L"--smoke-settings")smokeSettings=true;else if(arg==L"--smoke-color")smokeColor=true;else if(arg==L"--smoke-screenshot")smokeScreenshot=true;else if(arg==L"--smoke-controls")smokeControls=true;else if(arg==L"--smoke-save"&&i+1<argc)smokeSave=argv[++i];else if(arg==L"--native")initialOptions.realtime=false;else if(arg==L"--realtime")initialOptions.realtime=true;else if(arg==L"--fg")initialOptions.fg=true;else if(arg==L"--fg-multiplier"&&i+1<argc){initialOptions.fgMultiplier=std::clamp(_wtoi(argv[++i]),2,4);initialOptions.fg=true;}else if(arg==L"--capture-audio"&&i+1<argc)initialOptions.settings.captureAudio=static_cast<veyra::engine::CaptureAudioIngress>(std::clamp(_wtoi(argv[++i]),0,2));else if(arg==L"--flow-amd")initialOptions.settings.opticalFlowBackend=veyra::engine::OpticalFlowBackend::AmdFidelityFx;else if(arg==L"--flow-gpudis")initialOptions.settings.opticalFlowBackend=veyra::engine::OpticalFlowBackend::GpuDis;else if(arg==L"--video-sr"&&i+1<argc){initialOptions.settings.videoSrQuality=std::clamp(_wtoi(argv[++i]),1,5);initialOptions.sr=true;}else if(arg==L"--nr-ampere")initialOptions.settings.nrRuntime=veyra::engine::NrRuntime::Ampere;else if(arg==L"--nr-community")initialOptions.settings.nrRuntime=veyra::engine::NrRuntime::Community;else if(arg==L"--nr-original")initialOptions.settings.nrRuntime=veyra::engine::NrRuntime::Original;else if(arg==L"--sr")initialOptions.sr=true;else if(arg==L"--no-nr")initialOptions.nr=false;else if(arg==L"--nr")initialOptions.nr=true;else if(arg==L"--no-sr")initialOptions.sr=false;else autoInput=arg;}LocalFree(argv);
+// Diagnostic: force the colour grade on with a fixed exposure (EV). The grade is
+// fused into the ingest dispatch, so this flag is how the graded cost is measured
+// against the grade-off baseline on the same clip.
+{int gradeArgc=0;auto gradeArgv=CommandLineToArgvW(GetCommandLineW(),&gradeArgc);for(int i=1;i<gradeArgc;++i){if(!wcsncmp(gradeArgv[i],L"--color-grade=",14)){initialOptions.settings.color.enabled=true;initialOptions.settings.color.exposure=float(_wtof(gradeArgv[i]+14));}}if(gradeArgv)LocalFree(gradeArgv);}
 // The legacy argument clamp caps --fg-multiplier at 4X. Re-read the flag here so
 // 6X (and 2X/3X/4X) can be exercised from the command line for diagnostics and
 // smoke tests; the interactive UI uses the capability-driven list instead.
@@ -790,9 +958,9 @@ int argc=0;auto argv=CommandLineToArgvW(GetCommandLineW(),&argc);for(int i=1;i<a
 {
     // --capture-flip: diagnostics/smoke only; the interactive path uses the
     // capture panel checkbox and persists captureFlipVertical with presets.
-    {int flipArgc=0;auto flipArgv=CommandLineToArgvW(GetCommandLineW(),&flipArgc);for(int i=1;i<flipArgc;++i)if(!_wcsicmp(flipArgv[i],L"--capture-flip"))initialOptions.settings.captureFlipVertical=true;LocalFree(flipArgv);}
+    {int flipArgc=0;auto flipArgv=CommandLineToArgvW(GetCommandLineW(),&flipArgc);for(int i=1;i<flipArgc;++i){if(!_wcsicmp(flipArgv[i],L"--capture-flip"))initialOptions.settings.captureFlipVertical=true;else if(!wcsncmp(flipArgv[i],L"--capture-buffer=",17)){const wchar_t* value=flipArgv[i]+17;if(!_wcsicmp(value,L"auto"))initialOptions.settings.captureBuffer=veyra::source::CaptureBufferMode::Auto;else if(!_wcsicmp(value,L"minimum"))initialOptions.settings.captureBuffer=veyra::source::CaptureBufferMode::Minimum;else if(!_wcsicmp(value,L"driver"))initialOptions.settings.captureBuffer=veyra::source::CaptureBufferMode::DriverDefault;}else if(!_wcsicmp(flipArgv[i],L"--capture-cpu-unpack"))initialOptions.captureCpuUnpack=true;}LocalFree(flipArgv);}
     int positionalArgc=0;auto positionalArgv=CommandLineToArgvW(GetCommandLineW(),&positionalArgc);std::wstring positional;
-    const wchar_t* valueFlags[]={L"--export-worker",L"--smoke-view",L"--smoke-dual-export",L"--smoke-seconds",L"--export-out",L"--max-frames",L"--cancel-after-ms",L"--smoke-save",L"--fg-multiplier",L"--capture-audio",L"--video-sr",L"--bitrate-mbps",L"--subtitle-primary",L"--subtitle-secondary",L"--subtitle-offset-ms",L"--subtitle-font-size"};
+   const wchar_t* valueFlags[]={L"--export-worker",L"--smoke-view",L"--smoke-dual-export",L"--smoke-seconds",L"--export-out",L"--max-frames",L"--cancel-after-ms",L"--smoke-save",L"--fg-multiplier",L"--capture-audio",L"--video-sr",L"--bitrate-mbps",L"--subtitle-primary",L"--subtitle-secondary",L"--subtitle-offset-ms",L"--subtitle-font-size"};
     for(int i=1;i<positionalArgc;++i){const std::wstring a=positionalArgv[i];
         bool takesValue=false;for(const wchar_t* flag:valueFlags)if(a==flag){takesValue=true;break;}
         if(takesValue){++i;continue;}

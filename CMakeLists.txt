@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(veyra VERSION 1.3.1 LANGUAGES CXX RC)
+project(veyra VERSION 1.3.2 LANGUAGES CXX RC)
 # Shown in the EXE's version resource and in the package name. CMake versions
 # must be numeric, so the beta marker lives here instead.
-set(VEYRA_DISPLAY_VERSION "1.3.1beta" CACHE STRING "Human-readable version string")
+set(VEYRA_DISPLAY_VERSION "1.3.2beta4" CACHE STRING "Human-readable version string")
 
 # Match the compiler's actual bytes, including on localized Windows installs.
 # CMake's cached, decoded prefix can leave Ninja with zero header dependencies.
@@ -65,6 +65,10 @@ add_library(veyra_base STATIC
   src/base/FileIdentity.cpp
   src/base/RuntimePaths.cpp
   src/base/ThunkHook.cpp
+  # .cube parsing, the runtime LUT store and named colour looks: low level, no
+  # D3D12, shared by the ingest pipeline and the settings/import paths.
+  src/engine/ColorLut.cpp
+  src/engine/ColorLookStore.cpp
 )
 veyra_apply_warnings(veyra_base)
 target_compile_options(veyra_base PUBLIC /utf-8)
@@ -119,6 +123,7 @@ add_library(veyra_ngx STATIC
   src/ngx/DlssFgBackend.cpp
   src/ngx/AdaMfgUnlock.cpp
   src/ngx/AmpereMfgUnlock.cpp
+  src/ngx/NvapiArchSpoof.cpp
 )
   veyra_apply_warnings(veyra_ngx)
   target_compile_features(veyra_ngx PUBLIC cxx_std_20)
@@ -221,6 +226,7 @@ endif()
 veyra_add_compute_shader(veyra_shader_yuv_to_rgb YuvToLinearRgb)
 veyra_add_compute_shader(veyra_shader_rgb_to_linear RgbToLinear)
 veyra_add_compute_shader(veyra_shader_yuy2_to_linear Yuy2ToLinear)
+veyra_add_compute_shader(veyra_shader_packed_capture PackedCaptureToLinear)
 add_dependencies(veyra_shader_rgb_to_linear veyra_shader_yuy2_to_linear)
 # ScaleBlit: working frame -> swapchain backbuffer (Phase 6 present path).
 veyra_add_compute_shader(veyra_shader_scale_blit ScaleBlit)
@@ -295,6 +301,7 @@ target_link_libraries(veyra_guidance_tests PRIVATE veyra_guidance)
 # Grows in R3 as the real GPU graph migrates out of the probes.
 add_library(veyra_pipeline STATIC
   src/pipeline/ResetCoordinator.cpp
+  src/pipeline/ColorGradeTables.cpp
 )
 veyra_apply_warnings(veyra_pipeline)
 # FFmpeg/NVOF headers are third-party: /WX stays off for this target.
@@ -392,7 +399,7 @@ if(TARGET veyra_ngx AND TARGET veyra_nvof AND VEYRA_FFMPEG_ROOT)
   add_dependencies(veyra_pipeline
     veyra_shader_yuv_to_rgb veyra_shader_rgb_to_linear veyra_shader_parity_encode
     veyra_shader_parity_decode veyra_shader_scale_blit
-    veyra_shader_nv12_upload veyra_shader_nvof_densify)
+    veyra_shader_nv12_upload veyra_shader_nvof_densify veyra_shader_packed_capture)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -464,6 +471,8 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
     src/source/NativeCaptureSink.cpp
     src/source/MediaFileSource.cpp
     src/source/CaptureCardSource.cpp
+    src/source/AverMediaAudioSwitch.cpp
+    src/source/CaptureCompressedDecoder.cpp
     src/source/WasapiAudioInput.cpp
   )
   veyra_apply_warnings(veyra_sources)
@@ -474,7 +483,7 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_include_directories(veyra_sources PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_link_libraries(veyra_sources PUBLIC veyra_pipeline veyra_media veyra_base)
-  target_link_libraries(veyra_sources PRIVATE ${FFMPEG_LIBRARIES} strmiids ole32 oleaut32)
+  target_link_libraries(veyra_sources PRIVATE ${FFMPEG_LIBRARIES} strmiids ole32 oleaut32 d3d12 dxgi)
 
   if(VEYRA_ENABLE_REMOTEPLAY)
     set(VEYRA_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -524,6 +533,11 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
   add_executable(veyra_repair_parameter_tests tests/integration/RepairParameterTests.cpp)
   add_executable(veyra_image_dimension_tests tests/integration/ImageDimensionTests.cpp)
   add_executable(veyra_capture_color_probe tools/capture_color_probe/main.cpp)
+  add_executable(veyra_capture_copy_bench tools/capture_copy_bench/main.cpp)
+  target_compile_features(veyra_capture_copy_bench PRIVATE cxx_std_20)
+  target_compile_options(veyra_capture_copy_bench PRIVATE /utf-8 /WX-)
+  target_compile_definitions(veyra_capture_copy_bench PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_link_libraries(veyra_capture_copy_bench PRIVATE veyra_engine)
   add_executable(veyra_decode_profile_probe tools/decode_profile_probe/main.cpp)
   target_compile_features(veyra_decode_profile_probe PRIVATE cxx_std_20)
   target_compile_options(veyra_decode_profile_probe PRIVATE /utf-8 /WX-)
@@ -555,6 +569,14 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
   target_compile_features(veyra_audio_timeline_tests PRIVATE cxx_std_20)
   target_link_libraries(veyra_audio_timeline_tests PRIVATE veyra_sinks)
   add_executable(veyra_capture_audio_tests tests/integration/CaptureAudioTests.cpp)
+  add_executable(veyra_avermedia_switch_tests tests/unit/AverMediaAudioSwitchTests.cpp)
+  target_compile_features(veyra_avermedia_switch_tests PRIVATE cxx_std_20)
+  target_compile_definitions(veyra_avermedia_switch_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+  target_link_libraries(veyra_avermedia_switch_tests PRIVATE veyra_sources)
+  add_executable(veyra_iec61937_probe_tests tests/unit/Iec61937ProbeTests.cpp)
+  target_compile_features(veyra_iec61937_probe_tests PRIVATE cxx_std_20)
+  target_compile_definitions(veyra_iec61937_probe_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+  target_link_libraries(veyra_iec61937_probe_tests PRIVATE veyra_sinks)
   if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavcodec/avcodec.h")
     add_executable(veyra_bitstream_audio_test tools/bitstream_audio_test/main.cpp)
     target_compile_features(veyra_bitstream_audio_test PRIVATE cxx_std_20)
@@ -578,6 +600,11 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
   target_link_libraries(veyra_fg_admission_tests PRIVATE veyra_engine)
   target_compile_features(veyra_capture_color_tests PRIVATE cxx_std_20)
   target_link_libraries(veyra_capture_color_tests PRIVATE veyra_sources)
+  add_executable(veyra_capture_compressed_tests tests/unit/CaptureCompressedDecoderTests.cpp)
+  target_compile_features(veyra_capture_compressed_tests PRIVATE cxx_std_20)
+  target_compile_definitions(veyra_capture_compressed_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_include_directories(veyra_capture_compressed_tests PRIVATE ${FFMPEG_INCLUDE_DIRS})
+  target_link_libraries(veyra_capture_compressed_tests PRIVATE veyra_sources veyra_gfx ${FFMPEG_LIBRARIES})
   add_executable(veyra_yuy2_color_tests tests/integration/Yuy2ColorTests.cpp)
   target_compile_features(veyra_yuy2_color_tests PRIVATE cxx_std_20)
   target_link_libraries(veyra_yuy2_color_tests PRIVATE veyra_engine)
@@ -656,6 +683,36 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
   target_compile_definitions(veyra_engine PUBLIC VEYRA_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}" VEYRA_SHADER_DIR="${CMAKE_BINARY_DIR}/shaders")
   target_link_libraries(veyra_engine PUBLIC veyra_pipeline veyra_sources veyra_sinks veyra_ngx veyra_nvof)
   add_executable(veyra_repair_preset_tests tests/unit/RepairPresetTests.cpp src/engine/PresetStore.cpp)
+  # CPU bake of the colour grade: no GPU, no engine link - the tables the ingest
+  # shader reads are pure maths and must be verifiable without a device.
+  add_executable(veyra_color_grade_tests tests/unit/ColorGradeTableTests.cpp)
+  target_compile_features(veyra_color_grade_tests PRIVATE cxx_std_20)
+  target_compile_options(veyra_color_grade_tests PRIVATE /utf-8)
+  target_compile_definitions(veyra_color_grade_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_include_directories(veyra_color_grade_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_link_libraries(veyra_color_grade_tests PRIVATE veyra_pipeline)
+  # GPU contract for the v4 colour chain: identity when off/neutral, exposure,
+  # curve, saturation and hue, all through a real graph and its ingest pass.
+  add_executable(veyra_color_grade_gpu_tests tests/integration/ColorGradeGpuTests.cpp)
+  target_compile_features(veyra_color_grade_gpu_tests PRIVATE cxx_std_20)
+  target_compile_options(veyra_color_grade_gpu_tests PRIVATE /utf-8 /WX-)
+  target_compile_definitions(veyra_color_grade_gpu_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_include_directories(veyra_color_grade_gpu_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${FFMPEG_INCLUDE_DIRS})
+  target_link_libraries(veyra_color_grade_gpu_tests PRIVATE veyra_pipeline veyra_sinks)
+  # Adobe .cube parsing + the runtime LUT store (CPU only).
+  add_executable(veyra_color_lut_tests tests/unit/ColorLutTests.cpp src/engine/ColorLut.cpp)
+  target_compile_features(veyra_color_lut_tests PRIVATE cxx_std_20)
+  target_compile_options(veyra_color_lut_tests PRIVATE /utf-8)
+  target_compile_definitions(veyra_color_lut_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_include_directories(veyra_color_lut_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_link_libraries(veyra_color_lut_tests PRIVATE veyra_base bcrypt)
+  # Named colour looks + .vpcolor export/import (CPU only).
+  add_executable(veyra_color_look_tests tests/unit/ColorLookTests.cpp src/engine/ColorLookStore.cpp)
+  target_compile_features(veyra_color_look_tests PRIVATE cxx_std_20)
+  target_compile_options(veyra_color_look_tests PRIVATE /utf-8)
+  target_compile_definitions(veyra_color_look_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_include_directories(veyra_color_look_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_link_libraries(veyra_color_look_tests PRIVATE veyra_base)
   target_compile_features(veyra_repair_preset_tests PRIVATE cxx_std_20)
   target_compile_options(veyra_repair_preset_tests PRIVATE /utf-8)
   target_compile_definitions(veyra_repair_preset_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -741,6 +798,17 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
     veyra_shader_yuv_to_rgb veyra_shader_parity_encode
     veyra_shader_parity_decode veyra_shader_scale_blit
     veyra_shader_nv12_upload veyra_shader_nvof_densify)
+
+  # Headless Remote Play probe: drives the product session stack with a saved
+  # profile so codec/bitrate variants can be compared without the GUI.
+  if(VEYRA_ENABLE_REMOTEPLAY)
+    add_executable(veyra_remoteplay_probe tools/remoteplay_probe/main.cpp)
+    target_compile_features(veyra_remoteplay_probe PRIVATE cxx_std_20)
+    target_compile_options(veyra_remoteplay_probe PRIVATE /WX-)
+    target_compile_definitions(veyra_remoteplay_probe PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_include_directories(veyra_remoteplay_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(veyra_remoteplay_probe PRIVATE veyra_sources veyra_gfx ${FFMPEG_LIBRARIES})
+  endif()
 
   # Phase 6 realtime engine probe: decode -> SR -> NR -> NVOF -> DLSSG -> present.
   if(VEYRA_ENABLE_EXPERIMENTAL_DLSSNR AND EXISTS "${VEYRA_NVOF_SDK_ROOT}/NvOFInterface/nvOpticalFlowCommon.h")

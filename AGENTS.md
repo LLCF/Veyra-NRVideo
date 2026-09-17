@@ -6,6 +6,8 @@
 
 > 2026-09-16 用户授权合并到 main：隔离分支 `codex/framegen-fsr-dolby-20260916`（tip `ad7442d`）已合并（merge `24e7de7`）。存档 tag：合并前 `checkpoint/pre-merge-framegen-20260916`（main `87ad4cd`）、分支 tip `checkpoint/framegen-fsr-dolby-branch-tip-20260916`、合并后 `checkpoint/merged-framegen-20260916`；分支保留不删。冲突统一取分支原版实现，main 侧 RGB24 移植 `87ad4cd` 被 `015f8a4` 取代（其说明文档保留）。**未推送、未发布；push/Release 仍需当前对话明确授权。** N1–N4 本体未开工；40/30 系、真实位流卡与 AMD/Intel 导出实机验收仍待用户。
 
+> 2026-09-16 用户授权开启采集链路优化（新隔离分支）：从 main `2406f81` 开 `codex/capture-decode-latency-20260916`（tag `checkpoint/pre-capture-decode-latency-20260916`），按 `docs/CAPTURE_DECODE_LATENCY_PLAN_2026-09-16.md` 施工：压缩解码架构（压缩直连 → D3D12VA 硬解 → MJPEG 并行软解）与原生 N1–N4（N4 缓冲协商 → N3 格式排序 → N1 逐像素转 GPU → N2 拷贝合并）。全部在隔离区，人工验收合格前不得合并 main；N1 必须保留 RGB24 方向契约（`015f8a4`）。真机验收用本机 USB3 卡 + 受影响用户；未生效的优化不得计入收益。
+
 > 2026-09-14 用户授权实施 HDR 全增强与文件/采集 5.1，PS5 串流真实多声道不在本次范围。按 docs/HDR_ALL_EFFECTS_MULTICHANNEL_RESEARCH_PLAN_2026-09-14.md 施工，经过显式颜色合同扩展旧 SDR 边界；HDR 基底保留合成不宣称 NR 模型原生 HDR 推理。默认效果全关、共享处理图、直接 NGX、现有运行组件身份及 patched FFmpeg 保持。未授权新发布。
 
 > 2026-09-14 用户授权发布1.1.1到Likely7/Veyra-NRVideo，包含RTX30 NR实验选项和首次效果全关。发布范围新增用户已指定的NeuralScreen1.8.2 NR原件：DCC0DC2414AEDEC4A8E084647070383BE068554042587180C20C784D4772D36F / 165840496 bytes / 310.8.0.0 / HashMismatch，独立放在Release的runtime/experimental/nr-ampere/，逐文件manifest记录；原七组件与patched FFmpeg沿用。此授权扩展上次仅本地范围，不允许修改DLL或进入源码Git。RTX30实卡尚未验收，不能宣称全型号成功。更新双语README、完整便携包和对应源码；本轮未请求关机。

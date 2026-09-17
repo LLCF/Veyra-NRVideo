@@ -21,6 +21,7 @@
 #include "veyra/pipeline/EnhanceGraph.h"
 #include "veyra/pipeline/ResetCoordinator.h"
 #include "veyra/gfx/XessMfgUnlock.h"
+#include "veyra/ngx/AmpereMfgUnlock.h"
 #include "veyra/diagnostics/ResetCause.h"
 #include "veyra/sink/WasapiAudioSink.h"
 #include "veyra/sink/ImageExportSink.h"
@@ -62,9 +63,13 @@ bool EngineController::idle()const{std::lock_guard lock(mutex_);return !busy_&&!
 void EngineController::open(HWND video,const std::wstring& path,PlayerOptions opts){
     const bool captureReplay=opts.captureReplayForTest;
     const bool disableAdmission=opts.captureReplayDisableFgAdmissionForTest;
+    // Diagnostics-only PlayerOptions fields never enter EnhancementSettings;
+    // keep them across the snapshot round-trip below.
+    const bool captureCpuUnpack=opts.captureCpuUnpack;
     {std::lock_guard lock(mutex_);snapshot_={};activeFlow_.reset();previewView_={};fgMultiFrameMaxCap_=0;xessMaxInterpolatedFramesCap_=0;fsrMaxGeneratedFramesCap_=0;snapshot_.sessionId=++sessionId_;snapshot_.transport=TransportState::Opening;savePath_.clear();desired_=opts.snapshot();desired_.revision=++nextRevision_;snapshot_.desired=desired_;opts=PlayerOptions::from(desired_);}
     opts.captureReplayForTest=captureReplay;
     opts.captureReplayDisableFgAdmissionForTest=disableAdmission;
+    opts.captureCpuUnpack=captureCpuUnpack;
     post([this,video,path,opts]{paused_=false;seekSeconds_=-1;run(video,path,opts);});
 }
 #ifdef VEYRA_ENABLE_REMOTEPLAY
@@ -183,12 +188,13 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 {std::lock_guard lock(mutex_);desired_.multiplier=1;snapshot_.image=true;snapshot_.desired=desired_;}
             }else{
                 source::SourceOpenDesc od;od.path=path;
-                // Files use the same shared D3D12 device as the graph. The
-                // source performs a capability check and falls back to
-                // software before returning its first frame; capture/PS5
-                // retain their own decode contracts.
-                od.preferHardwareDecode=!isCapture;
-                if(od.preferHardwareDecode){od.d3d12Device=ctx.device();od.d3d12Queue=ctx.directQueue();}
+                // Files use the same shared D3D12 device as the graph. Capture
+                // uses it for the compressed-payload decoder (H.264/HEVC/AV1/
+                // VP9 through D3D12VA; MJPEG stays on the software path inside
+                // CaptureCompressedDecoder). Each source performs its own
+                // capability check and records its fallback.
+                od.preferHardwareDecode=true;
+                od.d3d12Device=ctx.device();od.d3d12Queue=ctx.directQueue();
                 // Diagnostic uses the production graph/presenter to validate
                 // D3D12VA imports without needing a paired PS5 or credentials.
                 if(!isCapture&&GetEnvironmentVariableW(L"VEYRA_TEST_FILE_HW_DECODE",nullptr,0)){
@@ -202,6 +208,8 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 // through to the file open check (fixed 2026-09-16).
                 if(physicalCapture)captureSource.setAudioIngress(unsigned(options.settings.captureAudio));
                 if(physicalCapture)captureSource.setVerticalFlip(options.settings.captureFlipVertical);
+                if(physicalCapture)captureSource.setBufferMode(unsigned(options.settings.captureBuffer));
+                if(physicalCapture)captureSource.setCpuUnpack(options.captureCpuUnpack);
 #ifdef VEYRA_ENABLE_REMOTEPLAY
                 if(remote){
                     status(L"正在连接 PS5…");
@@ -250,12 +258,13 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
             gd.rgbInput=isImage||(isCapture&&activeSource->info().color.pixelFormat==pipeline::SourcePixelFormat::Bgra8);
             gd.captureBitDepth=activeSource->info().color.pixelFormat==pipeline::SourcePixelFormat::P010?10:activeSource->info().color.pixelFormat==pipeline::SourcePixelFormat::P016?16:8;
             gd.yuy2Input=isCapture&&activeSource->info().color.pixelFormat==pipeline::SourcePixelFormat::Yuy2;gd.stillImage=isImage;
+            gd.packedInput=isCapture?pipeline::packedInputCode(activeSource->info().color.pixelFormat):0;
             const auto resolution=pipeline::ResolutionPlan::make({width,height},options.sr,options.snapshot().nrPolicy,isImage,options.settings.revision,options.settings.srTarget,options.settings.lowLatency&&options.nr);
             gd.workWidth=resolution.base.width;gd.workHeight=resolution.base.height;gd.nrWidth=resolution.nr.width;gd.nrHeight=resolution.nr.height;gd.flowWidth=resolution.flow.width;gd.flowHeight=resolution.flow.height;
             const bool nvidiaAdapter=ctx.adapter().isNvidia;
             const bool xessFg=presentSinkFrameGeneration(options.settings.frameGenerationBackend);
             gd.nrBeforeSr=!isImage&&options.settings.lowLatency&&options.nr&&resolution.srApplied;gd.enableSr=resolution.srApplied&&(nvidiaAdapter||options.settings.videoSrQuality==kVideoSrFsr);gd.videoSrQuality=options.settings.videoSrQuality;gd.enableNr=options.nr&&nvidiaAdapter;gd.nrRuntime=options.settings.nrRuntime;gd.enableFg=options.fg&&(nvidiaAdapter||xessFg);gd.fgMultiplier=options.fgMultiplier;gd.frameGenerationBackend=options.settings.frameGenerationBackend;gd.enableNvofStandalone=gd.enableNr;
-            gd.noFeatures=false;gd.model=options.settings.model;gd.residual=options.settings.residual;gd.protection=options.settings.protection;gd.settingsRevision=options.settings.revision;gd.flowQuality=options.settings.flow;gd.contentRate=options.settings.content;
+            gd.noFeatures=false;gd.model=options.settings.model;gd.residual=options.settings.residual;gd.protection=options.settings.protection;gd.color=options.settings.color;gd.settingsRevision=options.settings.revision;gd.flowQuality=options.settings.flow;gd.contentRate=options.settings.content;
             gd.opticalFlowBackend=options.settings.opticalFlowBackend;gd.amdFlowHalfResolution=options.settings.amdFlowHalfResolution;
             gd.hdrOutput=options.settings.useHdrPreview(gd.hdrInput,gfx::PresentSink::hdrDisplayActive(window));
             veyra::log::info("display-color",std::format("hdrInput={} hdrOutput={} forceSdrPreview={}",gd.hdrInput,gd.hdrOutput,options.settings.forceSdrPreview));
@@ -316,6 +325,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     veyra::log::warn("backend-recovery",std::format("initialization failed component={} attempt={} revision={} -> nr={} sr={} multiplier={}; original SDK error above",unsigned(failure),attempt+1,reduced.revision,reduced.nr,reduced.sr,reduced.multiplier));
                     if(!backendRecoveryWarning.empty())backendRecoveryWarning+=L"；";
                     backendRecoveryWarning+=std::wstring(backendFailureName(failure))+L"初始化失败，已关闭依赖效果（错误码见日志）";
+                    if(failure==FailedBackend::Fg&&ngx::AmpereMfgUnlock::applied())backendRecoveryWarning+=L"；RTX 30 系补帧解锁已应用，但当前驱动/运行库组合下运行时不开放补帧，可改用 AMD FSR 补帧";
                     if(failure==FailedBackend::Fg&&reduced.frameGenerationBackend==FrameGenerationBackend::XeSS&&presenter.fsrActive()){
                         // The FidelityFX proxy owns the window's only flip-model
                         // swapchain slot; it cannot be released without leaving
@@ -374,6 +384,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
             captureSource.setAudioSync(unsigned(options.settings.audioSync),options.settings.audioOffsetMs);
             captureSource.setAudioIngress(unsigned(options.settings.captureAudio));
             captureSource.setVerticalFlip(options.settings.captureFlipVertical);
+            captureSource.setBufferMode(unsigned(options.settings.captureBuffer));
             if(physicalCapture&&!captureSource.start()){status(L"无法启动采集，请查看诊断",true);break;}
             {std::lock_guard lock(mutex_);snapshot_.duration=duration;snapshot_.nominalSourceFps=isImage?0:activeSource->info().averageFps;snapshot_.running=true;snapshot_.transport=TransportState::Playing;snapshot_.image=isImage;snapshot_.capture=isCapture;snapshot_.applied=options.snapshot();snapshot_.desired=desired_;}
             status(isImage?L"图片已增强，可保存PNG/JPEG":std::format(L"{} | 输入 {}×{} / 底图 {}×{} / NR {}×{} / 光流 {}×{} / FG与输出 {}×{} | {}",isRemote?L"PS5 串流":isCapture?L"实时采集":L"播放",width,height,gd.workWidth,gd.workHeight,gd.nrWidth,gd.nrHeight,gd.flowWidth,gd.flowHeight,gd.workWidth,gd.workHeight,gd.nrBeforeSr?L"低延迟 · NR先行后超分":gd.nrWidth<gd.workWidth?L"实时内部处理并回填":L"原生NR（性能成本较高）"));
@@ -599,6 +610,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     status(std::format(L"采集信号中断，正在重连原设备（第 {} 次）",captureRetries));
                     captureSource.setAudioIngress(unsigned(options.settings.captureAudio));
                     captureSource.setVerticalFlip(options.settings.captureFlipVertical);
+                    captureSource.setBufferMode(unsigned(options.settings.captureBuffer));
                     if(captureSource.reconnect(muted_?0.0f:volume_.load(),unsigned(options.settings.audioSync),options.settings.audioOffsetMs)){
                         captureRecovering=false;reset=true;pendingResetCause=pipeline::ResetReason::DeviceLost;captureSampler.reset();
                         {std::lock_guard lock(mutex_);snapshot_.captureRecovering=false;}
@@ -653,6 +665,14 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                         captureSource.setVerticalFlip(requested.captureFlipVertical);
                         status(requested.captureFlipVertical?L"采集画面已上下翻转（仅影响本机采集画面）":L"采集画面方向已恢复",false);
                     }
+                    // The video-pin allocator is created while the graph is
+                    // built: record the mode now and let the reconnect below
+                    // (or the next connect) apply it.
+                    if(requested.captureBuffer!=options.settings.captureBuffer){
+                        options.settings.captureBuffer=requested.captureBuffer;
+                        captureSource.setBufferMode(unsigned(requested.captureBuffer));
+                        status(L"设备缓冲模式已记录；重新连接采集卡后生效",false);
+                    }
                     std::lock_guard lock(mutex_);snapshot_.applied=options.snapshot();snapshot_.applying=desired_!=snapshot_.applied;
                     veyra::log::info("settings",std::format("Audio applied videoRevision={} mode={} offsetMs={} (video history retained)",requested.revision,unsigned(requested.audioSync),requested.audioOffsetMs));
                 }
@@ -686,10 +706,10 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     const bool nvidiaAdapter=ctx.adapter().isNvidia;
                     const bool xessFg=presentSinkFrameGeneration(next.settings.frameGenerationBackend);
                     nextDesc.nrBeforeSr=!isImage&&requested.lowLatency&&requested.nr&&plan.srApplied;nextDesc.enableSr=plan.srApplied&&(nvidiaAdapter||next.settings.videoSrQuality==kVideoSrFsr);nextDesc.videoSrQuality=next.settings.videoSrQuality;nextDesc.enableNr=next.nr&&nvidiaAdapter;nextDesc.nrRuntime=next.settings.nrRuntime;nextDesc.enableFg=next.fg&&(nvidiaAdapter||xessFg);nextDesc.fgMultiplier=next.fgMultiplier;nextDesc.frameGenerationBackend=next.settings.frameGenerationBackend;nextDesc.enableNvofStandalone=nextDesc.enableNr;
-                    nextDesc.model=requested.model;nextDesc.residual=requested.residual;nextDesc.protection=requested.protection;nextDesc.settingsRevision=requested.revision;nextDesc.flowQuality=requested.flow;nextDesc.contentRate=requested.content;
+                    nextDesc.model=requested.model;nextDesc.residual=requested.residual;nextDesc.protection=requested.protection;nextDesc.color=requested.color;nextDesc.settingsRevision=requested.revision;nextDesc.flowQuality=requested.flow;nextDesc.contentRate=requested.content;
                     nextDesc.opticalFlowBackend=requested.opticalFlowBackend;nextDesc.amdFlowHalfResolution=requested.amdFlowHalfResolution;
                     nextDesc.hdrOutput=requested.useHdrPreview(nextDesc.hdrInput,gfx::PresentSink::hdrDisplayActive(window));
-                    const bool rebuild=(!nvidiaAdapter&&(next.nr||next.sr||(next.fg&&!xessFg)))||gd.hdrOutput!=nextDesc.hdrOutput||previous.captureCompatible!=requested.captureCompatible||gd.nrRuntime!=nextDesc.nrRuntime||gd.opticalFlowBackend!=nextDesc.opticalFlowBackend||gd.amdFlowHalfResolution!=nextDesc.amdFlowHalfResolution||gd.enableNr!=nextDesc.enableNr||gd.enableFg!=nextDesc.enableFg||gd.frameGenerationBackend!=nextDesc.frameGenerationBackend||gd.fgMultiplier!=nextDesc.fgMultiplier||gd.videoSrQuality!=nextDesc.videoSrQuality||gd.flowQuality!=nextDesc.flowQuality||gd.nrBeforeSr!=nextDesc.nrBeforeSr||gd.workWidth!=nextDesc.workWidth||gd.workHeight!=nextDesc.workHeight||gd.nrWidth!=nextDesc.nrWidth||gd.nrHeight!=nextDesc.nrHeight||gd.flowWidth!=nextDesc.flowWidth||gd.flowHeight!=nextDesc.flowHeight;
+                    const bool rebuild=(!nvidiaAdapter&&(next.nr||next.sr||(next.fg&&!xessFg)))||gd.hdrOutput!=nextDesc.hdrOutput||previous.captureCompatible!=requested.captureCompatible||gd.nrRuntime!=nextDesc.nrRuntime||gd.opticalFlowBackend!=nextDesc.opticalFlowBackend||gd.amdFlowHalfResolution!=nextDesc.amdFlowHalfResolution||gd.enableNr!=nextDesc.enableNr||gd.color.enabled!=nextDesc.color.enabled||gd.color.lutNameString()!=nextDesc.color.lutNameString()||gd.enableFg!=nextDesc.enableFg||gd.frameGenerationBackend!=nextDesc.frameGenerationBackend||gd.fgMultiplier!=nextDesc.fgMultiplier||gd.videoSrQuality!=nextDesc.videoSrQuality||gd.flowQuality!=nextDesc.flowQuality||gd.nrBeforeSr!=nextDesc.nrBeforeSr||gd.workWidth!=nextDesc.workWidth||gd.workHeight!=nextDesc.workHeight||gd.nrWidth!=nextDesc.nrWidth||gd.nrHeight!=nextDesc.nrHeight||gd.flowWidth!=nextDesc.flowWidth||gd.flowHeight!=nextDesc.flowHeight;
                     bool accepted=ring.drainQueue();out={};hasOutput=false;
                     resetRecord->rebuilt=rebuild;
                     markResetStage(diagnostics::ResetStage::Drain);
@@ -1226,6 +1246,9 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 ++frames;{std::lock_guard lock(mutex_);snapshot_.metrics=measured;snapshot_.colorStatus=gd.hdrOutput?(graph.hdr10Output()?L"HDR → HDR10 / PQ":L"HDR → scRGB / 浮点"):gd.hdrInput?L"HDR → SDR色调映射":L"SDR → SDR";snapshot_.position=(isCapture||isImage?pts:lastFilePresentedMs)/1000;snapshot_.frames=sourceFrames;snapshot_.generated=graphStats.fgGeneratedFrames;snapshot_.lateMs=lateness;snapshot_.lateP95Ms=sorted.empty()?0:sorted[size_t((sorted.size()-1)*0.95)];
                     // Measured playback speed: media-PTS advance per wall time
                     // over ~1s windows (1.0 = normal speed), resampled on seek.
+                    // A rejected LUT input space must be visible, not only logged
+                    // (plan v5.2: never apply a mismatched LUT silently).
+                    if(!graph.colorLutNotice().empty())snapshot_.colorStatus+=L"；"+graph.colorLutNotice();
                     const auto speedNow=Clock::now();
                     if(playbackSpeedLastWall==Clock::time_point()||pts+0.5<playbackSpeedLastPts){playbackSpeedLastPts=pts;playbackSpeedLastWall=speedNow;}
                     else if(std::chrono::duration<double>(speedNow-playbackSpeedLastWall).count()>=0.9){

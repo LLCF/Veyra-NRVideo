@@ -37,7 +37,7 @@ FFmpegVideoDecoder::~FFmpegVideoDecoder()
 }
 
 bool FFmpegVideoDecoder::openSoftware(const AVCodecParameters* codecParameters,
-    int streamTimeBaseNum, int streamTimeBaseDen, unsigned softwareThreads)
+    int streamTimeBaseNum, int streamTimeBaseDen, unsigned softwareThreads, bool lowLatency)
 {
     receiveStatus_ = DecodeReceiveStatus::NeedInput;
     if (context_ != nullptr) {
@@ -82,6 +82,14 @@ bool FFmpegVideoDecoder::openSoftware(const AVCodecParameters* codecParameters,
     // queue and no capture lookahead are introduced.
     context_->thread_count = int(std::clamp(softwareThreads,1u,4u));
     context_->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+    if (lowLatency) {
+        // Live capture: never trade latency for throughput. Frame threading
+        // buffers whole frames before returning any output, so slice-only
+        // execution plus the codec's low-delay flag keeps every decoded frame
+        // available as soon as it is complete.
+        context_->thread_type = FF_THREAD_SLICE;
+        context_->flags |= AV_CODEC_FLAG_LOW_DELAY;
+    }
     if (avcodec_open2(context_, codec, nullptr) < 0) {
         log::error("media", "decoder: avcodec_open2 failed");
         avcodec_free_context(&context_);
@@ -95,14 +103,14 @@ bool FFmpegVideoDecoder::openSoftware(const AVCodecParameters* codecParameters,
     }
 
     stats_ = DecoderStats{};
-    log::info("media", std::format("decoder: software decoder opened codec={} {}x{} pixFmt={} threads={} activeThreadType={}",
-        codec->name, context_->width, context_->height, static_cast<int>(context_->pix_fmt),context_->thread_count,context_->active_thread_type));
+    log::info("media", std::format("decoder: software decoder opened codec={} {}x{} pixFmt={} threads={} activeThreadType={} lowLatency={}",
+        codec->name, context_->width, context_->height, static_cast<int>(context_->pix_fmt),context_->thread_count,context_->active_thread_type,lowLatency));
     return true;
 }
 
 bool FFmpegVideoDecoder::openD3D12VA(const AVCodecParameters* codecParameters,
     int streamTimeBaseNum, int streamTimeBaseDen,
-    ID3D12Device* device, ID3D12CommandQueue* queue)
+    ID3D12Device* device, ID3D12CommandQueue* queue, bool lowLatency)
 {
     receiveStatus_ = DecodeReceiveStatus::NeedInput;
     if (context_ != nullptr) {
@@ -151,6 +159,10 @@ bool FFmpegVideoDecoder::openD3D12VA(const AVCodecParameters* codecParameters,
     context_->thread_count = 1;
     context_->get_format = SelectD3D12Format;
     context_->hw_device_ctx = av_buffer_ref(hwDeviceRef);
+    if (lowLatency) {
+        // Live capture must not wait for the decoder's reorder window.
+        context_->flags |= AV_CODEC_FLAG_LOW_DELAY;
+    }
     av_buffer_unref(&hwDeviceRef); // codec ctx holds its own reference now
 
     if (avcodec_open2(context_, codec, nullptr) < 0) {
@@ -167,8 +179,8 @@ bool FFmpegVideoDecoder::openD3D12VA(const AVCodecParameters* codecParameters,
     stats_ = DecoderStats{};
     hwAccelActive_ = true;
     gpuQueueWaitCount_ = 0;
-    log::info("media", std::format("decoder: d3d12va decoder opened codec={} {}x{} (shared Veyra device)",
-        codec->name, context_->width, context_->height));
+    log::info("media", std::format("decoder: d3d12va decoder opened codec={} {}x{} lowLatency={} (shared Veyra device)",
+        codec->name, context_->width, context_->height, lowLatency));
     return true;
 }
 

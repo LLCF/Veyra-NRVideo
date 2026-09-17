@@ -40,7 +40,8 @@ public:
     // Den` is the DEMUXER stream time base: decoder frame PTS pass through in
     // that base when the codec context itself carries none.
     bool openSoftware(const AVCodecParameters* codecParameters,
-        int streamTimeBaseNum = 0, int streamTimeBaseDen = 0, unsigned softwareThreads = 1);
+        int streamTimeBaseNum = 0, int streamTimeBaseDen = 0, unsigned softwareThreads = 1,
+        bool lowLatency = false);
 
     // D3D12VA hardware decode on the SHARED Veyra device (Playbook 13.2):
     // creates an AV_HWDEVICE_TYPE_D3D12VA context wrapping `device`/`queue`,
@@ -48,7 +49,7 @@ public:
     // records GPU queue waits on each frame's sync fence.
     bool openD3D12VA(const AVCodecParameters* codecParameters,
         int streamTimeBaseNum, int streamTimeBaseDen,
-        ID3D12Device* device, ID3D12CommandQueue* queue);
+        ID3D12Device* device, ID3D12CommandQueue* queue, bool lowLatency = false);
     void close();
 
     bool opened() const { return context_ != nullptr; }

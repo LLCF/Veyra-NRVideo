@@ -11,6 +11,8 @@ struct CapturePreferences {
     std::wstring videoPath,formatKey,audioPath;
     int audioMode=-1;
     unsigned colorOverride=0;
+    // N3: the one-time "this format is high cost" hint was already shown.
+    bool formatHintDismissed=false;
 };
 class CapturePreferenceStore {
     std::filesystem::path path_;
@@ -25,13 +27,14 @@ public:
         if(!file.read(reinterpret_cast<char*>(data.data()),size))return {};
         std::wistringstream in(data);std::wstring magic;int version=0;CapturePreferences result;
         if(!(in>>magic>>version>>std::quoted(result.videoPath)>>std::quoted(result.formatKey)>>result.audioMode>>std::quoted(result.audioPath)>>result.colorOverride)||
-           magic!=L"VEYRA_CAPTURE"||version!=1||result.audioMode< -3||result.audioMode>0||result.colorOverride>2)return {};
+           magic!=L"VEYRA_CAPTURE"||(version!=1&&version!=2)||result.audioMode< -3||result.audioMode>0||result.colorOverride>2)return {};
+        if(version>=2){int dismissed=0;if(!(in>>dismissed)||(dismissed!=0&&dismissed!=1))return {};result.formatHintDismissed=dismissed!=0;}
         in>>std::ws;return in.eof()?result:CapturePreferences{};
     }
     bool save(const CapturePreferences& p)const {
         if(p.audioMode< -3||p.audioMode>0||p.colorOverride>2)return false;
         std::error_code ec;std::filesystem::create_directories(path_.parent_path(),ec);if(ec)return false;
-        std::wostringstream out;out<<L"VEYRA_CAPTURE 1\n"<<std::quoted(p.videoPath)<<L' '<<std::quoted(p.formatKey)<<L' '<<p.audioMode<<L' '<<std::quoted(p.audioPath)<<L' '<<p.colorOverride<<L'\n';
+        std::wostringstream out;out<<L"VEYRA_CAPTURE 2\n"<<std::quoted(p.videoPath)<<L' '<<std::quoted(p.formatKey)<<L' '<<p.audioMode<<L' '<<std::quoted(p.audioPath)<<L' '<<p.colorOverride<<L' '<<(p.formatHintDismissed?1:0)<<L'\n';
         const auto data=out.str();if(data.size()>65536/sizeof(wchar_t))return false;const DWORD bytes=DWORD(data.size()*sizeof(wchar_t));
         auto tmp=path_;tmp+=L".tmp-"+std::to_wstring(GetCurrentProcessId());
         HANDLE file=CreateFileW(tmp.c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);if(file==INVALID_HANDLE_VALUE)return false;

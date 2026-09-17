@@ -1,5 +1,6 @@
 #pragma once
 #include "veyra/engine/BackendRecovery.h"
+#include "veyra/pipeline/ColorGradeTables.h"
 
 // EnhanceGraph - the real unified processing graph (Playbook R3.2).
 // Chains, per real frame:
@@ -81,6 +82,9 @@ struct EnhanceGraphDesc {
     bool highQualityPresentation = false; // PS5 ordinary scaling, no AI SR
     bool rgbInput = false;       // allocate direct RGBA ingestion before NGX creation
     bool yuy2Input = false;      // packed Y0 U Y1 V -> linear FP16; never subsample to NV12
+    // N1: packed capture ingress (1 BGR24, 2 RGB555, 3 RGB565, 4 UYVY, 5 YVYU).
+    // The driver's bytes are uploaded 1:1 and unpacked by the upload shader.
+    uint32_t packedInput = 0;
     bool stillImage = false;     // no temporal motion/FG history for a single image
     uint32_t nrWidth=0,nrHeight=0; // zero preserves legacy native working extent
     uint32_t flowWidth=0,flowHeight=0; // zero preserves legacy source-space NVOF extent
@@ -94,9 +98,18 @@ struct EnhanceGraphDesc {
     engine::NrSettings model;
     engine::ResidualSettings residual;
     engine::ProtectionSettings protection;
+    // Colour grade (plan v4). When color.enabled is false the stage does not
+    // exist: no tables are allocated, no constants are packed and the ingest
+    // shaders return their linear RGB untouched.
+    engine::ColorSettings color;
     std::wstring runtimeAbsPath; // absolute runtime_local/nvidia path
     // Optional stage instrumentation hook (GPU timing experiments).
     std::function<void(const char*)> stageMark;
+    // Output dither step for the 8/10-bit write paths, in coded units. -1 keeps
+    // the product default (one LSB while the colour grade is active, nothing
+    // otherwise) so ungraded output stays byte-identical; tests and diagnostics
+    // can force a value (0 disables it).
+    float outputDitherStep=-1.0f;
     // Isolated contract probes only. Unset by every product entry point.
     // Caller retains any supplied resources until graph drain/shutdown.
     std::function<void(NVSDK_NGX_Parameter*,ID3D12Resource*,ID3D12Resource*,uint32_t,uint32_t)> nrParameterProbe;
@@ -118,6 +131,9 @@ public:
     // created between the two phases - static descriptor views are only
     // safe after every allocation in the process has happened.
     bool initialize(const EnhanceGraphDesc& desc);
+    // Uploads a .cube payload (size^3 RGB triples, 0..1) into the optional 3D
+    // LUT the ingest shader samples. Without a LUT the strength stays 0.
+    bool setColorLut(const float* rgb,unsigned size);
     bool createViews();
 
     struct FrameOutputs {
@@ -228,6 +244,15 @@ public:
     ID3D12Resource* confidenceResource() const { return confTex_.Get(); }
     // Test-only borrowed ingress output. Read after process, restore NON_PIXEL_SHADER_RESOURCE.
     ID3D12Resource* diagnosticLinearInput() const { return srcRgba_.Get(); }
+    // Non-empty when the colour stage refused the referenced LUT (input space
+    // does not match the content domain). The engine surfaces this in the
+    // status panel so the refusal is visible, not only logged.
+    const std::wstring& colorLutNotice() const { return colorLutNotice_; }
+    // True when the colour stage exists in this graph (master switch on and not
+    // neutral). The encoder uses it to dither its 8/10-bit conversion output.
+    bool colorGradeActive() const { return colorActive_; }
+    // Effective dither step for the 8/10-bit output paths (0 = no dither).
+    float outputDitherStep() const;
     // Isolated diagnostics only: existing constant guidance, borrowed lifetime.
     // A caller writing before the first real frame must restore COMMON state.
     ID3D12Resource* diagnosticDepthResource(bool frameGeneration) const { return frameGeneration?depthTex_.Get():nrZeroDepth_.Get(); }
@@ -262,6 +287,10 @@ private:
     // DLSS-G runtime. Never touched on any other architecture.
     void applyAdaMfgUnlock();
     void applyAmpereMfgUnlock();
+    // RTX 30 only: must run before the NGX core initializes the provider, which
+    // resolves NvAPI_GPU_GetArchInfo once and caches the architecture decision.
+    void prepareAmpereFgSpoof();
+    bool ampereSpoofed_ = false;
     bool createComputePasses();
 
     gfx::D3D12DeviceContext& context_;
@@ -316,6 +345,24 @@ private:
     float toneMapPeakNits_=0; // latched per graph/source; never varies with frame brightness
     ComputePass rgbPass_,hdrVideoSrPass_;
     ComputePass downsamplePass_,residualPass_,flowAdaptPass_;
+    // --- colour grade (v4): CPU-baked tables read by the ingest shaders -----
+    bool colorActive_=false;
+    std::wstring colorLutNotice_;
+    bool colorDirty_=true;
+    ColorGradeTables colorTables_;
+    ComPtr<ID3D12Resource> colorCurveTex_,colorHueTex_,colorLumTex_,colorLutTex_;
+    ComPtr<ID3D12Resource> upColorCurve_,upColorHue_,upColorLum_;
+    float* mappedColorCurve_=nullptr;
+    float* mappedColorHue_=nullptr;
+    float* mappedColorLum_=nullptr;
+    unsigned colorLutSize_=0;
+    std::vector<float> colorLutUpload_;
+    unsigned colorLutPending_=0;
+    std::array<ComPtr<ID3D12Resource>,2> colorLutStaging_{};
+    unsigned colorLutStagingSlot_=0;
+    bool createColorResources();
+    void refreshColorTables();
+    void uploadColorTables(ID3D12GraphicsCommandList* list);
     DescriptorStager stager_;
     Microsoft::WRL::ComPtr<ID3D12Resource> sourceReferences_[2],baseReferences_[2];
     StateTracker tracker_;

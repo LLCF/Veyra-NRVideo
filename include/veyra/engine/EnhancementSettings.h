@@ -5,6 +5,8 @@
 #include <string>
 #include <string_view>
 #include "veyra/pipeline/ResolutionPlan.h"
+#include "veyra/source/CaptureBuffer.h"
+#include "veyra/engine/ColorSettings.h"
 namespace veyra::engine {
 enum class FrameGenerationBackend { Dlss, XeSS, Fsr };
 // Frame generation that runs inside the present sink (external frame
@@ -87,7 +89,9 @@ struct ProtectionSettings {
     std::array<ProtectionRect,4> regions{};
     bool operator==(const ProtectionSettings&)const=default;
     std::string validate()const{
-        if(!std::isfinite(featherPixels)||featherPixels<0||featherPixels>32)return "invalid protection feather";
+        // Upper bound is 64 px at the working extent; TiledImageProcessor keeps
+        // its tile halo above this value so export tiles cannot clip the ramp.
+        if(!std::isfinite(featherPixels)||featherPixels<0||featherPixels>64)return "invalid protection feather";
         for(auto r:regions){for(float v:{r.left,r.top,r.right,r.bottom})if(!std::isfinite(v)||v<0||v>1)return "invalid protection rectangle";
             if(r.left>r.right||r.top>r.bottom)return "inverted protection rectangle";}
         return {};
@@ -105,6 +109,9 @@ struct EnhancementSettings {
     // Capture audio ingress; requires a reconnect to take effect (the media type
     // is negotiated when the graph is built).
     CaptureAudioIngress captureAudio=CaptureAudioIngress::Auto;
+    // Capture video-pin allocator policy; requires a reconnect to take effect
+    // (the allocator is created while the capture graph is built).
+    source::CaptureBufferMode captureBuffer=source::CaptureBufferMode::Auto;
     // Capture ingest only: flip the incoming frame vertically. Exists because
     // some devices declare a DIB orientation that does not match their samples
     // (RGB24 upside-down reports); the capture source asks for top-down first,
@@ -121,6 +128,9 @@ struct EnhancementSettings {
     // default (NVENC CONSTQP / MFT quality mode). Only the export job consumes
     // it: preview never re-encodes.
     uint32_t exportBitrateMbps=0;
+    // Lightroom-aligned colour grade. Live: the engine uploads it per frame, so
+    // changing it never rebuilds the graph (see sameVideoConfiguration below).
+    ColorSettings color;
     pipeline::NrSizePolicy nrPolicy=pipeline::NrSizePolicy::Realtime;
     FlowQuality flow=FlowQuality::Balanced;
     OpticalFlowBackend opticalFlowBackend=OpticalFlowBackend::Nvidia;
@@ -140,6 +150,10 @@ struct EnhancementSettings {
         // Export-only fields: changing the bitrate must never invalidate the
         // running preview graph (the controller would otherwise rebuild it).
         video.exportBitrateMbps=other.exportBitrateMbps;
+        // Colour grade: parameters are uniform-only (never a rebuild), but the
+        // master switch changes the graph shape, so it stays in the comparison.
+        video.color=other.color;
+        video.color.enabled=color.enabled;
         return video==other;
     }
     void rejectVideoRequest(const EnhancementSettings& attempted,const EnhancementSettings& previous) {
@@ -156,6 +170,7 @@ struct EnhancementSettings {
         if(!revision)return "settingsRevision must be nonzero";
         if(nrRuntime!=NrRuntime::Original&&nrRuntime!=NrRuntime::Community&&nrRuntime!=NrRuntime::Ampere)return "invalid NR runtime";
         if(captureAudio<CaptureAudioIngress::Auto||captureAudio>CaptureAudioIngress::BitstreamPreferred)return "invalid capture audio ingress mode";
+        if(captureBuffer<source::CaptureBufferMode::Auto||captureBuffer>source::CaptureBufferMode::DriverDefault)return "invalid capture buffer mode";
         if(audioSync<AudioSyncMode::Automatic||audioSync>AudioSyncMode::Off||audioOffsetMs<-250||audioOffsetMs>250)return "invalid audio sync setting";
         if(!range(model.intensity,1)||!range(model.tone,1)||!range(model.structure,1))return "model parameter out of range";
         if(model.skin!=-1&&!range(model.skin,2))return "skin parameter out of range";
@@ -176,6 +191,7 @@ struct EnhancementSettings {
         // 0 = auto quality; explicit values are capped at 300 Mbps so a typo
         // cannot ask a driver for a nonsense rate.
         if(exportBitrateMbps>300)return "export bitrate out of range";
+        if(auto error=color.validate();!error.empty())return error;
         if(!pipeline::validNrSizePolicy(nrPolicy))return "invalid NR size policy";
         if(flow<FlowQuality::Performance||flow>FlowQuality::Quality||content<ContentRate::Transport||content>ContentRate::Capture60To30)return "invalid flow/content mode";
         return {};

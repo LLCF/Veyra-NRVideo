@@ -9,6 +9,7 @@ extern "C" {
 }
 
 #include <cstring>
+#include <format>
 
 namespace veyra::sink {
 namespace {
@@ -74,6 +75,77 @@ int bitstreamPreferenceOrder(BitstreamKind kind) {
 bool bitstreamIsIec61937(uint32_t subtypeData1) {
     return subtypeData1 == 0x00000092u;  // S/PDIF framed AC-3 carrier
 }
+
+BitstreamKind classifyIec61937DataType(uint16_t dataType) {
+    switch (dataType) {
+    case 0x01: return BitstreamKind::Ac3;
+    case 0x15: return BitstreamKind::Eac3;
+    case 0x0B:
+    case 0x0C:
+    case 0x0D: return BitstreamKind::Dts;
+    case 0x11: return BitstreamKind::DtsHd;
+    case 0x16: return BitstreamKind::TrueHd;
+    default: return BitstreamKind::None;
+    }
+}
+
+void Iec61937Probe::feed(const uint8_t* data, size_t bytes) {
+    if (verdict_ != 0 || data == nullptr || bytes == 0) return;
+    if (scanned_ >= kMaxScanBytes) {
+        verdict_ = -1;
+        log::info("capture-audio-carrier", std::format(
+            "no IEC 61937 burst in the first {} bytes of the carrier; treating it as linear PCM", scanned_));
+        return;
+    }
+    tail_.insert(tail_.end(), data, data + bytes);
+    size_t cursor = 0;
+    const size_t size = tail_.size();
+    while (cursor + kIecHeader <= size) {
+        if (scanned_ + cursor >= kMaxScanBytes) break;
+        if (std::memcmp(tail_.data() + cursor, kIecSync, 4) != 0) {
+            ++cursor;
+            continue;
+        }
+        const uint16_t dataType = uint16_t(tail_[cursor + 4]) | (uint16_t(tail_[cursor + 5]) << 8);
+        const size_t payloadBits = size_t(tail_[cursor + 6]) | (size_t(tail_[cursor + 7]) << 8);
+        const bool plausible = payloadBits >= 8 && classifyIec61937DataType(dataType) != BitstreamKind::None;
+        if (plausible) {
+            if (bursts_ == 0) type_ = dataType;
+            if (dataType == type_) {
+                ++bursts_;
+                if (bursts_ >= 2) {
+                    verdict_ = 1;
+                    scanned_ += cursor + kIecHeader;
+                    log::info("capture-audio-carrier", std::format(
+                        "IEC 61937 detected on the PCM-labelled carrier: dataType=0x{:02X} ({}) bursts={} scannedBytes={}",
+                        type_, bitstreamKindName(classifyIec61937DataType(type_)), bursts_, scanned_));
+                    tail_.clear();
+                    return;
+                }
+            }
+        }
+        // A false sync inside random PCM must not stall the scan.
+        cursor += 4;
+    }
+    scanned_ += cursor;
+    // Keep only what a burst header could still straddle.
+    if (cursor < size) tail_.erase(tail_.begin(), tail_.begin() + cursor);
+    else tail_.clear();
+    // Reaching the budget inside this call must be as final as reaching it on
+    // the next one, otherwise a single large delivery would leave the verdict
+    // pending forever.
+    if (verdict_ == 0 && scanned_ >= kMaxScanBytes) {
+        verdict_ = -1;
+        log::info("capture-audio-carrier", std::format(
+            "no IEC 61937 burst in the first {} bytes of the carrier; treating it as linear PCM", scanned_));
+    }
+}
+
+bool Iec61937Probe::concluded() const { return verdict_ != 0; }
+bool Iec61937Probe::detected() const { return verdict_ == 1; }
+uint16_t Iec61937Probe::dataType() const { return verdict_ == 1 ? type_ : 0; }
+size_t Iec61937Probe::scannedBytes() const { return scanned_; }
+unsigned Iec61937Probe::burstCount() const { return bursts_; }
 
 struct BitstreamDecoder::Impl {
     AVCodecContext* context = nullptr;

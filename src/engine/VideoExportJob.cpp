@@ -17,6 +17,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/mathematics.h>
 #include <libavutil/pixdesc.h>
+#include <libavutil/mastering_display_metadata.h>
 }
 namespace veyra::engine {
 namespace { std::string utf8(const std::wstring& s){const int n=WideCharToMultiByte(CP_UTF8,0,s.data(),int(s.size()),nullptr,0,nullptr,nullptr);std::string r(n,0);WideCharToMultiByte(CP_UTF8,0,s.data(),int(s.size()),r.data(),n,nullptr,nullptr);return r;} }
@@ -82,6 +83,12 @@ bool exportVideo(const std::wstring& input,const std::wstring& output,PlayerOpti
         info=source.info(); // retain this frame for the export, without decoding it again
         const auto resolution=pipeline::ResolutionPlan::make({info.width,info.height},options.sr,pipeline::NrSizePolicy::Native,true,options.settings.revision,options.settings.srTarget);
         pipeline::EnhanceGraphDesc gd;gd.hdrInput=gd.hdrOutput=info.color.isHdrPath();hdrExport=gd.hdrOutput;
+        // Plan v5.3: the grade changes the peak and the content light distribution.
+        // Recomputing MaxCLL/MaxFALL needs a full pre-pass before the header is
+        // written, which this exporter does not do yet, so say so instead of
+        // letting the user assume the static metadata tracks the graded output.
+        if(gd.hdrOutput&&options.settings.color.enabled&&!options.settings.color.neutral())
+            veyra::log::warn("color-export","HDR export with the colour grade active: MaxCLL/MaxFALL are carried over from the source and NOT recomputed for the graded output (marked as not updated)");
         gd.captureBitDepth=info.color.pixelFormat==pipeline::SourcePixelFormat::P010?10:info.color.pixelFormat==pipeline::SourcePixelFormat::P016?16:8;
         if(gd.hdrOutput&&!hevc){failureReason=L"HDR视频请使用HEVC Main10导出（选择HEVC）";break;}
         // Adapter gate mirrors the preview rules (EngineController): DLSS NR,
@@ -93,7 +100,7 @@ bool exportVideo(const std::wstring& input,const std::wstring& output,PlayerOpti
         if(options.nr&&!nvidiaFeatures)fgNote+=fgNote.empty()?L"当前显卡不能使用 DLSS NR，本次导出自动关闭 NR":L"；当前显卡不能使用 DLSS NR，本次导出自动关闭 NR";
         if(options.sr&&!srAvailable)fgNote+=fgNote.empty()?L"当前显卡不能使用所选超分，本次导出关闭超分":L"；当前显卡不能使用所选超分，本次导出关闭超分";
         if(!nvidiaFeatures&&srAvailable)fgNote+=fgNote.empty()?L"本次导出使用 AMD FSR 超分":L"；本次导出使用 AMD FSR 超分";
-        gd.sourceWidth=info.width;gd.sourceHeight=info.height;gd.workWidth=resolution.base.width;gd.workHeight=resolution.base.height;gd.nrWidth=resolution.nr.width;gd.nrHeight=resolution.nr.height;gd.flowWidth=resolution.flow.width;gd.flowHeight=resolution.flow.height;gd.enableSr=srAvailable;gd.videoSrQuality=options.settings.videoSrQuality;gd.enableNr=options.nr&&nvidiaFeatures;gd.nrRuntime=options.settings.nrRuntime;gd.enableFg=options.fg&&nvidiaFeatures;gd.fgMultiplier=options.fgMultiplier;gd.frameGenerationBackend=options.settings.frameGenerationBackend;gd.enableNvofStandalone=options.nr&&nvidiaFeatures;gd.model=options.settings.model;gd.residual=options.settings.residual;gd.protection=options.settings.protection;gd.settingsRevision=options.settings.revision;gd.flowQuality=options.settings.flow;gd.opticalFlowBackend=options.settings.opticalFlowBackend;gd.amdFlowHalfResolution=options.settings.amdFlowHalfResolution;gd.contentRate=options.settings.content;gd.runtimeAbsPath=runtime::localRuntimeDirectory().wstring();
+        gd.sourceWidth=info.width;gd.sourceHeight=info.height;gd.workWidth=resolution.base.width;gd.workHeight=resolution.base.height;gd.nrWidth=resolution.nr.width;gd.nrHeight=resolution.nr.height;gd.flowWidth=resolution.flow.width;gd.flowHeight=resolution.flow.height;gd.enableSr=srAvailable;gd.videoSrQuality=options.settings.videoSrQuality;gd.enableNr=options.nr&&nvidiaFeatures;gd.nrRuntime=options.settings.nrRuntime;gd.enableFg=options.fg&&nvidiaFeatures;gd.fgMultiplier=options.fgMultiplier;gd.frameGenerationBackend=options.settings.frameGenerationBackend;gd.enableNvofStandalone=options.nr&&nvidiaFeatures;gd.model=options.settings.model;gd.residual=options.settings.residual;gd.protection=options.settings.protection;gd.color=options.settings.color;gd.settingsRevision=options.settings.revision;gd.flowQuality=options.settings.flow;gd.opticalFlowBackend=options.settings.opticalFlowBackend;gd.amdFlowHalfResolution=options.settings.amdFlowHalfResolution;gd.contentRate=options.settings.content;gd.runtimeAbsPath=runtime::localRuntimeDirectory().wstring();
         // One attempt per frame-generation request. A rejected multiplier is a
         // capability statement, not an infrastructure failure: retry at 2X (the
         // floor every DLSS-G capable GPU honours) and only then fall back to a
@@ -133,6 +140,17 @@ bool exportVideo(const std::wstring& input,const std::wstring& output,PlayerOpti
         videoStream=avformat_new_stream(mux,nullptr);if(!videoStream)break;videoStream->time_base={rate.den,rate.num};videoStream->avg_frame_rate=rate;
         auto* cp=videoStream->codecpar;cp->codec_type=AVMEDIA_TYPE_VIDEO;cp->codec_id=hevc?AV_CODEC_ID_HEVC:AV_CODEC_ID_H264;cp->width=gd.workWidth;cp->height=gd.workHeight;cp->format=AV_PIX_FMT_YUV420P;cp->color_range=AVCOL_RANGE_MPEG;cp->color_space=AVCOL_SPC_BT709;cp->color_primaries=AVCOL_PRI_BT709;cp->color_trc=AVCOL_TRC_IEC61966_2_1;
         if(gd.hdrOutput){cp->format=AV_PIX_FMT_YUV420P10LE;cp->color_space=AVCOL_SPC_BT2020_NCL;cp->color_primaries=AVCOL_PRI_BT2020;cp->color_trc=AVCOL_TRC_SMPTE2084;cp->profile=AV_PROFILE_HEVC_MAIN_10;}
+        // Plan v5.3: this exporter cannot recompute content light levels (that
+        // needs a full pre-pass before the header is written), so the source
+        // declaration is carried into the 'clli' box verbatim and the graded case
+        // is flagged as "not updated" instead of silently changing meaning.
+        if(gd.hdrOutput&&info.color.hdrMaxCllNits>0.0f){
+            if(auto* side=av_packet_side_data_new(&cp->coded_side_data,&cp->nb_coded_side_data,AV_PKT_DATA_CONTENT_LIGHT_LEVEL,sizeof(AVContentLightMetadata),0)){
+                auto* cll=reinterpret_cast<AVContentLightMetadata*>(side->data);
+                cll->MaxCLL=unsigned(info.color.hdrMaxCllNits);
+                cll->MaxFALL=unsigned(info.color.hdrMaxFallNits);
+            }else failureReason=L"无法写入内容亮度元数据（MaxCLL/MaxFALL）";
+        }
         auto inputUtf8=utf8(input);
         if(avformat_open_input(&audioInput,inputUtf8.c_str(),nullptr,nullptr)<0||avformat_find_stream_info(audioInput,nullptr)<0){progress(0,L"无法读取源音轨信息，已停止导出");break;}
         {

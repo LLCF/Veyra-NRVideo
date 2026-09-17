@@ -29,3 +29,20 @@ float3 HdrRestore(float3 base,float3 proxy,float3 enhanced) {
     float gate=smoothstep(0,.02,y)*(1-smoothstep(.75,.995,peak));
     return base+clamp(delta,-.5,.5)*(203.0/80.0)*gate;
 }
+
+// Triangular (TPDF) output dither keyed by the destination pixel. Two
+// independent uniform hashes give a triangular distribution instead of a
+// visible ordered pattern, so the quantisation error of an 8/10-bit write
+// becomes uncorrelated noise instead of banding. `step` is the target's
+// quantisation step (1/255, 1/1023, ...); 0 disables the dither entirely.
+float OutputDither(uint2 pixel, float step)
+{
+    if (step <= 0.0) return 0.0;
+    uint h1 = pixel.x * 1973u + pixel.y * 9277u + 26699u;
+    h1 ^= h1 >> 16u; h1 *= 0x7feb352du; h1 ^= h1 >> 15u; h1 *= 0x846ca68bu; h1 ^= h1 >> 16u;
+    uint h2 = pixel.x * 1327u + pixel.y * 4591u + 101u;
+    h2 ^= h2 >> 15u; h2 *= 0x2c1b3c6du; h2 ^= h2 >> 12u; h2 *= 0x297a2d39u; h2 ^= h2 >> 15u;
+    const float r1 = float(h1 & 0xFFFFFFu) / 16777215.0;
+    const float r2 = float(h2 & 0xFFFFFFu) / 16777215.0;
+    return (r1 - r2) * step;
+}

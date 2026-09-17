@@ -529,7 +529,10 @@ bool MfVideoEncoder::convertToNv12(unsigned frameSlot,bool generated){
     states_.transition(list,color,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     states_.transition(list,y_.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     states_.transition(list,uv_.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    const float dims[8]={std::bit_cast<float>(width_),std::bit_cast<float>(height_),0,0,0,0,0,0};
+    // reserved.y = output dither step (see NvencD3D12Encoder): the Media
+    // Foundation encoder must dither a graded frame exactly like the NVENC path
+    // so preview/export stay consistent.
+    const float dims[8]={std::bit_cast<float>(width_),std::bit_cast<float>(height_),0,std::bit_cast<float>(graph_?graph_->outputDitherStep():0.0f),0,0,0,0};
     convert_.bind(list,dims,gpuHandleOf(convert_,frameSlot+(generated?2:0)).ptr,gpuHandleOf(convert_,8).ptr);
     list->Dispatch((width_+15)/16,(height_+15)/16,1);
     states_.uavBarrier(list,y_.Get());

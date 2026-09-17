@@ -1,5 +1,882 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-17 色彩页 UI：颜色分级四色轮（专业型第二批）
+
+把颜色分级从 12 条滑块（4 区 × 色相/饱和度/明亮度）换成**四个自绘色轮**，就是专业调色面板的样子：
+
+- 新增窗口类 `VeyraColorWheel`（`colorWheelProc`）：色相/饱和度圆盘（GDI+，按尺寸缓存位图）、
+  可拖动的白点（含中心十字位）、圆盘下方的**明亮度条**（中点起算，向上橙色、向下灰色，方向一眼可读）、
+  区域名在盘上方、`H xxx° S xx L ±xx` 读数在条下方；
+- 交互：盘内拖动 = 色相+饱和度；亮度条拖动 = 明亮度；**双击复位**该区；拖动期间不写撤销历史，
+  松手时压入一条历史（避免一次拖动塞满 32 步栈）；
+- 布局：2×2 网格（每格 190 高），后面接“混合/平衡”两条滑块；模型/着色器/预设 schema 完全没动，
+  只是换了编辑这 12 个字段的控件；
+- 测试钩子：`colourWheelControlId` / `settingsColorWheelTestPoint` / `settingsColorWheelTestBarPoint` /
+  `settingsColorScrollToTest`（几何只写一处，烟测按色相/饱和度要坐标）。
+
+**验证**：`--smoke-color` **exit 0**，新增三步断言全部通过——
+`colour wheel drag hue=120.1 saturation=79.8 pass=true`（目标 120/80）、
+`colour wheel luminance bar=-50.0 pass=true`、`colour wheel double-click reset pass=true`；
+`veyra_ui_contract_tests` exit 0（384 布局用例）。
+
+真机截图：`logs/color/ui-preview-wheels2.png`。
+
+**下一批**：真曲线编辑器（网格 + 可拖控制点，RGB/R/G/B 通道）、混色器“校正”下拉 + 8 色圆点条、
+分组眼睛 bypass（schema v19）、分区图标与间距抛光。
+
+## 2026-09-17 色彩页 UI：专业型排版第一步（渐变轨道 + 数值文本 + 交互补全）
+
+用户反馈“全是滑条、没有专业感”，对着 Lightroom / 专业调色面板重做色彩页的观感与交互。
+
+**本轮落地（第一批）**
+
+- **渐变轨道**：色温（蓝→黄）、色调（绿→品红）、自然饱和度/饱和度（蓝→绿→黄→红）、
+  混色器/颜色分级的色相行（彩虹）改为渐变轨道，一眼看出滑块方向；其它行保持“轨道 + 橙色已用段 + 圆形滑块”，
+  但绘制改由色彩页自己的画笔完成（`colourSliderKeys` 接管 WM_PAINT，输入仍走原有轨迹条逻辑）；
+- **数值当文本**：每行的数值框去掉底色（`veyra.flat` + 面板底色），像 Lightroom 那样“左标签、右数值、下滑轨”；
+- **交互补全**（方案 §3.3 + §9 的 P1 清单）：滑块**双击复位**、**Home 复位**、**Alt+拖动精修**（只走 1/10 位移，
+  松手不再跳）、**按住看原图**（按住显示无调色原图，松开恢复；用中性调色实现，**不重建管线**）、
+  **复制/粘贴**色彩设置、**撤销/重做**（32 步历史，一键还原与每次编辑都可回退）；
+- 顺带修掉两个 UI 真 bug：黑白开关被建到了错误的检查器页（`group=3` 而不是 2）导致**控件不可见且点击被丢弃**；
+  新增的撤销分支用 `801..824` 区间匹配，**吞掉了 820 的通知**并随后用同步把勾选还原。
+
+**验证**：`veyra_ui_contract_tests` exit 0（384 布局用例）；`--smoke-color` **exit 0**（含黑白开关 / 黑白行 / 预设 / 折叠 / 撤销全流程）。
+
+**下一批（同一分支继续，尚未开始）**：颜色分级四色轮（阴影/中间调/高光/全局的自绘色轮 + 色相/饱和度读数）、
+真曲线编辑器（网格 + 可拖控制点，RGB/R/G/B 通道）、混色器“校正”下拉 + 8 色圆点条（一次只显示一个色系的 3 条滑块）、
+分组“眼睛”bypass、分区图标与间距抛光。
+
+## 2026-09-17 色彩页 P1：输出抖动（平面断层 → 量化噪声）
+
+方案 §4.1 第 4 条要求“进 8 位 SDR 呈现/导出前加三角抖动”。实现：
+
+- `HdrColor.hlsli` 新增 `OutputDither(pixel, step)`：两次独立哈希得到 TPDF（三角分布）噪声，
+  按键于**目标像素**，不做可见的有序图案；`step` 为目标量化步长（8 位 1/255、10 位 1/1023），0 = 关闭；
+- 预览/会签路径（`ScaleBlit.hlsl`）：在**编码之后**抖动，SDR 写 R8G8B8A8 时按 1/255，
+  HDR10 写 R10G10B10A2（PQ）时按 1/1023；FP16 scRGB 目标不抖动（没有量化）；
+- 导出路径（`RgbToNv12.hlsl`）：`reserved.y` 传抖动步长，亮度与色度平面各自抖动
+  （NVENC 与 Media Foundation 两个编码器都接上，保证预览/导出/截图一致）；
+- **只在真的调色时抖动**：`EnhanceGraph::outputDitherStep()` 在总开关关闭**或表是中性**时返回 0，
+  所以“关闭 / 开启但中性 = 与旧链路逐字节一致”的合同不被破坏（GPU 合同测试仍在守这条）；
+  诊断/测试可用 `EnhanceGraphDesc::outputDitherStep` 强制指定（-1 = 自动）。
+
+**验收（真机 GPU，`veyra_color_grade_gpu_tests`）**：把 112→128 的灰阶斜坡压过 `contrast=-100` 的调色，
+理想输出每像素只前进约 0.25 个码值；同一张图渲染两次：
+
+- 不抖动：最长连续相同码值 **16 px**（就是肉眼看到的色带）；
+- 抖动 1 LSB：最长连续相同码值 **5 px**，全部检查 exit 0。
+
+三入口一致性复测（`scripts/acceptance/color-three-entry-consistency.ps1`）：
+截图 vs 导出帧 49.29 → **51.90 dB**（两边抖动用同一套像素键，量化误差一致），
+关调色基线 50.30 dB 不变，调色前后差异仍然可见（19.61 / 18.29 dB）。
+
+## 2026-09-17 色彩页 P1：黑白混色器（T4 补完）+ 修“改了 shader 却不重编译”的构建漏洞
+
+**黑白混色器现在真的能用**。之前色彩页里那 8 条“黑白”滑块是**死控件**：模型、预设、UI 都在，
+但 `ColorGrade.hlsli` / `ColorGradeTables` 里根本没有 `blackWhite`，拖动毫无效果。现在：
+
+- 烘焙（`ColorGradeTables::bake`）：每条色相带的黑白权重按同一套带权重合成，写进**色相表未使用的
+  alpha 通道**（`t9` 的 a），不新增纹理/常量槽位；`flags.z` 标记黑白模式；
+- 着色器：黑白模式下画面转单色，每个色系按其权重把灰阶提亮/压暗（±100%，Lightroom 黑白混色器语义），
+  此时 HSL 混色行自然失效，和 LR 一致；
+- UI：混色器组新增“黑白混色器（把画面转成黑白）”开关（id 820），并把状态纳入 `syncColorControls()`；
+- 验收：CPU 断言 7 条（identity 清位、绿带权重、远带不受影响、打包 flags、关模式时权重仍保留、
+  identity 表 B&W 列为 0）+ GPU 4 条（真图渲染出单色、绿带把灰阶从 141 提到 174、
+  关掉后恢复 64/160/64 的彩色）+ 烟测新增两步（开关到引擎、绿带黑白行到引擎）。
+
+**构建漏洞（会影响以后所有人）**：`cmake/VeyraShaders.cmake` 的 dxc 依赖只列了 `.hlsl` 与两个固定
+`.hlsli`，**没有列 `ColorGrade.hlsli`**。后果：只改颜色核心头文件时 `.dxil` 不重编译，程序继续跑旧
+shader——第一次改黑白时就撞上了（改完没效果，差点误判为逻辑错误）。现在改为 `file(GLOB shaders/*.hlsli)`
+全量依赖 + `CMAKE_CONFIGURE_DEPENDS`，任何 `.hlsli` 改动都会触发重编译（已验证：本次 `RgbToLinear.dxil`
+从 8596 → 8720 字节并更新了时间戳）。
+
+**回归**：`veyra_color_grade_tests`（30 项）exit 0；`veyra_color_grade_gpu_tests`（14 项）exit 0；
+`veyra_color_lut_tests` / `veyra_color_look_tests` exit 0；`--smoke-color` **exit 0**（含新步骤）。
+
+## 2026-09-17 色彩页 P1：HDR 导出的 MaxCLL/MaxFALL 兜底（原样带上 + 标注未更新）
+
+方案 §5.3 要求“能测就测；不能测时保留原值并标注未更新，不允许静默写入与实际不符的静态元数据”。
+本轮实现前半段的兜底：`VideoExportJob` 在建立 HEVC Main10 输出流时，把源的 `MaxCLL/MaxFALL`
+写进 `videoStream->codecpar->coded_side_data`（`AV_PKT_DATA_CONTENT_LIGHT_LEVEL`），
+FFmpeg 的 movenc 会据此写 MP4 `clli` box；调色开启时额外写
+`[color-export] … carried over from the source and NOT recomputed … (marked as not updated)` 警告。
+
+实测（`%TEMP%\veyra-hdr\hdr-sample.mp4`，x265 写入 `max-cll=1000,400` 的 HDR10 素材）：
+
+- 源侧日志：`[hdr-metadata] … contentSource=frame maxCLL=1000 maxFALL=400`；
+- `veyra.exe hdr-sample.mp4 --export-out hdr-export.mp4 --hevc --max-frames 6` → exit 0，
+  ffprobe：`side_data_type=Content light level metadata, max_content=1000, max_average=400`，
+  输出仍为 `smpte2084 / bt2020 / HEVC Main10`；
+- 加 `--color-grade=1.0`：警告出现、元数据同样带上、画面确实被调色（与不调色导出同帧 PSNR 5.39 dB）。
+
+**仍未做**：真正“重算” MaxCLL/MaxFALL（写 header 前的全片直方图两遍流程）与 mastering display `mdcv` 写入。
+
+## 2026-09-17 色彩页 P1：T6 收尾——三入口一致性 + 全量回归 + 交付报告
+
+**三入口一致性验收抓到一个功能缺口并修掉**
+
+新脚本 `scripts/acceptance/color-three-entry-consistency.ps1`（静态图案，截图关/开 + 导出关/开四轮）：
+
+- 修复前：截图（预览链路）开了调色 Y=99.25，导出帧还是 Y=75.50 → **导出完全没有应用调色**
+  （screenshot vs export 只有 19.50 dB）。根因：`VideoExportJob` 与 `EngineControllerImage`
+  构造 `EnhanceGraphDesc` 时漏了 `gd.color=options.settings.color`，只有主引擎设了。
+  已给两条导出链路补上，并给 HDR+调色导出加一条“MaxCLL/MaxFALL 未重算”的显式警告。
+- 修复后：截图 vs 导出帧 **49.29 dB**（开调色）/ **50.30 dB**（关调色），调色前后差异两条链路都
+  18–20 dB（肉眼可见），全部通过。结果：`logs/color/three-entry/ec292b53eb8048648f8887911f50a52d/result.json`。
+
+**全量回归**
+
+- `scripts/gates/delivery.ps1`（最终代码上重跑）→ **DELIVERY SHORT GATE PASS**
+  （`logs/delivery/fbb42f3f08e8482a96c817d3883569e0/result.json`）；
+- 52 个测试程序逐个单跑（带各自所需参数）：**45 个 exit 0**；未执行 7 个，全部是硬件/素材/放置策略
+  原因：`capture_tests`（需采集卡）、`live_presentation_tests`、`ps5_quality_tests`、
+  `ps5_hw_image_tests`、`hw_import_image_tests`（需 PS5 素材）、`nr_ampere_tests`
+  （`nr-adapter` 按策略拒绝非 staging/experimental 路径的运行库）、`wasapi_input_tests`
+  真实端点（其 `--offline` 分支已通过）。没有用“跳过”冒充通过。
+
+**交付报告**：`docs/COLOR_TAB_P1_DELIVERY_2026-09-17.md`（含每个里程碑的证据、量测数据、
+本轮修掉的 6 个真实缺陷、未完成项与人工验收步骤）。
+
+未完成项照实写进报告：导出 MaxCLL/MaxFALL 重算、分组眼睛 bypass、点曲线编辑器、黑白开关、
+`.vpcolor` 不带 LUT 文件本体。分支仍未合并 main。
+
+## 2026-09-17 色彩页 P1：修 .cube 载入崩溃 + 量到调色真实 GPU 成本（T2b 计时项收口）
+
+**修掉一个会让用户直接崩程序的 bug（GPU 合同测试抓出来的，不是测试问题）**
+
+现象：`veyra_color_grade_gpu_tests` 在“导入 .cube 并建立图”这一段**随机崩**（8 次里 2–3 次，
+`0xC0000409` fail-fast）。逐步插桩定位到 `EnhanceGraph::initialize` 里 LUT 载入成功后的那一条日志：
+
+```cpp
+std::format("lut loaded name={} size={}",
+    std::string(desc_.color.lutNameString().begin(), desc_.color.lutNameString().end()), lut.size)
+```
+
+`lutNameString()` 每次返回**一个新的临时 `std::wstring`**，`.begin()` 与 `.end()` 来自两个不同的
+临时对象，区间构造算出的长度是垃圾值 → 越界读（有时只是读到别处，有时直接 fail-fast）。
+也就是说：**任何用户只要在色彩页选一个 .cube，就可能闪退**，而且概率性、难复现。
+
+修法：加文件内 `utf8Of()`（`WideCharToMultiByte(CP_UTF8)`）只转换一次再进日志；并顺手修正
+`.cube` 上传的 staging 布局——原来用 `rowPitch = size*16`，除 16 整除的尺寸外都不满足 D3D12
+要求的 256 字节对齐（2/3/17/33 这些常见尺寸全中），驱动可以据此越界读写 staging buffer；
+现在按 256 对齐并逐行写入。
+
+**调色 GPU 成本（原计划要求 `gpuGradeP95Ms` + 基线对比）**
+
+色彩 pass 按 v4 方案**融合在 ingest 的同一次 dispatch 里**，shader 执行时间无法在 GPU 上单独打点，
+所以不做假数据：改用**同一素材、同一会话参数、只切换总开关**的 A/B，量 `GpuStage::Color`
+（= 转换 + 调色，融合派发）的 p95。新增诊断开关 `--color-grade=<EV>`（与 `--flow-amd` 同族的
+命令行实验口），`player-timing` 每秒一条自带窗口 p95。
+
+命令：`veyra.exe <clip> --smoke-seconds 20 [--color-grade=1.0]`，取播放稳定后的 8/7 个采样点均值：
+
+| 素材 | 关闭总开关 | 开启 +1 EV | 差值（= 调色成本） | 方案预算 |
+| --- | --- | --- | --- | --- |
+| 1920×1080 60fps | 0.034 ms | 0.175 ms | **+0.141 ms** | ≤0.15 ms ✔ |
+| 3840×2160 30fps | 0.308 ms | 0.639 ms | **+0.331 ms** | ≤0.35 ms ✔ |
+
+原始日志：`logs/color/grade-ab/{1080p,2160p}-{off,on}.log`（素材由 `%TEMP%\veyra-p1-fixture.mp4`
+经 ffmpeg 放大生成）。结论按融合链路如实写：这是**同一次 dispatch 的增量**，
+不是独立 pass 的耗时；`player-timing` 因此没有新增 `gpuGradeP95Ms` 字段（加独立时间戳就必须拆成
+第二个 dispatch，违反 v4“单一融合 pass、不新增链路”）。
+
+## 2026-09-17 色彩页 P1：T6 前半——HDR 线性域调色与 LUT 输入空间拒绝（GPU 验证）
+
+**HDR 必须在线性光里调，且必须在 tone mapping 之前**（方案 §5.1/§5.2）。在既有 `HdrColorTests`
+里加了两项真机 GPU 验证（PQ 与 HLG、有限/全范围各一轮，`hdrToneTests::luminance` 是独立的
+BT.2390 参考实现）：
+
+1. **+1 EV = 场景线性 ×2**：调色开启 +1 EV 后，HDR→SDR 输出必须等于“把参考亮度翻倍再 tone map”。
+   结果 `HDR_TONE_GRADE hlg=0 linearError=0.00120`、`hlg=1 linearError=1.04e-05`（阈值 0.014），
+   说明曝光确实作用在线性域、且在 tone mapping 之前；
+2. **输入空间不匹配必须拒绝**：HDR 内容选 sRGB 显示参考 → `colorLutNotice()` 非空、LUT 不参与
+   （像素与“无 LUT”逐字节一致）。SDR 侧的对称用例（SDR 内容选 PQ）加在
+   `veyra_color_grade_gpu_tests`：`PASS a PQ LUT on SDR content is refused with a notice instead
+   of applied silently`。
+
+拒绝结果会通过 `PlayerSnapshot::colorStatus` 追加显示（状态面板“实际颜色链路”一行可见），
+不只写在日志里。日志：`[color-grade] lut input space rejected space=… hdrContent=…`。
+
+**回归**：`veyra_color_grade_tests` 23/23、`veyra_color_grade_gpu_tests`（连续 8 次）全过、
+`veyra_color_lut_tests`、`veyra_color_look_tests`、`veyra_hdr_color_tests`、
+`veyra_ui_contract_tests`、`veyra_repair_preset_tests`、`veyra_repair_contract_tests` 191/0 全 exit 0。
+
+**T6 剩余（未做，不冒充完成）**：导出的 MaxCLL / MaxFALL 重算（导出是流式写头，静态元数据要在
+写 header 前就知道，需要额外一遍全片直方图 + NVENC SEI 接线）、预览/截图/导出三入口像素一致性
+验收、交付闸门与交付报告。
+
+## 2026-09-17 色彩页 P1：T5-b 命名色彩预设 + `.vpcolor` + 修两个空下拉（真机烟测通过）
+
+新增 `include/veyra/engine/ColorLookStore.h` + `src/engine/ColorLookStore.cpp`：
+
+- 文件 `runtime_local/color-looks.v1`，头 `VEYRA_COLOR_LOOKS 1`，每行 `"名字" <ColorSettings 块>`
+  （复用 `ColorSettings.h` 里的共享读写，和 PresetStore v18 是同一套参数块，不会两处漂移）；
+- 保存走临时文件 + `MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH` 原子替换，写失败回滚内存表并
+  保留原文件；遇到损坏行**拒绝覆盖原文件**并报错；名字去空白、拒路径分隔符与控制字符、上限 64 套；
+- `.vpcolor` 导入导出：导出写 `VEYRA_COLOR_LOOK <名>` + 同一参数块；导入校验魔数/版本/名字/尾部残余；
+- 15 项单测 `veyra_color_look_tests`（保存/覆盖/删除/列举/上限/轮转/`.vpcolor` 往返/坏文件保留原文件）
+  → exit 0。
+
+色彩页新增 LUT 组与预设工具条（id 803 预设下拉 / 804 名字 / 805 保存 / 806 应用 / 807 删除 /
+808 导出 / 809 导入，LUT 817 下拉 / 818 导入 `.cube` / 819 输入空间），全部走原生文件对话框。
+
+**修掉两个真机 bug（都是烟测抓出来的产品缺陷，不是测试问题）**
+
+1. **预设下拉和 LUT 下拉永远是空的**：`refreshColourLooks()` / `refreshColourLuts()` 用
+   `SendDlgItemMessageW(window,803/817,...)`，而这两个控件挂在滚动面板 `body` 上，
+   不是 `window` 的直接子窗口 → `CB_RESETCONTENT/CB_ADDSTRING` 全部静默失败、
+   `CB_GETCURSEL` 返回 -1。改为用控件自身句柄发消息。用户侧表现就是"下拉点开没东西、
+   点应用提示先选一个预设"。
+2. **保存后选中项被清空**：`refreshColourLooks()` 固定把选择重置到"（未选择预设）"，
+   保存/导入完立刻点应用必然落空。现在保存/导入后自动选回刚写入的那一项。
+
+另外给 806 应用路径加了 `[color-ui] preset apply index=… exposure=… lut=… accepted=…` 日志，
+并在烟测里加了 2 秒一条的进度心跳（`tick elapsed=… step=… exposure=…`），
+用来区分"UI 线程卡住"和"状态机停在某一步"——本轮就是靠它排除了前者。
+
+**真机烟测**（RTX 5070，`%TEMP%\veyra-p1-fixture.mp4` 1280×720@30 12s）：
+`veyra.exe <clip> --smoke-color --smoke-seconds 18` → **exit 0**，日志序列完整：
+总开关 → 曝光 1.00 到引擎 → 一键还原 → 撤销 → 混合 77 → 保存预设(count=1) →
+应用预设(index=1 exposure=1.000 accepted=true) → 删除 → 折叠位记忆 → 总开关回关。
+
+**回归**：`veyra_color_grade_tests` 23/23 exit 0；`veyra_color_grade_gpu_tests` 10/10 exit 0；
+`veyra_color_lut_tests` exit 0；`veyra_color_look_tests` exit 0；`veyra_ui_contract_tests` exit 0；
+`veyra_repair_preset_tests` 全通过（注意要传**文件路径**，传目录会 exit 1）；
+`veyra_repair_contract_tests` 191/0。
+
+**未做（T6）**：`GpuStage::Grade` 独立计时（融合派发无法单独打点，须用 A/B 对比如实报告）、
+HDR 标准处理与 MaxCLL/MaxFALL 重算、预览/截图/导出三入口像素一致性、全量交付闸门与报告。
+
+## 2026-09-17 色彩页 P1：T5-a `.cube` 解析、导入与引擎侧解析（GPU 验收通过）
+
+新增 `include/veyra/engine/ColorLut.h` + `src/engine/ColorLut.cpp`（放在 `veyra_base`，供
+pipeline 与设置/导入路径共用）：
+
+- **解析**：Adobe Cube LUT Specification 1.0 —— `TITLE` / `LUT_1D_SIZE` / `LUT_3D_SIZE` /
+  `DOMAIN_MIN` / `DOMAIN_MAX` / `#` 注释 / 数值行；行数与尺寸必须一致、数值必须有限、
+  多余列与非法尺寸一律**拒绝**（不做静默截断）；1D LUT 展开成 32³ 供 shader 单一路径采样；
+  DOMAIN 语义按规范处理（网格已覆盖声明的域，shader 的 0..1 坐标直接映射到该域）；
+- **存储**：`ColorLutStore` 管理 `runtime_local/luts/*.cube`，`importFile()` 校验后复制，
+  并在 `luts/manifest.v1` 追加（名字、尺寸、字节数、SHA-256）；`resolve()` 按名字解析，
+  名字里带路径分隔符直接拒绝；导出作业与 UI 解析同一个目录；
+- **引擎接线**：`EnhanceGraph` 建立图时按 `ColorSettings::lutName` 解析并上传 3D 纹理；
+  解析失败时**关掉 LUT 强度并写警告**，不允许采样占位纹理；切换 LUT 名字走重建（要重挂
+  描述符），其余色彩参数仍是实时更新；`EngineController` 的重建条件已加入 LUT 名字。
+
+**测试**
+
+- `veyra_color_lut_tests`（CPU，18 项）：2³/33³ 解析与红分量最快序、行数/尺寸/NaN/多余列拒绝、
+  1D→3D 展开、DOMAIN 语义、导入/列举/解析、manifest、坏文件拒绝、路径穿越拒绝 → exit 0；
+- `veyra_color_grade_gpu_tests` 新增两条（GPU，真文件）：
+  `a .cube imported into runtime_local/luts resolves when the graph is built`、
+  `the imported halving LUT darkens the frame through the 3D sampler` → exit 0（共 10 项）。
+
+**回归**：`veyra_ui_contract_tests` exit 0；`veyra_repair_contract_tests` 191/0；
+`veyra_repair_preset_tests` exit 0；`veyra_color_grade_tests` 23/23；
+`scripts/gates/delivery.ps1` → **DELIVERY SHORT GATE PASS**
+（`logs/delivery/1c657339eea649d69624b38cb282c2e8/result.json`）。
+
+**未做（T5-b / T6）**：色彩页里的 LUT 下拉、强度/输入空间行、`.cube` 导入按钮；
+命名色彩预设（保存/应用/删除）与 `.vpcolor` 导入导出；HDR 标准处理与三入口一致性验收。
+
+## 2026-09-17 色彩页 P1：T4 面板填充（曲线 / 混色器 / 颜色分级 / 校准）
+
+色彩页从 2 组扩到 **6 组**：亮、颜色、曲线、混色器、颜色分级、校准。参数行 = 标签 +
+数值框 + 滑轨，全部走同一套 `ColorParam` 描述（标量用成员指针，数组类用 target+index）：
+
+- 曲线：参数曲线 4 个（高光/亮色调/暗色调/阴影）+ 3 个范围分割；
+- 混色器：8 个色相带 ×（色相/饱和度/明亮度）+ 黑白混色 8 个（共 32 行）；
+- 颜色分级：4 个区域（阴影/中间调/高光/全局）×（色相 0–360/饱和度/明亮度）+ 混合 + 平衡；
+- 校准：阴影色调 + 红/绿/蓝原色 ×（色相/饱和度）。
+
+布局与折叠沿用 T3 的 `layoutColorPage()`（顺序排版、折叠跳过行），控件 id 段整体迁到
+1200/1300/1400 段以免与增强页冲突；新增测试钩子 `colourParamEditId(label)`，验收按*名字*
+取控件而不是写死下标。P2 的空间类动词（纹理/清晰度/去朦胧）**没有**放进面板——shader 还没实现，
+放上去只会是假按钮。
+
+**GPU 动词验收（`veyra_color_grade_gpu_tests` 新增两条）**
+
+```
+PASS green mixer saturation raises the green separation
+PASS mid-tone grading wheel tints mid grey towards red
+PASS: colour grade GPU contract (off/neutral identity, exposure, curve, saturation, hue)   exit=0
+```
+
+**真机 UI 验收（`--smoke-color` 扩展）**：新增一步把"混合"行改成 77 并确认进入引擎 ——
+`[color-ui-test] T4 the colour grading row reached the engine`；其余步骤（总开关默认关 →
+曝光到引擎 → 一键还原 → 撤销还原 → 折叠落盘 → 收尾关回默认）全部保持 exit=0。
+
+**回归**：`veyra_ui_contract_tests` exit 0；`veyra_repair_contract_tests` 191/0；
+`veyra_repair_preset_tests` exit 0；`veyra_color_grade_tests` 23/23；
+`scripts/gates/delivery.ps1` → **DELIVERY SHORT GATE PASS**
+（`logs/delivery/716cf4d8a4fb4c53aaffc74674e26019/result.json`）。
+
+**未做（T5/T6 起）**：`.cube` 导入与命名色彩预设（含导入导出）、分组眼睛（需要每组 bypass 位）、
+点曲线编辑器（现在只有参数曲线与分割）、黑白开关（现在只有黑白混色数值）、HDR 标准处理与
+三入口一致性验收。
+
+## 2026-09-17 色彩页 P1：T3 色彩页 UI 框架（风琴折叠 + 滑块/数值框 + 一键还原）
+
+`apps/veyra/SettingsWindow.cpp` 的第 2 页（原预设页位置）现在是色彩页：
+
+- **总开关**（id 800，默认关）：勾选/取消直接进 `ColorSettings::enabled`，走重建路径；
+  关闭时链路不存在（零开销），文案与帮助都写明；
+- **一键还原（801）+ 撤销还原（802）**：还原把所有色彩参数归零、保留总开关状态，并把还原前
+  的整组数值留一次撤销机会；
+- **风琴折叠**：`layoutColorPage()` 在 `arrange()` 里顺序排版，折叠的组直接跳过自己的行，
+  行高/隐藏状态都进 `items`，因此滚动、DPI、Tab 顺序沿用现有机制；组头文案带 ▾/▸；
+- **参数行**：每个参数 = 标签 + 数值框（可直接输入）+ 滑轨；滑块拖动与输入框回车都即时生效，
+  首次改动会自动打开总开关（与 NR/超分开关的习惯一致）；数值越界会拒绝并回显上次有效值；
+- **折叠状态持久化**：`ui-preferences.v1` schema v3 → **v4**，行尾追加 `colourFoldMask`；
+  v1–v3 旧文件仍可读。顺带修掉一个隐患：AppShell 保存 UI 偏好时会覆盖面板写入的折叠位，
+  现在保存前先把该字段从文件读回来再写；
+- 新增帮助文本（800/801/802）。
+
+**真机 UI 验收（新烟测 `--smoke-color`，已加入 `scripts/gates/delivery.ps1`）**
+
+```
+[color-ui-test] page2 masterPresent=1 defaultOff=true step=1
+[color-ui-test] master switch applied
+[color-ui-test] exposure 1.00 reached the engine through the panel
+[color-ui-test] one-click reset returned the grade to neutral
+[color-ui-test] undo restored the pre-reset values
+[color-ui-test] fold collapsed=true persisted=true mask=1 geometryOk=true step=6
+[color-ui-test] unfolded and master off; colour chain back to the zero-cost default
+```
+
+烟测覆盖：总开关默认关 → 打开后进入引擎 → 数值框输入的曝光值到达引擎 → 一键还原回中性 →
+撤销还原找回原值 → 折叠后下一组位置上移且折叠位落盘 → 收尾把开关关回默认。exit=0。
+
+**回归**：`veyra_ui_contract_tests` exit 0（含 v3/音频页偏好回归）；`veyra_repair_contract_tests` 191/0；
+`veyra_repair_preset_tests` exit 0；`veyra_color_grade_tests` 23/23；`veyra_color_grade_gpu_tests` exit 0；
+`scripts/gates/delivery.ps1` → **DELIVERY SHORT GATE PASS**
+（`logs/delivery/81ef6ff6cc9944489793fcd523d0dbb7/result.json`，本次起包含 color-page 用例）。
+
+**未做（T4 起）**：曲线/混色器/颜色分级/校准四组的控件与 shader 动词、分组眼睛（需要在
+`ColorSettings` 里加每组的 bypass 位，schema 再升一版）、`.cube` 导入（T5）、HDR 标准处理（T6）。
+
+## 2026-09-17 色彩页 P1：T2b-b 源头侧调色链接入 ingest（GPU 验收通过）
+
+按 v4 计划完成 GPU 接线：调色**不新增 pass**，而是接进现有的 ingest 派发（YUV→线性、
+RGB/打包/YUY2→线性），作用在**所有效果器之前**。
+
+- `shaders/ColorGrade.hlsli`：单一入口 `ColorGradeApply(lin, params)` —— 线性 3×3（白平衡+校准）、
+  曝光、对数域逐通道曲线表、色相表混色器、亮度表分级/阴影色调、饱和度/自然饱和度；
+  10 档对数据窗口之外的值直接放行，HDR 高光不被色调表截断；另含 6 例四面体 LUT 采样
+  （`base` 已钳制，避免 coord==dims-1 时越界读）；
+- 表数据：CPU 端 `ColorGradeTables::bake()` 烘焙成 3 张 FP32 表（1024/256/256），
+  经常驻映射的上传缓冲一次拷进纹理；`GpuPassUtils` 为 ingest pass 增加**第二个 SRV 表**
+  （固定寄存器基址 8，t8..t11），不影响其他 pass 的三参数根签名；
+- 总开关：`desc.color.enabled` 决定是否创建表资源；关闭时 ingest shader 直接返回线性值
+  （`flags.x==0`），不采样任何表、不额外派发；开关切换走重建（与 NR/超分同级），
+  改色彩参数只更新 uniform/表（`applySettings` 接受、不重建）；
+- 引擎：`EngineController` 把 `settings.color` 传进图描述与 nextDesc，重建条件加入
+  `color.enabled`；`EnhanceGraphDesc::color` 为唯一数据入口。
+
+**GPU 验收（新目标 `veyra_color_grade_gpu_tests`，RTX 5070，`gd.rgbInput` 路径）**
+
+```
+PASS colour graphs initialise and render
+PASS master off and enabled-neutral are byte-identical to the ungraded path
+PASS a green input stays green through the neutral grade
+PASS +1 EV brightens mid grey by a visible step
+PASS point curve at 0.5 raises the coded value
+PASS saturation -100 collapses the frame to grey
+PASS: colour grade GPU contract (off/neutral identity, exposure, curve, saturation, hue)   exit=0
+```
+
+**回归**：`veyra_color_grade_tests` 23/23 PASS；`veyra_repair_preset_tests` exit 0；
+`veyra_ui_contract_tests` exit 0；`veyra_repair_contract_tests` 191/0；
+`veyra_image_dimension_tests`（羽化 2/32/64 + 分块 + 运动序列）exit 0；
+`scripts/gates/delivery.ps1` → `DELIVERY SHORT GATE PASS`
+（`logs/delivery/4d71b79296484248bc370413c09c0ea0/result.json`）。
+
+**未做/待办**：`.cube` 文件导入与 LUT 案例（T5，`setColorLut` 接口已就绪、测试里暂未覆盖）；
+色彩页 UI（T3/T4）；开调色档位的 GPU 耗时对比（等 UI 能开了在真机量，当前默认关闭=零开销）。
+
+## 2026-09-17 色彩页 P1：T2b-a 总开关语义 + CPU 烘焙表（调色前移到源头）
+
+按 v4 计划（调色链**全部前移到所有效果器之前**、单一链路、可完全关闭）落地第一批：
+
+- `ColorSettings::enabled`（总开关，默认关）；`neutral()` 忽略开关，含义是"渲染结果等于没调色"，
+  所以"开着但全中性"必须是视觉无操作；
+- `EnhancementSettings::sameVideoConfiguration()`：色彩**参数**仍是排除项（改参数不重建图），
+  但 **总开关参与比较** —— 它是链路形状变化，允许重建（与 NR/超分开关同级）；
+- 新增 `include/veyra/pipeline/ColorGradeTables.h` + `src/pipeline/ColorGradeTables.cpp`：把整条调色
+  在 CPU 端烘焙成三条小表 + 一个 3×3 矩阵，供 ingest shader 读取（**不新增 pass**）：
+  - 曲线表 1024×RGBA16F：对数域（10 档，围绕 18% 灰）里的"分区色调 + 对比度 + 4 区参数曲线 +
+    RGB/单通道点曲线"，解码回线性；
+  - 色相表 256×RGBA16F：8 段混色器的（色相偏移 / 饱和度 / 明度）响应；
+  - 亮度表 256×RGBA16F：颜色分级四个色轮 + 校准阴影色调的按区增益；
+  - 3×3 线性矩阵：白平衡（Planck 轨迹 + Bradford CAT，方向按"滑块声明光源"惯例）
+    叠加校准原色近似；
+- `tests/unit/ColorGradeTableTests.cpp`（新目标 `veyra_color_grade_tests`，纯 CPU、不依赖 GPU）：
+  23 项断言全部 PASS —— 关/全中性恒等、对数域往返、白平衡冷暖方向与中性不动、黑白场符号、
+  曲线单调与落点、单通道只动自己、混色器波段、分级分区、阴影色调只动暗部、LUT 未选时为惰性。
+
+修正记录（烘焙数学，两处方向性错误，测试抓到后修正）：
+
+1. 白平衡 CAT 方向写反（`D65→目标` 应为 `目标→D65`），导致正温度变冷；
+2. 阴影/黑场符号写反（正值应为提亮），导致"负 black 变亮"。
+
+命令与结果：构建 exit 0；`veyra_color_grade_tests` → `PASS: colour grade bake tables ...`（exit 0）；
+`veyra_repair_preset_tests`（66 组迁移 + v18 往返，schema 追加总开关字段）exit 0；
+`veyra_ui_contract_tests` exit 0；`veyra_repair_contract_tests` 191/0；
+`scripts/gates/delivery.ps1` → `DELIVERY SHORT GATE PASS`
+（`logs/delivery/682bb5d4f300439588ae65eb211ac450/result.json`）。
+
+未完成：T2b-b（把烘焙表接进 ingest shader：源头单一 pass、`GpuStage::Grade` 计时、
+关开关与旧链路逐像素一致的 GPU 对比），然后 T3–T6。
+
+## 2026-09-17 色彩页 P1：T2a 色彩数据模型 + 预设 schema v18
+
+- 新增 `include/veyra/engine/ColorSettings.h`：LR 对齐的 P1 色彩模型（白平衡、亮、存在感、参数/点曲线 5 通道、
+  混色器 HSL 8 色、黑白混色器、颜色分级 4 区 + 混合/平衡、校准、3D LUT 引用与强度/输入空间），
+  默认值全中性，`validate()` 覆盖每个控件范围、曲线点必须按 x 递增；`neutral()` 供"未调色直接跳过 pass"使用；
+- LUT 引用用**定长宽字符缓冲 + 文件名校验**（禁路径分隔符）而不是 `std::wstring`：
+  `EnhancementSettings` 要能进导出作业的共享内存头（`ExportJobManager` 的
+  `static_assert(is_trivially_copyable_v<Shared>)`），绝对路径在跨进程导出里也是错的，导出端按名字在
+  `runtime_local/luts` 解析；
+- `EnhancementSettings` 增加 `ColorSettings color`，`validate()` 转发；**加入 `sameVideoConfiguration()` 的
+  排除清单**：改调色只更新 uniform/资源，不重建图（P1 验收项之一）；
+- `PresetStore` schema v17 → **v18**：每条记录行尾追加色彩块（`writeColorSettings`/`readColorSettings`，
+  UTF-8，由 PresetStore 负责 LUT 名字的宽窄转换）；v1–v17 旧文件仍可读，新版本读到旧文件走默认色彩；
+- `tests/unit/RepairPresetTests.cpp`：全字段往返加入色彩（含曲线、分级、混色器、黑白、校准、LUT），
+  负例覆盖"分级色相 400 / 曝光 6 / LUT 空间 3 / 曲线点乱序"必须被拒绝；legacy 迁移用例的版本断言改为 18。
+
+命令与结果：构建 exit 0；`veyra_repair_preset_tests <新文件>` → `legacy/current backend migration cases=66` +
+`preset roundtrip, all fields, ...=1`（exit 0）；`scripts/gates/delivery.ps1` → `DELIVERY SHORT GATE PASS`
+（`logs/delivery/fa493da345634e74b7f866115d6bc879/result.json`，覆盖导出作业与共享内存头）。
+
+未完成：T2b（全浮点调色 pass + `gpuGradeP95Ms` 计时）、T3–T6。
+
+## 2026-09-17 色彩页 P1：T0 删预设入口 + T1 NR 剔除区羽化（含两个设置记忆缺陷修复）
+
+目标（用户指令）：按 `docs/COLOR_TAB_LR_FEATURE_PLAN_2026-09-17.md` v3 开工，先落 T0/T1。
+存档点 `checkpoint/color-p1-archive-20260917`（65e69b3），施工分支 `codex/color-tab-p1-20260917`，P1 全程不合并 main。
+
+**T0 预设入口删除（代码级，无残留入口）**
+
+- `SettingsWindow.cpp`：整页删除（静态 1105/1106、下拉 300、命名 301、按钮 310–315、`refreshPresets()`、WM_COMMAND 分支、`store.put/rename/erase/setDefault` 调用），第 2 页留作色彩页；
+- `SettingsWindow.h`：删除 `presetNames()` / `presetAt()`；`AppShell.cpp`：删除日常模式预设下拉
+  （`DailyPreset` 控件、`refreshDailyPresets()`、WM_APP+42 分支、帮助文本、布局槽位）；
+  枚举保留 `RetiredPresetSlot` 占位以**不改动后续控件 id**（不是入口，也不创建控件）；
+- 页签 `预设` → `色彩`，主窗口按钮 `参数与预设` → `参数与色彩`；`SettingHelp.h` 删除 300/301/310–314 帮助；
+- 按批复保留行为、无 UI 入口：`last-applied.v1`（启动自动套用上次增强参数）与 `user-presets.v1`（只读迁移）。
+
+**T1 NR 剔除区 + 羽化**
+
+- 改名：`NR保护区域` → `NR 剔除区`（复选框 206、计数文本、按钮 213/214、帮助 19/206/213/214、设置页静态 1109）；
+- 新增羽化控件：滑块 622（0–64 工作分辨率像素）+ 数值框 222 + 动态标签 1123（显示 px 与 ≈画面高度百分比，取自 `snapshot().metrics.resolution.base.height`）；
+- `EnhancementSettings::validate()` 羽化上限 32 → 64；`TiledImageProcessor` 加
+  `static_assert(halo>=64)`，保证瓦片外扩（128 px）覆盖最大羽化、导出分块不穿帮；
+- 布局由实测决定：新增 `VEYRA_DUMP_SETTINGS_LAYOUT=1` 一次性打印全部控件坐标（DIP）。
+  实测剔除区块 y=362/404/448，羽化行 y=530/530/562，与后续模型块 618+ 无重叠；
+- `--smoke-settings` 增加一步：把羽化框设为 48 并断言进入设置草稿（日志
+  `[settings-test] exclusion-feather draft=48 desired=2 applied=2` —— 首次启动增强关闭，草稿路径正确）。
+
+**验证时另修的三个缺陷（都不是本轮新引入，如实记录）**
+
+1. **v3 UI 偏好永远读不回来**：`UiPreferenceStore::load()` 的 v3 分支漏读 `inspectorWidth`（写 6 个字段只读 5 个），
+   任何 `VEYRA_UI 3` 文件都被判 corrupt → 窗口尺寸/音量/字幕样式/页签索引每次启动静默重置。
+2. **inspector 范围写死 0..3**：音频页是 `selectInspector(4)`，用户最后停在音频页同样导致整份偏好被丢弃。范围改为 0..4。
+3. **`ImageDimensionTests::protectionPixels()` 自身失效**：`applySettings()` 会按设置快照开关 NR，而该用例构造的
+   `EnhancementSettings` 默认 `nr=false` → 整个保护段 `changed=0/nr=0`，永远不可能通过（旧构建同样失败，非本轮引入）。
+   修正为 `settings.nr=true`，并把羽化用例扩到 2/32/64。
+
+**命令与结果（本机 RTX 5070，构建目录 `out/build/audio-continuity-repair-20260915`）**
+
+- 构建 `out\build\veyra-build-x64-release.cmd` → exit 0；
+- `veyra_image_dimension_tests <新目录>` → exit 0；
+  `PROTECTION_FEATHER pixels=2 mixedChannels=1581 / 32 → 15725 / 64 → 20248`，`envelopeError8=0`；
+  `PROTECTION_PIXELS ... changed=191323 protectedError8=0 outsideError8=0 nr=8 pass=1`；
+  `PROTECTION_PARTIAL_TILE feather=32 ... pass=1`；`PROTECTION_MOVING_RESULT ... pass=1`
+  （注：该用例输出目录必须为空，重复跑同一目录会在 1x1 PNG 往返处失败——既有测试卫生问题，未改）；
+- `veyra_ui_contract_tests <临时目录>` → exit 0（新增 v3 往返与"音频页 inspector=4"回归断言）；
+- `veyra_repair_preset_tests <临时文件>` → exit 0（66 组旧格式迁移 + v17 往返）；
+- `veyra_popup_selector_tests` → exit 0；`veyra_repair_contract_tests` → 191 项 0 失败；
+- `scripts/gates/delivery.ps1 -Root . -BuildDirectory out/build/audio-continuity-repair-20260915` →
+  `DELIVERY SHORT GATE PASS`（`logs/delivery/566557c4ad5f401ab06960af1c9d2f5e/result.json`）；
+- 布局证据：`VEYRA_DUMP_SETTINGS_LAYOUT=1` + `veyra.exe --smoke-empty --smoke-seconds 3`（92 条 `[settings-layout]`）。
+
+**未完成 / 下一步**：T2–T6（`ColorSettings` 模型与全浮点 Pass A、色彩页 UI 框架、各面板、LUT 与命名预设、HDR 标准处理与验收）。
+真机人工验收（1080/4K 目视对比、羽化手感）由用户执行；本轮未做发布。
+
+## 2026-09-17 RTX 30（Ampere）帧生成攻坚：架构闸门定位 + 伪装实现（默认关闭）
+
+目标（用户指令）：把 30 系弄到能用，同时不改变 40/50 系行为；产出给 30 系用户测试的包。
+存档点 `checkpoint/pre-ampere-fg-repair-20260917`。
+
+**侦察结论（全部由本机驱动/反汇编实测，非推测）**
+
+1. `nvngx_dlssg.dll` 310.7 的静态导入只有 VERSION/ADVAPI32/USER32/KERNEL32；它通过
+   `nvapi64.dll` 的 **`nvapi_QueryInterface(0xD8265D24)`** 取 `NvAPI_GPU_GetArchInfo`，
+   调用点在一个内部包装函数 **RVA 0x1670**，取到的指针缓存到全局 **RVA 0x7334B8**，
+   最终把架构写进 DLSSG 实例：`mov [rsi+368h],eax`（值来自 **RVA 0x20DCA** 的 7 字节读取
+   `mov eax,[rsp+294h]`）。架构常量与官方 nvapi.h 一致：GA100=0x170、AD100=0x190、GB200=0x1B0。
+2. **替换 0x7334B8 的缓存指针无效**：provider 在自身 DllMain 阶段就已解析并固化该指针
+   （实测 wrapper 调用次数 = 0，且缓存槽已是 populated）。
+3. **改写 0x20DCA 的读取为常量可以改变 provider 采纳的值**：把架构写死 0x170 时
+   `FG capability ... multiFrameMax` 从 **5 变成 1** —— 证明这条链路就是 FG 判定读架构的地方。
+   但写死常量不等于驱动的真实 id，第一个生成帧随即崩溃（Evaluate seh=0xC0000005）。
+4. 因此正确形态是"**读真实值、只改架构字段**"：已实现 **0x1670 处的 14 字节绝对跳转 hook +
+   24 字节跳板**（跳板执行真实逻辑并把 architecture 改成目标值，其余字段保持真实）。
+
+**实现与默认行为**
+
+- 新增 `include/veyra/ngx/NvapiArchSpoof.h`、`src/ngx/NvapiArchSpoof.cpp`；
+  `EnhanceGraph::prepareAmpereFgSpoof()` 在 **NGX core 初始化之前**运行（顺序错误是首个坑：
+  provider 初始化后再装就太晚）。
+- `AmpereMfgUnlock::apply(HMODULE, bool retargetArchGates)`：伪装生效时保留 provider 自带的
+  0x1b0 比较（让上报值匹配），伪装不可用时回退到旧的 arch-gate 重定向。
+- **伪装默认关闭**，仅当设置 `VEYRA_TEST_NVAPI_SPOOF_ARCH=<arch id>`（如 `0x1B0`）时启用。
+  原因：本机没有 30 系，无法证明它能产出稳定的补帧会话；不拿未验证的路径当默认行为。
+
+**本机验证（RTX 5070）**
+
+- 默认路径完全不受影响：`--fg` → `FG capability available=true multiFrameMax=5`、
+  381 真实帧 / 379 生成帧、Evaluate 无异常。
+- 伪装机制可用：设置 `VEYRA_TEST_FORCE_AMPERE_UNLOCK=1 VEYRA_TEST_NVAPI_SPOOF_ARCH=0x170`
+  时 provider 采纳 0x170（multiFrameMax=1），证明 hook 生效。
+- 修复测试 191/0、采集颜色 0 失败、便携包 smoke 全 PASS。
+
+**30 系用户测试指引（1.3.2beta4）**
+
+默认即启用（Ampere 上自动装伪装 + sm_86 内核补丁 + 跳过 arch-gate 重定向）；伪装装不上时
+自动回退到旧的重定向路径。要覆盖行为可用环境变量：
+
+```powershell
+# 默认：上报 Blackwell（0x1B0），6X 上限
+# 备选：上报 Ada（0x190），4X 上限
+$env:VEYRA_TEST_NVAPI_SPOOF_ARCH='0x190'
+# 关闭伪装（回到旧的重定向路径）
+$env:VEYRA_TEST_NVAPI_SPOOF_ARCH='0'
+# 完全关闭 30 系解锁
+$env:VEYRA_DISABLE_AMPERE_MFG_UNLOCK='1'
+.\Veyra.exe <视频> --fg --smoke-seconds 15
+```
+
+期望日志：`[nvapi-spoof] provider GetArchInfo wrapper hooked ... will report 0x1B0`、
+`[ampere-mfg] ... spoofed=1 reportedArch=0x1B0 ... gates=0`、
+`FG capability available=true multiFrameMax=5`、`generated=` 接近 5×。
+
+**收尾：RIP 相对陷阱 + 默认启用后的本机验证**
+
+- 首个 hook 版本把包装函数的前 24 字节整体搬进跳板，其中 `lock add [rip+0x73144C],1` 是
+  **RIP 相对指令**——搬到新地址后位移失效，写坏 provider 内存，`NVSDK_NGX_D3D12_Init` 直接
+  `seh=0xC0000005`（被 SEH 兜住、退化为无补帧）。修复：只搬**位置无关的前 16 字节**
+  （到 `mov rsi,rcx` 为止），RIP 相对那条留在原地址执行，跳板跳回 entry+16。
+- 修复后**模拟 30 系配置**（`VEYRA_TEST_FORCE_AMPERE_UNLOCK=1`，伪装默认 0x1B0）：
+  `spoofed=1 reportedArch=0x1B0 gates=0` → `FG capability available=true multiFrameMax=5`
+  → **376 真实帧 / 374 生成帧、0 崩溃**。这是 3060 将要走的同一条代码路径
+  （provider 被告知 Blackwell + 内核替换为 sm_86）。
+- 对照组：**50 系默认路径**无任何 `nvapi-spoof` 活动、380 真实/378 生成；
+  **40 系路径**（`VEYRA_TEST_FORCE_ADA_UNLOCK=1`）只有 `ada-mfg` 日志、381 生成帧、无 spoof。
+  即伪装只可能在 Ampere 分支上出现。
+- 门禁：修复合同 191/0、采集颜色 0 失败、压缩解码 ALL PASS、`delivery.ps1` PASS。
+
+**仍未验证（必须由 30 系实机回答）**：真实 GA10x 上 provider 采纳 0x1B0 后的行为
+（真实 Ampere 缺少 Blackwell 的 flip metering；若 Evaluate 失败会是 SEH 兜底后无补帧，
+日志里能看到 `fg-backend failed ... seh=`）。**不要试 0x190**：本机实测按 Ada 上报时
+provider 只给 `multiFrameMax=1`，且第一个生成帧 Evaluate 报 `seh=0xC0000005`、进程随后挂住
+（需手动结束）——它没有帮助，只会浪费一轮测试。
+
+**完整验证矩阵（本机 RTX 5070）**
+
+| 配置 | 结果 |
+| --- | --- |
+| 50 系默认（不设任何变量） | 380 真实 / 378 生成，**无任何 `nvapi-spoof` 活动** |
+| 40 系路径（`VEYRA_TEST_FORCE_ADA_UNLOCK=1`） | `ada-mfg` 全部 patch 应用、381 生成，无 spoof |
+| **30 系目标配置**（force-ampere + 默认 spoof 0x1B0） | `spoofed=1 reportedArch=0x1B0 gates=0` → `multiFrameMax=5` → **379/377**，exit 0 |
+| 30 系 6X（上述 + `--fg-multiplier 6`） | 360 真实 / **1600 生成**，exit 0 |
+| 30 系回退（`VEYRA_TEST_NVAPI_SPOOF_ARCH=0`） | 走旧重定向路径，376/374，exit 0 |
+| 30 系 + 0x190（Ada 上报） | `multiFrameMax=1` → Evaluate `seh=0xC0000005` → 进程挂住（**不推荐**） |
+| 30 系 + **实时采集**（`capture:0:0` YUY2 1080p60，跑 r2 包内 exe） | **602 真实 / 600 生成、0 丢帧**，exit 0 |
+
+**给 30 系测试者的一键自检**：`scripts/acceptance/ampere-fg-check.ps1`（已随仓库）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ampere-fg-check.ps1 `
+  -PackageDirectory "C:\...\Veyra-1.3.2beta4-win64-portable" `
+  -Source "capture:0:0:-1:0"            # 或某个视频文件路径
+```
+
+脚本跑 `--fg`、只扫描本次运行追加的日志字节，把 `adapter / ampere-mfg / nvapi-spoof /
+FG capability / Create DLSSG / Evaluate 故障 / smoke frames=generated=` 汇总成
+`logs/ampere-fg-check/report.json` 并给出 PASS/FAIL——测试者只要发回这个文件。
+
+## 2026-09-17 3060 DLSS FG 深挖：patch 正确性实机级验证 + 上游方案拆解
+
+用户要求"修到可以用"，不是加错误报告。本轮把所有能确认的都钉死了：
+
+**1. 我们自己的 patch 是正确的（本机决定性实验）**
+新增 `VEYRA_TEST_FORCE_AMPERE_UNLOCK=1`（仅测试）：在 RTX 5070 上强制应用 AmpereMfgUnlock
+（同一套 69 fatbin → sm_86 PTX 重编译、200 slot 重定向、2 arch gate、preflight 69/69）。
+结果：`FG capability available=true multiFrameMax=5`、`Create DLSSG result=0x1 Success`、
+252 真实帧 / 250 生成帧。**patch 重写全部内核后运行库仍然完好** —— 3060 上的失败不是 patch 破坏了
+运行库，而是 dlssg 内部另有一层我们没触到的判定。该开关永不用于产品会话。
+
+**2. sdli1995/dlssg_for_sm86 的完整机制（从它的二进制里提取）**
+仓库没有源码，只有编译好的 `version.dll`(29,676,832) + 文档。扫描其内嵌 PE 得到两个组件：
+
+- `nvngx_dlssg.dll` **310.9.1**（7,450,624 字节，SHA256 `DA310F91…`，**≠ 上游文档记的原版
+  `ff6e90eb…`，即已被修改**，50 个标准 NGX 导出齐全）；
+- **`sm86_backend.dll`**（21,743,104 字节，12 个导出：`DlssgMod_Install/GetInfo/ConfigurePlugin/
+  ConfigureCapture/ConfigureProbe/PluginModule/SupportedRouteFlags/TuringHost`、
+  `SM86Bridge_Install/GetStats/ProbeRequirements`）。
+
+后端字符串直接暴露了它的做法：`hooks_installed`、**`NVSDK_NGX_D3D12_GetCapabilityParameters`**、
+**`NVSDK_NGX_D3D12_GetFeatureRequirements`**、`fg_gate_capability`、`fg_gate_requirements`、
+`capability_queries`、`features_requirements`、`cuDeviceComputeCapability`、
+`DLSSG_FAKE_TURING_HOST`、`hook installer is a Detours transaction`、
+`KernelImage=Original installs the architecture and Evaluate hooks but replaces no kernel image`。
+
+**即：上游方案 = 内核替换（SM86 镜像）+ 用 Detours 在进程内 hook NGX 的能力/需求查询**，
+再由它的后端把"支持"的答案交给运行库。文档确认 `KernelImage`/`Router`/`SpoofArchToGame` 等
+进阶键存在但未公开 ABI。
+
+**3. 直接换用它运行库的实验（本机 5070）**
+把提取的 310.9.1 放进 `runtime_local/nvidia/nvngx_dlssg.dll` 跑 `--fg`：启动正常、
+`generated=0`、无 `FG capability` 日志 —— **单独替换运行库无效果**，它依赖 `sm86_backend.dll`
+的安装调用，而 Install 的调用约定未公开（12 个导出的签名都没有文档/源码）。
+实验后已把 310.7 原文件还原（校验 7,519,856 字节）。
+
+**4. 结论与缺口**
+让 3060 真正能开 DLSS 补帧，需要复刻上游那套"内核替换 + 查询层钩子 + 架构伪装"，具体缺口：
+① NGX `GetCapabilityParameters`/`GetFeatureRequirements` 的进程内钩子（我们没有）；
+② dlssg 内部对 CUDA/NVAPI 硬件能力查询的绕过（上游有 `cuDeviceComputeCapability` 路径）；
+③ `SM86Bridge_Install` 的 ABI（只能逆向，仓库无源码）；
+④ **每一轮都必须有 3060 实机验证**（本机 5070 只能证明 patch 本身无害）。
+这不是一次改动，是一个需要实机迭代的逆向项目。30 系用户在可用之前应继续使用 AMD FSR 补帧
+（3060 日志实测 `real=3600 generated=910` 工作正常）。
+
+**5. 补充：dlssg 架构查询路径已定位（NVAPI）**
+`nvngx_dlssg.dll` 的静态导入只有 VERSION/ADVAPI32/USER32/KERNEL32 —— 它**不静态链接** CUDA/NVAPI。
+它的字符串给出了真实路径：
+`SetGPUArch:: NvAPI_EnumPhysicalGPUs / NvAPI_GPU_GetLogicalGpuInfo / NvAPI_GPU_GetArchInfo failed with error: %d`、
+`error: SetGPUArch failed - nvapi status %d`、`error: CreateFeatureImpl() failed - nvapi status %d`。
+即 **dlssg 通过 NVAPI 的 `NvAPI_GPU_GetArchInfo` 读取真实架构**，再在内部比较。官方 nvapi.h 的架构 ID：
+`GA100=0x170`（Ampere，与我们的 `kAmpereArchId` 完全一致）、`AD100=0x190`（Ada）、`GB200=0x1B0`（Blackwell，
+正是我们 patch 的那两个常量之一）。最彻底的绕过 = 在进程内 hook NVAPI 让 `GetArchInfo` 报告 Ada/Blackwell，
+这样无论 dlssg 内部有多少处架构比较都会通过；`NvAPI_GPU_GetArchInfo` 的 QueryInterface ID 未公开（官方头
+只给声明），需要逆向或从 hook 记录中获得。
+
+**6. 补充：后端可加载性验证**
+在一次性进程里加载 `sm86_backend.dll` 并调用其无参导出：`DlssgMod_SupportedRouteFlags()` 返回
+`0x2FFF3FFF`（有效标志集），`DlssgMod_GetInfo` / `SM86Bridge_GetStats` / `SM86Bridge_ProbeRequirements`
+返回 `0xFFFFFFFF`（缺少必需参数）。**DLL 可加载、导出可调用，但 Install 的参数结构未文档化**，
+直接集成需要逆向；可选项是与上游作者沟通 ABI（GPLv3 项目）。
+
+## 2026-09-17 采集链路整体排查（用户要求，干净环境下全量实机）
+
+用户要求"整体排查一遍，别 YUY2 没事了其他又有问题"。在设备空闲（无 OBS、无其他占用）时完成，全部为本机真机结果：
+
+| 范围 | 结果 |
+| --- | --- |
+| **全部 48 个格式**（USB3 Video，YUY2 0–23 / MJPEG 24–47，每个 10 秒） | **47/48 PASS**；唯一异常是 format 44（MJPEG 640x480）启动首秒丢 47 帧 |
+| format 44 复测 3 轮 | 578/580/581 帧、0 丢帧 → **偶发**，非稳态缺陷 |
+| 设备 2（OBS 虚拟摄像头）**NV12 / I420 / YUY2** 2560x1440 | 3/3 PASS（585/584/584 帧、0 丢帧、P95 2.66/2.76/2.72 ms）——覆盖 30 元卡没有的原生 packing |
+| 带音频采集（YUY2 / MJPEG，audio=0） | 2/2 PASS |
+| 增强开启（NR+SR，YUY2 / MJPEG） | 2/2 PASS；帧率 38.5 / 47.9 fps（增强开销，非回归），captureDropped=0 |
+| 诊断开关 `--capture-flip` / `--capture-cpu-unpack` / `--capture-buffer=minimum` | 3/3 PASS |
+| **capture2 稳定路径**（编码路径绑定；YUY2 / MJPEG / YUY2-4K18） | 3/3 PASS |
+| `capture-paths-smoke.ps1`（原生 + 压缩双路径） | PASS（701 帧/12 秒/条） |
+| 设备 1（WebcastMate VirtualCamera，软件未运行） | 绑定失败即退出、无画面——**预期行为**，不是缺陷 |
+
+**format 44 那 47 帧的定性**：日志显示全部丢在启动后第 1 秒（`received=60 processed=13 dropped=47 mailboxOverwritten=47`），
+`readAgeMs=1.675`（交付的始终是最新帧），之后稳态 60fps 无丢帧。是 UVC 驱动在 Run 后把缓冲里的陈旧帧一次推出、
+被 latest-frame mailbox 按设计丢弃，不是我们的 bug。矩阵脚本判据已相应放宽为"容忍 ≤10%（最少 20 帧）的启动突发"，
+仍能抓住稳态丢帧与重连循环。
+
+**排查中发现的次要事实（如实记录）**：NR+SR 同时开启时 1080p60 采集只能跑到 38.5 fps（MJPEG 47.9 fps），
+`captureDropped=0` 说明是图侧按真实 PTS 跳帧保实时（2026-09-11 实时调度合同的既有行为），不是采集回归。
+
+排查过程中我犯的操作错误（已纠正）：矩阵脚本与用户正在使用的实例抢同一张卡，导致用户画面被切成 4:3 并污染了
+一轮数据；另有测试脚本把参数数组命名为 `$args` 导致启动了无参数 GUI 实例而挂住。两条都已清理，重跑使用干净环境。
+
+## 2026-09-17 1.3.2beta 原生采集路径回归（用户实机发现，已修复并重新打包）
+
+用户反馈 1.3.2beta"采集进去只有 2 帧"。日志证据：YUY2 1080p60 会话里 `[capture-reconnect] Stop`
+每约 1.1 秒一轮、epoch 从 2 涨到 16+，每轮只出 1–2 帧（`received=3/5/7…`、`presentationCompletedReal=2/4/6…`）。
+
+- **根因（我的回归，提交 `35e5593` 引入）**：解码 worker 的帧池改造把 `read()` 里**所有非硬件帧**都走了
+  压缩路径的池记账（`p.pendingFrame=nullptr`），包括原生 YUY2/NV12/RGB32。清空后下一个 SampleCB 命中
+  `if(!valid||(!compressedPath&&!pendingFrame))` → `callbackError=true` → read 报错 → 引擎进入
+  采集恢复循环（重连→2 帧→再报错→再重连）。
+- **为什么没测出来（必须记住的教训）**：帧池提交之后我跑的每一个采集测试都是 MJPEG
+  （`capture:0:24` / `capture:0:46`）或探针压缩路径，**原生路径一次都没跑**，而用户用的正是 YUY2。
+- **修复（`3eaeaf1`）**：只有压缩路径使用池；原生路径恢复原来的信箱交换（pendingFrame 永不为空）。
+- **真机验证（每条 2 分钟，均 0 丢帧、无重连）**：YUY2 1080p60 7664 帧 P95 3.006ms；YUY2 4K18 2150 帧
+  P95 3.617ms；MJPEG 1080p60 7176 帧 P95 7.022ms（decoded=6600 errors=0）；MJPEG 4K18 2150 帧
+  P95 20.023ms（decoded=1800 errors=0）。
+- **防回归**：新增 `scripts/acceptance/capture-paths-smoke.ps1`，自动枚举设备格式、同时跑"第一条原生格式"
+  与"第一条压缩格式"，帧数塌陷或丢帧即失败（本地实测两条路径 PASS，701 帧/12 秒）。
+- **重新打包**：`C:\veyra-test-packages\mpeg-chain-1.3.2beta2\Veyra-1.3.2beta2-win64-portable.zip`
+  （469,880,671 字节，SHA256 `0CA29C3DF5E136818392CA78CD155755DEEA9B7FAB42D1AC6F69976698092994`），
+  便携包 smoke 全 PASS；1.3.2beta 的包作废，勿再分发。
+
+## 2026-09-17 RTX 3060 DLSS 补帧报错排查（用户日志，不修复）
+
+用户提供粉丝日志 `3060 dlss 错误.log`（3992 行，2026-09-16 13:55–14:01，跑的是 1.3.1beta 便携包，
+路径 `C:\Users\suibian\Downloads\Veyra-1.3.1beta-win64-portable\`）。结论：**30 系 DLSS 补帧解锁
+在这台机器上不可用，属我方实现不完整；另有一个独立的 XeSS 失败原因**。未改任何代码。
+
+- **机器身份**：`adapter[0] desc=NVIDIA GeForce RTX 5060` 但 `deviceId=0x2504` + `dedicatedVideoMiB=12113`
+  → 实际是 **RTX 3060 12GB**，显卡描述被改成 5060（不是我们的软件改的）。`[capture]` 等行为与描述无关；
+  我们的架构判定按 deviceId（0x2200–0x2680）走 Ampere 路径，正确。
+- **DLSS FG 失败链条**（每次尝试都一样）：
+  `[ampere-mfg] unlock applied=1 runs=8 slots=200 fatbins=69 lea=44 gates=2 preflight=69/69` →
+  `[ngx] FG.Available value=false | MultiFrameCountMax=0 (0xFFFFFFFFBAD00010)` →
+  `[ampere-mfg] runtime reported FG unavailable; continuing on the audited sm_86 unlock (multiFrameMax=5)` →
+  `[ngx] Create DLSSG 2560x1440 result=0xFFFFFFFFBAD0000B` → `[graph] FG create failed` →
+  `[backend-recovery] ... multiplier=1`（FG 被整体关闭）。
+  错误码：`0xBAD0000B`=UnableToInitializeFeature（NGX fail|11），`0xBAD00010`=UnsupportedParameter（fail|16）。
+- **根因**：解锁结构层面应用成功（含 69/69 CUDA preflight），但 **dlssg 310.7 运行时的 FG 可用性判定
+  仍为 false**，我们的补丁没有覆盖那一层；而 `AmpereMfgUnlock` 之后的代码在"运行时报不可用"时
+  **强行假设可用**（`fgCaps.available=true; multiFrameCountMax=5`），于是 Create 必然失败。
+- **上游对照**：本次实现的来源 `dashdogy/RTX40MFG-Unlock` 的 ampere 路径包含我们**未移植**的组件——
+  `ampere_mask_transform.h`（特定 slot-14 fatbin 的 mask 变换）、`ampere_native_cache.h`/`ampere_cuda_program.h`
+  （内核缓存）、`ampere_wrapper_capacity.h` + `ampere_policy.h` 的 **NGX 调用层 wrapper**（把一个
+  Evaluate 扩成多帧 Batch）、按运行库版本选择 temporal profile；其 README 也写明 30 系支持
+  "very early and experimental, may not work in some games or configurations"。专门做 30 系的
+  `sdli1995/dlssg_for_sm86` 则是**代理 DLL + 内嵌原厂运行库**路线，并明确说明 **native 模式（自建 NGX host，
+  即我们的路线）有难以修复的兼容问题**所以才回退代理；其实测驱动为 591.86 / 610.74（R580+），
+  **本机用户驱动是 566.92，低于其实测范围**。
+- **独立问题（XeSS FG）**：`[xess-fg] Init result=-17` 之前 present 明确写着
+  `using the retained AMD proxy swapchain (frame generation off)`，随后 `CreateSwapChainForHwnd failed`
+  ——是"先开过 AMD FSR → 代理交换链占用窗口 → 切 XeSS 需重启软件"的已知边界，不是 XeSS 本身故障。
+  用户最后切回 AMD FSR 补帧，日志显示 `real=3600 generated=910 presented=4510`，工作正常。
+- **建议（待用户决定，未施工）**：①把"解锁后运行时报不可用"改成明确失败 + 清晰提示，不再白试一次 Create；
+  ②真正的 30 系支持需要按上游补齐（mask transform / wrapper / 代理路线），并且**必须在真 30 系上验证**；
+  ③可让粉丝先把显卡描述改回 3060、并把驱动升到 R580+ 再复测一次（低成本验证）。
+
+## 2026-09-16 MPEG/压缩链路收工：解码 worker + D3D12VA 后端 + 帧池契约（2 分钟真机复测）
+
+用户要求"一次性修完，不要停"，本轮把压缩（MJPEG/H.264/HEVC/AV1/VP9）族从"系统解码器 + RGB32 兼容路径"
+整体换成自有解码链路。完整报告：`docs/CAPTURE_MPEG_CHAIN_REPAIR_2026-09-16.md`。
+
+- 提交：`2a4f44f`（压缩 sink + codec 识别）→ `f0636f9`（MJPEG 直连 + 自解码）→ `b10e5c2`（解码 worker）
+  → `705e907`（D3D12VA/软解后端 + extradata 解析 + 低延迟标志 + 新测试）→ `35e5593`（帧池契约 + probe 越界修复）。
+- **MJPEG 2 分钟真机（口径不可比项已标注）**：1080p60 7175–7184 帧 / 0 丢帧 / 图侧 processCpuP95
+  1.987→0.364–0.375ms（−81%）；4K18 2150 帧 / 0 丢帧 / 6.218→0.912–0.936ms（−85%）；
+  解码器 `errors=0 queueDrops=0`。`callback→Present`/`readAgeMs` 新旧窗口一个不含解码、一个含解码，
+  **不可直接比较**（正文表格逐项标注）。
+- **H.264/HEVC 合成验证**（本机卡无此格式）：新测试用本地文件的 Annex-B 数据逐包驱动采集解码器，
+  H.264 硬解 900 + 软解 900、HEVC 252 + 252，帧数一致、D3D12 帧可导入图。测试已加入 delivery 门禁
+  （无素材时显式 SKIP）。
+- **帧池修复**：旧 swap 轮换允许 worker 在 read 停止后第 3 帧写调用方仍持有的帧；改为 4 帧池 +
+  read() 释放回收，worker 只写"从未交付/已被释放"的帧。代价：4K18 readAge 20.2–22.9ms vs worker 版
+  单次 19.8ms（spare 数不单调，无法定性为回归，详见报告 §4 注记）。
+- **probe 越界修复**：`capture_color_probe` 在双平面格式上 `AV_CEIL_RSHIFT(uint32_t)` 溢出成 21 亿行
+  直接崩溃；修复后新/旧两条路径都能输出 `source.raw/gpu.png/present.png`。颜色 A/B：当前采集信号是
+  动态画面，跨路径差异（mean 5.4）与同路径重复差异（mean 4.6–5.0）同量级，未发现系统性色偏，
+  但逐像素 ≤2 code 需静止画面，验收步骤见报告 §5。
+- **不做项（附理由）**：MJPEG 并行软解池（单 worker 已 0 丢帧、吞吐远超需求，并行不降低单帧延迟）；
+  `CODECAPI_AVLowLatencyMode`（作用于系统解码器，新链路已不使用系统解码器）；10bit/HDR 压缩采集
+  （需 P010 合同，本机无素材可验证）。
+- 验证：构建 exit 0；capture color tests failures=0；修复合同 191/0；compressed tests ALL PASS；
+  delivery 短测 PASS（含新增 capture-decode 检查）；真机烟测与 2 分钟复测均 0 丢帧。
+- 未验证（如实）：端到端光子延迟（相机法）、OBS/PotPlayer 同源对比、真 H.264/HEVC 采集卡、
+  10bit/HDR、AV1/VP9 采集。
+
+## 2026-09-16 MPEG/压缩链路阶段 1+2+解码 worker（MJPEG 设备直连自解码，2 分钟真机复测）
+
+用户要求：先跑基线并记录 → 建 Git 存档 → 一次性实施 MPEG 链路修复 → 同协议复测对比。基线与存档见下方条目（`checkpoint/pre-mpeg-chain-20260916`）。
+
+提交：`2a4f44f`（压缩 sink 基础设施 + codec 识别）、`f0636f9`（MJPEG 直连 + 自解码 + 回退）、本提交（解码 worker）。
+
+- 架构：MJPEG 格式不再走 `RenderStream`（系统 MJPEG 解码器 → 颜色转换 → RGB32 兼容路径），改为 `ConnectDirect(设备 pin → NativeCaptureSink 压缩模式)`；payload 由 FFmpeg `AV_CODEC_ID_MJPEG` 自解，swscale 转 full-range NV12 进图。连接失败/解码失败自动回退旧 RGB32 路径（已实测回退路径可用、不断流）。
+- 第一次直连被驱动拒绝（`0x8004022A VFW_E_TYPE_NOT_ACCEPTED`）的原因：`NativeSink` 在压缩模式下仍按像素布局校验 `QueryAccept/ReceiveConnection`；改为 `sameCompressed()` 只比媒体类型后直连成功（1080p/4K 均 `hr=0`）。
+- 回调线程只做压缩 payload 拷贝（1080p MJPEG 单帧约数百 KB，对比旧路径回调内 RGB32 拷贝 8.3MB/33MB），有界队列上限 3、满则丢旧；独立 `decodeThread` 解码 → full-range NV12 → 信箱换帧，latest-frame mailbox 语义不变。`close()` 先停图再 join worker 再释放帧。
+- 2 分钟真机（本机 ¥30 UVC 卡，无增强，`--no-nr --no-sr --no-fg`）：
+  - MJPEG 1080p60：**7175 帧、0 丢帧**、`decoded≥6600 errors=0 queueDrops=0`；图侧 processCpuP95 **1.987 → 0.364 ms**。
+  - MJPEG 4K18：**2150 帧、0 丢帧**、`decoded≥1800 errors=0 queueDrops=0`；图侧 processCpuP95 **6.218 → 0.882 ms**。
+- **指标口径警告（不得当收益宣传）**：旧路径的系统解码发生在回调之前，`callback→Present` / `readAgeMs` 两个窗口都不含解码；新路径这两个窗口从压缩样本到达回调开始、**包含解码本身**。因此新数字（P95 7.910 / 22.334 ms、readAgeMs ≈5–7 / ≈19 ms）与基线（P95 3.909 / 10.496 ms、readAgeMs 0.5–1.5 / ~2.9 ms）**不是同一测量口径，不能直接比较大小**。可作为对比的客观项：0 丢帧、0 解码错误、主机 CPU 下降；真正端到端（HDMI→显示器光子延迟）本机未测，需相机法或用户实机。
+- processCpu 下降的归因候选：上传字节数 RGB32 8.3MB → NV12 3.1MB（4K 33MB → 12.4MB）、少了系统颜色转换层；未做单因子归因实验，如实记录。
+- 颜色正确性（旧 RGB32 vs 新 NV12 逐像素 ≤2 code）与 H.264/HEVC/AV1 的 D3D12VA 后端尚未做，列入下一阶段；本条目只声称 MJPEG 链路稳定（0 丢帧/0 解码错误）与主机 CPU 下降。
+
+## 2026-09-16 MPEG/压缩链路开工前基线（2 分钟真机，走 RGB32 兼容链路）
+
+用户要求：先跑基线并记录 → 建 Git 存档 → 一次性实施 MPEG 链路修复 → 同协议复测对比。
+
+- 命令（本机 ¥30 UVC 卡，无增强，各 120 秒，日志确认 `explicit RGB32 compatibility path subtype=0x47504A4D`）：
+  `veyra.exe "capture:0:24:-1:0" --smoke-seconds 120 --no-nr --no-sr --no-fg`（MJPEG 1080p60）
+  `veyra.exe "capture:0:46:-1:0" --smoke-seconds 120 --no-nr --no-sr --no-fg`（MJPEG 4K18）
+- 基线：**MJPEG 1080p60：7163 帧、0 丢帧、callback→Present P95 3.909 ms、processCpu 1.987 ms、callbackFps 60.01、readAgeMs 0.5–1.5 ms**；
+  **MJPEG 4K18：2147 帧、0 丢帧、P95 10.496 ms、processCpu 6.218 ms、callbackFps 18.00、readAgeMs ~2.9 ms**。
+- 存档 tag：`checkpoint/pre-mpeg-chain-20260916`（本提交）。
+- 目标（方案 §5）：1080p60 MJPEG P95 ≤3.5 ms、4K18 每帧 CPU ≤3 ms，且颜色与旧路径对比 ≤2 code、任一级失败自动回退不断流。
+
+## 2026-09-16 原生链路修复报告：N1/N3/N4 交付 + 2 分钟真机复测（N2 已回退）
+
+按用户要求回退 N2 后，对 N1/N3/N4 做了 1080p60 与 4K18 各 2 分钟真机复测（同机同卡，无增强）：
+
+- 1080p60 YUY2（7178 帧、0 丢帧）：callback→Present P95 **2.557 ms**（优化前 2.640，−3.1%）、processCpu 0.422（前 0.412，+2.4%）、gpuReady 0.659（前 0.637，+3.5%）。
+- 4K18 YUY2（2151 帧、0 丢帧）：P95 **3.586 ms**（前 3.889，**−7.8%**）、processCpu **1.028 ms**（前 1.186，**−13.3%**）、gpuReady 1.079（前 0.873，+23.6%，如实列出）。
+- 结论：4K 达到验收线（≥两项改善 ≥5%、四个验收指标无一项回退 >3%）；1080p 在噪声内；4K 收益来自 N1 的整平面单次 memcpy 快路径。N4 在本卡被驱动忽略（0 收益），N1 逐像素格式本卡无法真机验证（微基准 + GPU 颜色用例）。
+- N2 回退原因与数据、三条调试坑（fence 索引 / CLI 字段丢失 / 视图帧 `buf[0]=null`）见同文件 N2 条目与报告。
+
+完整报告：`docs/CAPTURE_NATIVE_LINK_REPAIR_2026-09-16.md`。
+
+**严格同协议复测（同日补充）**：上面的对比用的是 12 秒历史基线，用户要求同协议重测后已执行：把优化前提交 `2406f81` 重新构建，与优化后同机同卡、同命令、各 120 秒（1080p 两侧各两次采样）：
+
+- 1080p60：P95 优化前 2.568/2.545 vs 优化后 2.557/2.562 → **持平（±0.2%）**；processCpu 0.380/0.406 vs 0.422/0.430 → +0.03~0.05 ms（图侧小幅移动，两次均可复现但只占整链路 P95 ~1.6%，机制未定位，如实记录）。
+- 4K18：P95 3.875 → **3.586（−7.5%）**；processCpu 1.126 → **1.028（−8.7%）**；两侧均 0 丢帧。
+- 结论修正：之前"1080p −3.1%"是窗口差异造成的乐观值，严格同协议下 1080p 为持平；4K 的 −7.5%/−8.7% 在严格基线下成立。收益机制 = N1 整平面单次 memcpy（回调拷贝 4K YUY2 基线 ≈0.89ms → 0.611ms），与 P95 改善 0.29ms 吻合。报告文档已同步为严格基线表。
+
+## 2026-09-16 采集链路 N2：两次拷贝合并（直接写入图上传缓冲）——实测负收益，整体回退
+
+按方案 §8 N2 实现并反复调试后，功能上已攻破（真机 1080p60 / 4K18：直接提交 100%、0 丢帧、1 次历史重置），但**性能净亏**，按用户指示整体回退：
+
+- 1080p60 YUY2：直接写入 P95 **3.536ms** / processCpu 1.494ms vs 信箱 **2.629ms** / 0.429ms（**+0.91ms**）
+- 4K18 YUY2：直接写入 P95 **4.102ms** / processCpu 1.885ms vs 信箱 **3.265ms** / 1.013ms（**+0.84ms**）
+- 原因：合并后写入目标是 D3D12 upload heap（write-combined 内存），CPU 写 WC 的成本加"跨线程写完、GPU 读取前的 flush/可见性等待"，超过省掉的那次 RAM→上传缓冲 memcpy。
+
+调试过程存档（避免重复踩坑）：① 上传 fence 索引错位（图按 parity 记录、源按槽位写入，丢帧后错位）；② `EngineController::open()` 用 `PlayerOptions::from` 重建时把诊断字段丢光；③ 直接视图帧 `buf[0]==nullptr` 导致呈现/调度停摆——挂上 `av_buffer_create` 的真实 AVBufferRef 后消失（这三条都不是最终选择它的理由）。
+
+**处置**：N2 相关代码全部 `git revert`，软件内不再保留直接写入路径与 `--capture-direct-ingress` 开关；方案 §8 N2 状态改为"尝试后回退（负收益）"。N1 的 `--capture-cpu-unpack` 诊断字段管道（被回退误伤）已单独恢复。
+
+## 2026-09-16 采集链路 N1：逐像素转换从 CPU 挪到 GPU
+
+- 采集侧：`captureMediaLayout` 对 UYVY/YVYU/BGR24/RGB555/RGB565 保留驱动真实 packing（UYVY422/YVYU422/BGR24/RGB555LE/RGB565LE）；`copyCaptureSample` 改为按行原样拷贝（保留 DIB 方向契约、手动翻转与 YUV 色度行跟随）；新增 `captureLegacyCpuLayout` + `--capture-cpu-unpack` 诊断开关，旧 BGR0/YUY2 逐像素转换仍可回退。
+- GPU 侧：`EnhanceGraphDesc::packedInput`（1 BGR24 / 2 RGB555 / 3 RGB565 / 4 UYVY / 5 YVYU）；上传把驱动字节 1:1 放进 R8G8B8A8 纹理（纹素宽 = ceil(rowBytes/4)）；新增 `PackedCaptureToLinear.dxil` 统一 unpack（BGR24 取字节、RGB555/565 位扩展、UYVY/YVYU 双像素取样 + 既有颜色合同），`Yuy2ToLinear`/`RgbToLinear` 原路径不动。
+- 拷贝优化：翻转时源正序读、目标倒序写（原来倒序读源把 4K RGB24 拖到 1.88ms）；无翻转且行距相等时整平面一次 memcpy。
+- 测试：构建 exit 0（含 dxc 编译新 shader）；`veyra_capture_color_tests` failures=0；`veyra_hdr_color_tests` 全 15 格式 × full/limited GPU 用例 pass（新格式 error=0）；修复合同 191/0；预设 66 组 exit 0。
+- 微基准（新工具 `veyra_capture_copy_bench`，4K 3840×2160、30 次/帧，N1 行拷贝 vs 旧 CPU 拆包 ms/帧）：YUY2 0.611；UYVY 0.640 vs 2.47；YVYU 0.595 vs 2.51；RGB24 1.120 vs 5.23；RGB555 0.791 vs 11.06；RGB565 0.828 vs 10.87；NV12 0.199。全部达到 N1 目标（YUY2≤1.0、BGR24≤1.5、UYVY/RGB555/565≤1.2）。
+- 补跑（用户释放设备后）：真卡冒烟 `capture:0:0:-1:0` 10 秒 → exit 0、frames=576、dropped=0、callback→Present P95 2.566ms、processCpuP95 0.453ms（YUY2 链路在 N1 后完好，`[capture-buffer]` 日志仍如实标注驱动忽略协商）；delivery 短测 **PASS** 23/23、43.89 秒（`logs/delivery/12ea5baac571465fb1296d2b5c6eda29/result.json`）。"旧 CPU vs 新 GPU 全图逐像素平均/最大误差"未单独做（GPU 用例以黑白/10bit 阶梯验证 error=0）。
+
+## 2026-09-16 采集链路 N3：格式排序与延迟标注
+
+- `include/veyra/source/CaptureFormatRank.h`（新）：`captureFormatRank` / `captureFormatTier` / `captureFormatTierLabel` / `captureFormatNeedsCostHint`。推荐顺序：NV12/P010 → YUY2 → RGB24/RGB32/ARGB32 → UYVY/YVYU/RGB555/RGB565 → 压缩/需解码（rank 100）。
+- `enumerateFormats`：按 rank `stable_sort`（同 rank 保留驱动枚举顺序），每行 label 追加延迟档位（低延迟 / 中延迟 / 高延迟·需 CPU 拆包 / 需系统解码·较高延迟）；`CaptureFormat` 增加 `rank`/`tier` 字段供面板使用。
+- 采集面板：选中高成本或解码格式时给**一次性**提示（`CapturePreferences` v1→v2，新增 `formatHintDismissed`，v1 旧文件仍可读）；提示写入状态栏并持久化"只提示一次"。
+- 验证：构建 exit 0；修复合同 191 项 0 失败（新增 4 项：rank 链 NV12<YUY2<RGB24<RGB565<解码、tier 分级、提示门槛、合成列表里 YUY2 排在 RGB565 前）；预设 66 组 exit 0。真卡 `veyra_capture_tests --list`：YUY2（0–23，含 4K18）排在 MJPEG（24+）之前，每行带档位标注（控制台中文乱码是既有 probe 编码问题，GUI 走 wstring）。
+- 未做（如实）：UI 提示的自动化点击测试（判定逻辑已被单元测试覆盖）；N1/N2 与压缩解码链路尚未开工。
+
+## 2026-09-16 采集链路优化开工：隔离分支 + N4 视频 pin 缓冲协商
+
+用户指令："直接开隔离区分支，开始优化采集链路"。已建 tag `checkpoint/pre-capture-decode-latency-20260916`（main `2406f81`）与分支 `codex/capture-decode-latency-20260916`，按 `docs/CAPTURE_DECODE_LATENCY_PLAN_2026-09-16.md` 的 N4→N3→N1→N2 顺序开工。
+
+**N4 实现**：
+
+- `include/veyra/source/CaptureBuffer.h`（新）：`CaptureBufferMode{Auto,Minimum,DriverDefault}` + 策略 `captureDesiredVideoBuffers`（Auto：≤1080p 2、>1080p 3；Minimum：1；DriverDefault：0 不干预）。
+- `NativeCaptureSink`：新增 `suggestCaptureVideoBuffering`（连前对视频输出 pin 调 `IAMBufferNegotiation::SuggestAllocatorProperties`）与 `queryCaptureAllocatorProperties`（连后读实际 allocator 属性）。
+- `CaptureCardSource`：新增 `setBufferMode`；直连路径连前建议、连后记录 `[capture-buffer] mode=… requested=… actual buffers=… bytes=… align=…`，驱动忽略时标注 `(driver ignored; negotiation not applied)`。
+- 设置/持久化/UI/CLI：`EnhancementSettings::captureBuffer`（重连生效）、预设 schema v16→v17、采集面板新增"设备缓冲（变更需重连）"三档下拉与帮助、`--capture-buffer=auto|minimum|driver` 诊断开关；总增强开关关闭（首次默认状态）时也一并下发。
+- 测试：构建 93/93 exit 0；修复合同 187 项 0 失败（新增 6 项：默认 auto、三档 validate、超范围拒绝、策略 2/3/1/0）；预设 66 组迁移 + v17 往返 exit 0；采集颜色测试 failures=0。
+
+**真机 A/B（本机 ¥30 USB3 卡，1080p60 YUY2，三档各 10 秒，串行执行）**：
+
+| 模式 | 请求 | 实际 | 结果 |
+| --- | --- | --- | --- |
+| auto | 2 | **10** | 驱动忽略建议；frames=578、dropped=0、callback→Present P95 2.615ms、readAgeMs 0.47–1.45ms |
+| minimum | 1 | **10** | 同上；P95 2.597ms、dropped=0 |
+| driver | 0（不干预） | 10 | 基线；P95 2.601ms、dropped=0 |
+
+结论：**这张卡的驱动接受调用但忽略建议（S_OK 后仍分配 10 个缓冲）**，N4 在它身上无收益，如实记录（符合方案的"该卡无收益"边界）；档位、requested/actual 日志与"协商未生效"标注可用，等待支持协商的卡验证 `cBuffers≤2` 的收益。三档均 0 丢帧，无回归。首轮三进程并行启动互相抢卡导致 `Run hr=0x800705AA`，已改串行 `Start-Process -Wait` 重跑；失败记录保留在 `logs/veyra-app.log`（13:15 段）。
+
+**未做（如实）**：`GetAllocatorRequirements` 强制要求属于"驱动忽略时的二级手段"，风险高，留待评估；N3/N1/N2 与压缩解码链路尚未开工。
+
 ## 2026-09-16 隔离分支合并到 main（用户授权）
 
 用户指令："先把这些修复合并到main吧，然后创建好git存档，更新项目日志和各文档，先把工作区弄干净。"本轮在 main 上执行合并、存档与文档同步：

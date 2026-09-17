@@ -7,6 +7,7 @@
 // views are created last. Per-frame execution uses the shared command slot
 // ring (NR evaluates on a fresh list - snippet constraint).
 #include "veyra/pipeline/EnhanceGraph.h"
+#include "veyra/engine/ColorLut.h"
 
 #include <algorithm>
 #include <bit>
@@ -23,6 +24,7 @@
 #include "veyra/ngx/DlssFgBackend.h"
 #include "veyra/ngx/AdaMfgUnlock.h"
 #include "veyra/ngx/AmpereMfgUnlock.h"
+#include "veyra/ngx/NvapiArchSpoof.h"
 #include "veyra/gfx/FsrSrBackend.h"
 #include "veyra/ngx/DlssNrParameters.h"
 #include "veyra/ngx/DlssNrRuntimeAdapter.h"
@@ -49,6 +51,41 @@ namespace {
 constexpr int64_t usPerSecond = 1000000;
 float uintBits(uint32_t v) { return std::bit_cast<float>(v); }
 
+// N1 packed capture ingress helpers. Codes match pipeline::packedInputCode:
+// 1 BGR24, 2 RGB555, 3 RGB565, 4 UYVY, 5 YVYU.
+unsigned packedIngressRowBytes(uint32_t code,unsigned width){
+    return code==1?width*3:width*2;
+}
+unsigned packedIngressTexels(uint32_t code,unsigned width){
+    return (packedIngressRowBytes(code,width)+3)/4;
+}
+AVPixelFormat packedIngressFormat(uint32_t code){
+    switch(code){
+    case 1:return AV_PIX_FMT_BGR24;
+    case 2:return AV_PIX_FMT_RGB555LE;
+    case 3:return AV_PIX_FMT_RGB565LE;
+    case 4:return AV_PIX_FMT_UYVY422;
+    case 5:return AV_PIX_FMT_YVYU422;
+    default:break;
+    }
+    return AV_PIX_FMT_NONE;
+}
+// Coarse luma sample for scene analysis; mirrors the CPU luma weights.
+uint8_t packedIngressLuma(const AVFrame& frame,uint32_t code,unsigned x,unsigned y){
+    const auto* p=frame.data[0]+ptrdiff_t(y)*frame.linesize[0];
+    switch(code){
+    case 1:{const auto* q=p+x*3;return uint8_t((54*unsigned(q[2])+183*unsigned(q[1])+19*unsigned(q[0])+128)>>8);}
+    case 2:{const unsigned w=unsigned(p[x*2])|(unsigned(p[x*2+1])<<8);
+        const unsigned r=(w>>10)&31,g=(w>>5)&31,b=w&31;return uint8_t((54*(r<<3|r>>2)+183*(g<<3|g>>2)+19*(b<<3|b>>2)+128)>>8);}
+    case 3:{const unsigned w=unsigned(p[x*2])|(unsigned(p[x*2+1])<<8);
+        const unsigned r=(w>>11)&31,g=(w>>5)&63,b=w&31;return uint8_t((54*(r<<3|r>>2)+183*(g<<2|g>>4)+19*(b<<3|b>>2)+128)>>8);}
+    case 4:return p[x*2+1]; // UYVY: Y0 follows U
+    case 5:return p[x*2];   // YVYU: Y0 leads
+    default:break;
+    }
+    return 0;
+}
+
 } // namespace
 
 EnhanceGraph::EnhanceGraph(gfx::D3D12DeviceContext& context, gfx::CommandSlotRing& ring)
@@ -65,6 +102,152 @@ EnhanceGraph::~EnhanceGraph()
 // ---------------------------------------------------------------------------
 // initialize: exact ordering of the proven probe sequence.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Colour grade (plan v4): the tables are baked on the CPU, uploaded into small
+// FP32 textures and read by the ingest shaders. Nothing here allocates, copies
+// or dispatches when desc.color.enabled is false, so the "off" path costs zero.
+// ---------------------------------------------------------------------------
+namespace {
+// Settings carry the LUT name as UTF-16; log it as UTF-8 (never narrow
+// character by character, and never build a range from two temporaries).
+std::string utf8Of(const std::wstring& text){
+    if(text.empty())return {};
+    const int size=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,text.data(),int(text.size()),nullptr,0,nullptr,nullptr);
+    if(size<=0)return "<invalid>";
+    std::string out(std::size_t(size),'\0');
+    WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,text.data(),int(text.size()),out.data(),size,nullptr,nullptr);
+    return out;
+}
+ComPtr<ID3D12Resource> makeColorTable(ID3D12Device* device,uint32_t width){
+    return makeTexture(device,width,1,DXGI_FORMAT_R32G32B32A32_FLOAT,false);
+}
+ComPtr<ID3D12Resource> makeColorLut3D(ID3D12Device* device,uint32_t size){
+    D3D12_HEAP_PROPERTIES hp{};hp.Type=D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC td{};
+    td.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+    td.Width=size;td.Height=size;td.DepthOrArraySize=UINT16(size);td.MipLevels=1;
+    td.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;td.SampleDesc.Count=1;
+    ComPtr<ID3D12Resource> r;
+    if(FAILED(device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&td,D3D12_RESOURCE_STATE_COMMON,nullptr,IID_PPV_ARGS(&r))))return {};
+    return r;
+}
+}
+bool EnhanceGraph::createColorResources(){
+    if(colorCurveTex_&&colorHueTex_&&colorLumTex_&&colorLutTex_)return true;
+    colorCurveTex_=makeColorTable(context_.device(),ColorGradeTables::kCurveEntries);
+    colorHueTex_=makeColorTable(context_.device(),ColorGradeTables::kHueEntries);
+    colorLumTex_=makeColorTable(context_.device(),ColorGradeTables::kLumEntries);
+    // 1x1x1 placeholder keeps the descriptor valid while no LUT is loaded;
+    // lutStrength stays 0 in that case, so it is never sampled.
+    colorLutTex_=makeColorLut3D(context_.device(),1);
+    colorLutSize_=0;
+    upColorCurve_=makeUploadBuffer(context_.device(),sizeof(float)*4*ColorGradeTables::kCurveEntries);
+    upColorHue_=makeUploadBuffer(context_.device(),sizeof(float)*4*ColorGradeTables::kHueEntries);
+    upColorLum_=makeUploadBuffer(context_.device(),sizeof(float)*4*ColorGradeTables::kLumEntries);
+    if(!colorCurveTex_||!colorHueTex_||!colorLumTex_||!colorLutTex_||!upColorCurve_||!upColorHue_||!upColorLum_){
+        veyra::log::error("color-grade",std::format("colour resources unavailable tables={} lut={}",colorCurveTex_?1:0,colorLutTex_?1:0));
+        return false;
+    }
+    if(FAILED(upColorCurve_->Map(0,nullptr,reinterpret_cast<void**>(&mappedColorCurve_)))||
+       FAILED(upColorHue_->Map(0,nullptr,reinterpret_cast<void**>(&mappedColorHue_)))||
+       FAILED(upColorLum_->Map(0,nullptr,reinterpret_cast<void**>(&mappedColorLum_))))return false;
+    return true;
+}
+// Product default: dither exactly one LSB of whatever the graph is writing while
+// the colour grade is active, and nothing at all when it is not - every ungraded
+// output path therefore stays byte-identical to the pre-colour build.
+float EnhanceGraph::outputDitherStep() const{
+    if(desc_.outputDitherStep>=0.0f)return desc_.outputDitherStep;
+    // A master switch that is on but neutral renders exactly like no grading at
+    // all (contract), so it must not add noise either - only a real grade does.
+    if(!colorActive_||colorTables_.identity)return 0.0f;
+    if(hdr10Output())return 1.0f/1023.0f;
+    if(desc_.hdrOutput)return 0.0f;   // FP16 target: nothing to quantise
+    return 1.0f/255.0f;
+}
+void EnhanceGraph::refreshColorTables(){
+    colorTables_=ColorGradeTables::bake(desc_.color);
+    if(!colorActive_||!mappedColorCurve_||!mappedColorHue_||!mappedColorLum_)return;
+    std::copy(colorTables_.curve.begin(),colorTables_.curve.end(),mappedColorCurve_);
+    std::copy(colorTables_.hue.begin(),colorTables_.hue.end(),mappedColorHue_);
+    std::copy(colorTables_.lum.begin(),colorTables_.lum.end(),mappedColorLum_);
+    colorDirty_=true;
+}
+void EnhanceGraph::uploadColorTables(ID3D12GraphicsCommandList* list){
+    if(!colorDirty_)return;
+    auto copyTable=[&](ID3D12Resource* dst,ID3D12Resource* src,UINT width){
+        tracker_.transition(list,dst,D3D12_RESOURCE_STATE_COPY_DEST);
+        D3D12_TEXTURE_COPY_LOCATION d{},s{};
+        d.pResource=dst;d.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;d.SubresourceIndex=0;
+        s.pResource=src;s.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        s.PlacedFootprint.Footprint={DXGI_FORMAT_R32G32B32A32_FLOAT,width,1,1,width*16};
+        list->CopyTextureRegion(&d,0,0,0,&s,nullptr);
+        tracker_.transition(list,dst,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    };
+    copyTable(colorCurveTex_.Get(),upColorCurve_.Get(),ColorGradeTables::kCurveEntries);
+    copyTable(colorHueTex_.Get(),upColorHue_.Get(),ColorGradeTables::kHueEntries);
+    copyTable(colorLumTex_.Get(),upColorLum_.Get(),ColorGradeTables::kLumEntries);
+    if(colorLutPending_&&!colorLutUpload_.empty()){
+        const unsigned size=colorLutPending_;
+        // D3D12 requires the copy source row pitch to be 256-byte aligned. A
+        // tight size*16 pitch is invalid for every LUT size that is not a
+        // multiple of 16 (2, 3, ... 17, 33, ... - most creative LUTs included),
+        // and an invalid footprint lets the driver read/write past the staging
+        // buffer. Measured symptom: a 2-cube upload crashed the next D3D12 call
+        // with a fail-fast in the host process. Pad rows instead.
+        constexpr unsigned kRowPitchAlignment=256;
+        const unsigned rowPitch=(size*16u+kRowPitchAlignment-1)/kRowPitchAlignment*kRowPitchAlignment;
+        const uint64_t bytes=uint64_t(rowPitch)*size*size;
+        auto& staging=colorLutStaging_[colorLutStagingSlot_];
+        colorLutStagingSlot_=(colorLutStagingSlot_+1)%colorLutStaging_.size();
+        staging=makeUploadBuffer(context_.device(),bytes);
+        void* mapped=nullptr;
+        if(staging&&SUCCEEDED(staging->Map(0,nullptr,&mapped))&&mapped){
+            for(unsigned z=0;z<size;++z)for(unsigned y=0;y<size;++y){
+                auto* dst=reinterpret_cast<float*>(static_cast<uint8_t*>(mapped)+std::size_t(z)*rowPitch*size+std::size_t(y)*rowPitch);
+                for(unsigned x=0;x<size;++x){
+                    const std::size_t i=(std::size_t(z)*size+y)*size+x;
+                    dst[x*4+0]=colorLutUpload_[i*3+0];
+                    dst[x*4+1]=colorLutUpload_[i*3+1];
+                    dst[x*4+2]=colorLutUpload_[i*3+2];
+                    dst[x*4+3]=1.0f;
+                }
+            }
+            staging->Unmap(0,nullptr);
+            tracker_.transition(list,colorLutTex_.Get(),D3D12_RESOURCE_STATE_COPY_DEST);
+            D3D12_TEXTURE_COPY_LOCATION d{},s{};
+            d.pResource=colorLutTex_.Get();d.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;d.SubresourceIndex=0;
+            s.pResource=staging.Get();s.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            s.PlacedFootprint.Footprint={DXGI_FORMAT_R32G32B32A32_FLOAT,size,size,size,rowPitch};
+            list->CopyTextureRegion(&d,0,0,0,&s,nullptr);
+            tracker_.transition(list,colorLutTex_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }else{
+            veyra::log::warn("color-grade","lut staging buffer unavailable; keeping the previous table");
+        }
+        colorLutUpload_.clear();
+        colorLutPending_=0;
+    }
+    colorDirty_=false;
+}
+bool EnhanceGraph::setColorLut(const float* rgb,unsigned size){
+    if(!colorActive_||size<2||size>64)return false;
+    if(!createColorResources())return false;
+    colorLutTex_=makeColorLut3D(context_.device(),size);
+    if(!colorLutTex_)return false;
+    colorLutSize_=size;
+    colorLutUpload_.assign(rgb,rgb+std::size_t(size)*size*size*3);
+    colorLutPending_=size;
+    colorDirty_=true;
+    // Callers must have drained the queue: the descriptor is re-staged in place.
+    D3D12_SHADER_RESOURCE_VIEW_DESC lutSrv{};
+    lutSrv.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;
+    lutSrv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE3D;
+    lutSrv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    lutSrv.Texture3D.MipLevels=1;
+    for(auto* pass:{&yuvPass_,&rgbPass_})if(pass->heap)stager_.stageSrv(colorLutTex_.Get(),&lutSrv,pass->heap.Get(),11);
+    return true;
+}
+
 bool EnhanceGraph::initialize(const EnhanceGraphDesc& desc)
 {
     failedBackend_=engine::FailedBackend::Infrastructure;
@@ -167,9 +350,10 @@ bool EnhanceGraph::createResources()
     upZeroMotion_ = makeUploadBuffer(context_.device(), dPitch_ * workH_);
     lumaTex_ = makeTexture(context_.device(), srcW_, srcH_, desc_.wideYuvInput()?DXGI_FORMAT_R16_UNORM:DXGI_FORMAT_R8_UNORM, true);
     chromaTex_ = makeTexture(context_.device(), (srcW_+1) / 2, (srcH_+1) / 2, desc_.wideYuvInput()?DXGI_FORMAT_R16G16_UNORM:DXGI_FORMAT_R8G8_UNORM, true);
-    if(desc_.rgbInput||desc_.yuy2Input){
-        if(desc_.yuy2Input&&(srcW_%2||desc_.rgbInput))return false;
-        const unsigned packedWidth=desc_.yuy2Input?srcW_/2:srcW_;
+    if(desc_.rgbInput||desc_.yuy2Input||desc_.packedInput){
+        if((desc_.yuy2Input||desc_.packedInput==4||desc_.packedInput==5)&&srcW_%2)return false;
+        if(desc_.rgbInput&&(desc_.yuy2Input||desc_.packedInput))return false;
+        const unsigned packedWidth=desc_.packedInput?packedIngressTexels(desc_.packedInput,srcW_):desc_.yuy2Input?srcW_/2:srcW_;
         rgbPitch_=(size_t(packedWidth)*4+255)&~size_t(255);
         rgbTex_=makeTexture(context_.device(),packedWidth,srcH_,DXGI_FORMAT_R8G8B8A8_UNORM,false);
         if(!rgbTex_)return false;
@@ -199,6 +383,49 @@ bool EnhanceGraph::createResources()
     baseFlow_=makeTexture(context_.device(),workW_,workH_,DXGI_FORMAT_R16G16_FLOAT,true);
     if(presentSinkFg())for(auto& motion:presentMotion_){motion=makeTexture(context_.device(),workW_,workH_,DXGI_FORMAT_R16G16_FLOAT,false);if(!motion)return false;}
     if(!nrInput_||!residualRgba_||!nrFlow_||!baseFlow_)return false;
+    // Colour grade tables (v4): only allocated when the stage is enabled.
+    colorActive_=desc_.color.enabled;
+    if(colorActive_){
+        if(!createColorResources())return false;
+        refreshColorTables();
+        // Load the optional .cube the settings reference; a LUT that cannot be
+        // resolved disables the lookup instead of sampling a placeholder.
+        if(desc_.color.hasLut()){
+            // Plan v5.2: the declared input space must match the content domain.
+            // A display-referred (sRGB) LUT on HDR content, or a PQ LUT on SDR
+            // content, is refused here instead of being applied silently with
+            // values that mean something else than the LUT author assumed.
+            const bool hdrContent=desc_.hdrInput;
+            const int space=desc_.color.lutInputSpace;
+            const bool mismatch=hdrContent?(space==engine::ColorSettings::kLutInputSrgb):(space==engine::ColorSettings::kLutInputPq);
+            if(mismatch){
+                colorLutNotice_=hdrContent?L"LUT 已禁用：HDR 内容不能使用 sRGB 显示参考输入空间（改选 Cineon Log 或 PQ）"
+                                        :L"LUT 已禁用：SDR 内容不能使用 PQ 输入空间（改选 Cineon Log 或 sRGB 显示参考）";
+                desc_.color.lutStrength=0.0f;
+                refreshColorTables();
+                veyra::log::warn("color-grade",std::format("lut input space rejected space={} hdrContent={} name bytes={} (grade continues without the lookup)",space,hdrContent?1:0,desc_.color.lutNameString().size()));
+            }else{
+                colorLutNotice_.clear();
+                engine::ColorLutData lut;
+                const engine::ColorLutStore store(runtime::localDataDirectory());
+                if(store.resolve(desc_.color.lutNameString(),lut)&&lut.valid()&&setColorLut(lut.rgb.data(),unsigned(lut.size))){
+                    // The name must be converted once: building the log argument
+                    // from lutNameString().begin() and .end() created two
+                    // different temporaries, so the range constructor computed a
+                    // bogus distance and read past both buffers (crash in the LUT
+                    // load path, reproduced by the GPU contract test).
+                    veyra::log::info("color-grade",std::format("lut loaded name={} size={}",utf8Of(desc_.color.lutNameString()),lut.size));
+                }else{
+                    desc_.color.lutStrength=0.0f;
+                    refreshColorTables();
+                    veyra::log::warn("color-grade","referenced lut unavailable; colour grade continues without it");
+                }
+            }
+        }
+        veyra::log::info("color-grade",std::format("stage enabled tables={}/{}/{} lutInputSpace={} lut={}",
+            ColorGradeTables::kCurveEntries,ColorGradeTables::kHueEntries,ColorGradeTables::kLumEntries,
+            desc_.color.lutInputSpace,desc_.color.hasLut()?1:0));
+    }
     proxyTex_ = makeTexture(context_.device(), nrW_, nrH_, DXGI_FORMAT_R8G8B8A8_UNORM, true);
     neuralTex_ = makeTexture(context_.device(), nrW_, nrH_, DXGI_FORMAT_R8G8B8A8_UNORM, true);
     finalRgba_ = makeTexture(context_.device(), nrW_, nrH_, DXGI_FORMAT_R16G16B16A16_FLOAT, true);
@@ -402,7 +629,11 @@ void EnhanceGraph::applyAdaMfgUnlock()
     const auto& adapter = context_.adapter();
     // Hard architecture gate: 50 series keeps its native multi-frame path and is
     // never patched, and no other architecture is in scope either.
-    if (!ngx::AdaMfgUnlock::adapterIsAda(adapter.vendorId, adapter.deviceId)) {
+    // VEYRA_TEST_FORCE_ADA_UNLOCK runs the same patch on a non-Ada host so the
+    // edit itself can be checked without 40-series hardware; never a product path.
+    wchar_t forced[2]{};
+    const bool forceOnAnyAdapter=GetEnvironmentVariableW(L"VEYRA_TEST_FORCE_ADA_UNLOCK",forced,2)>0;
+    if (!forceOnAnyAdapter&&!ngx::AdaMfgUnlock::adapterIsAda(adapter.vendorId, adapter.deviceId)) {
         return;
     }
     wchar_t disabled[2]{};
@@ -440,12 +671,72 @@ void EnhanceGraph::applyAdaMfgUnlock()
                                             std::string(state.detail.begin(), state.detail.end())));
 }
 
+// Must run before the NGX core initializes the DLSS-G provider: the provider
+// resolves NvAPI_GPU_GetArchInfo once during its own initialization and caches
+// the resulting architecture decision, so installing the spoof afterwards has
+// no effect (measured 2026-09-17 on the local 5070: the cached entry was
+// already populated and the capability verdict stayed unchanged).
+void EnhanceGraph::prepareAmpereFgSpoof()
+{
+    if (!fgEnabled_ || desc_.frameGenerationBackend != engine::FrameGenerationBackend::Dlss) {
+        return;
+    }
+    wchar_t disabled[2]{};
+    if (GetEnvironmentVariableW(L"VEYRA_DISABLE_AMPERE_MFG_UNLOCK", disabled, 2) > 0) {
+        return;
+    }
+    const auto& adapter = context_.adapter();
+    wchar_t forced[2]{};
+    const bool forceOnAnyAdapter = GetEnvironmentVariableW(L"VEYRA_TEST_FORCE_AMPERE_UNLOCK", forced, 2) > 0;
+    if (!forceOnAnyAdapter && !ngx::AmpereMfgUnlock::adapterIsAmpere(adapter.vendorId, adapter.deviceId)) {
+        return;
+    }
+
+    const auto modulePath = std::filesystem::path(desc_.runtimeAbsPath) / L"nvngx_dlssg.dll";
+    HMODULE module = GetModuleHandleW(L"nvngx_dlssg.dll");
+    if (module == nullptr) {
+        module = LoadLibraryExW(modulePath.c_str(), nullptr,
+                                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    }
+    if (module == nullptr) {
+        veyra::log::warn("ampere-mfg", std::format("DLSS-G runtime could not be preloaded for the architecture spoof (path={} win32={})",
+                                                   modulePath.string(), GetLastError()));
+        return;
+    }
+    // Ampere default: tell the provider it runs on Blackwell (0x1B0). That is
+    // what makes its frame-generation availability gate pass; the sm_86 kernel
+    // rewrite is what makes the programs actually run. Ada/Blackwell never reach
+    // this function. VEYRA_TEST_NVAPI_SPOOF_ARCH overrides the reported id (e.g.
+    // 0x190 for Ada, 0x170 to disable the trick), 0 refuses the spoof entirely.
+    uint32_t spoofArchitecture = ngx::NvapiArchSpoof::kArchBlackwell;
+    {
+        wchar_t overrideText[16]{};
+        if (GetEnvironmentVariableW(L"VEYRA_TEST_NVAPI_SPOOF_ARCH", overrideText, 16) > 0) {
+            spoofArchitecture = static_cast<uint32_t>(std::wcstoul(overrideText, nullptr, 0));
+        }
+    }
+    if (spoofArchitecture == 0) {
+        return;
+    }
+    ampereSpoofed_ = ngx::NvapiArchSpoof::install(module, spoofArchitecture);
+    if (!ampereSpoofed_) {
+        const auto state = ngx::NvapiArchSpoof::snapshot();
+        veyra::log::warn("ampere-mfg", std::format("NVAPI architecture spoof unavailable ({}); the arch-gate retarget will be used instead",
+                                                   std::string(state.detail.begin(), state.detail.end())));
+    }
+}
+
 void EnhanceGraph::applyAmpereMfgUnlock()
 {
     const auto& adapter = context_.adapter();
     // Hard architecture gate: only RTX 30 (Ampere GA10x) takes this path. Ada
     // keeps its own unlock and Blackwell keeps its native multi-frame path.
-    if (!ngx::AmpereMfgUnlock::adapterIsAmpere(adapter.vendorId, adapter.deviceId)) {
+    // VEYRA_TEST_FORCE_AMPERE_UNLOCK exists so the patch itself can be checked
+    // on a non-Ampere host (does rewriting all 69 fatbins leave the runtime
+    // functional?); it never run in a product session.
+    wchar_t forced[2]{};
+    const bool forceOnAnyAdapter=GetEnvironmentVariableW(L"VEYRA_TEST_FORCE_AMPERE_UNLOCK",forced,2)>0;
+    if (!forceOnAnyAdapter&&!ngx::AmpereMfgUnlock::adapterIsAmpere(adapter.vendorId, adapter.deviceId)) {
         return;
     }
     wchar_t disabled[2]{};
@@ -480,9 +771,16 @@ void EnhanceGraph::applyAmpereMfgUnlock()
                                                    scan.detail));
         return;
     }
-    const auto state = ngx::AmpereMfgUnlock::apply(module);
-    veyra::log::info("ampere-mfg", std::format("adapter deviceId=0x{:04X} unlock applied={} runs={} slots={} fatbins={} lea={} gates={} ({})",
-                                               adapter.deviceId, state.applied ? 1 : 0, state.slotRuns,
+    // The spoof was installed before the provider was initialized (see
+    // prepareAmpereFgSpoof). When it is active the provider's own 0x1b0 compare
+    // must stay byte-identical so the reported architecture matches it; only
+    // the kernel rewrite runs here. Without the spoof the old retarget is kept.
+    const auto spoofState = ngx::NvapiArchSpoof::snapshot();
+    const bool spoofed = ampereSpoofed_ && spoofState.installed;
+    const auto state = ngx::AmpereMfgUnlock::apply(module, !spoofed);
+    veyra::log::info("ampere-mfg", std::format("adapter deviceId=0x{:04X} unlock applied={} spoofed={} reportedArch=0x{:X} runs={} slots={} fatbins={} lea={} gates={} ({})",
+                                               adapter.deviceId, state.applied ? 1 : 0,
+                                               spoofed ? 1 : 0, spoofState.reportedArchitecture, state.slotRuns,
                                                state.slotPointers,
                                                state.programFatbins + state.networkFatbins + state.auxFatbins,
                                                state.leaSites, state.archGateSites,
@@ -558,6 +856,10 @@ bool EnhanceGraph::initNgxFeatures()
         return false;
     }
 
+    // RTX 30 needs the NVAPI architecture spoof in place before the provider is
+    // initialized below. No-op on Ada/Blackwell and when FG is off.
+    prepareAmpereFgSpoof();
+
     coreHost_ = std::make_unique<ngx::NgxCoreHost>();
     Status st = Status::Ok;
     if (!coreHost_->initialize(context_.device(), desc_.runtimeAbsPath.c_str(),
@@ -581,17 +883,19 @@ bool EnhanceGraph::initNgxFeatures()
     const bool fgAvailable = fgBackend_->queryCapability(*coreHost_, fgCaps, st);
     if (!fgAvailable) {
         if (ngx::AmpereMfgUnlock::applied()) {
-            // The provider's own report stays Ada/Blackwell-gated; the audited
-            // sm_86 unlock replaced every program and the audited build's
-            // compiled ceiling is five generated frames. Only a completely
-            // absent report is overridden; an explicit smaller value is kept.
-            if (fgCaps.multiFrameCountMax == 0) {
-                fgCaps.multiFrameCountMax = 5;
-            }
-            fgCaps.available = true;
-            veyra::log::warn("ampere-mfg", std::format(
-                "runtime reported FG unavailable; continuing on the audited sm_86 unlock (multiFrameMax={})",
+            // The unlock rewrites the provider's programs, but the runtime's own
+            // availability gate still refuses sm_86. A real RTX 3060 (field log
+            // 2026-09-17) showed that forcing the capability here only moves the
+            // failure to CreateFeature (0xBAD0000B UnableToInitializeFeature)
+            // and then tears the whole frame-generation stage down with a
+            // generic error. Fail closed with the actual reason instead. If a
+            // 30-series configuration is ever shown to work, the controlled
+            // retry belongs behind an explicit, verified capability path - not
+            // behind an assumption.
+            veyra::log::error("ampere-mfg", std::format(
+                "runtime reported FG unavailable (MultiFrameCountMax={}); the sm_86 unlock is applied but this driver/runtime combination does not enable frame generation - failing closed instead of forcing CreateFeature",
                 fgCaps.multiFrameCountMax));
+            return false;
         } else {
             veyra::log::error("graph", "FG unavailable; fail closed");
             return false;
@@ -770,8 +1074,9 @@ bool EnhanceGraph::createComputePasses()
     if(!downsamplePass_.loadShader("NrDownsample.dxil",cs)||!downsamplePass_.create(context_.device(),cs,2,1,1))return false;
     if(!residualPass_.loadShader("NrResidualComposite.dxil",cs)||!residualPass_.create(context_.device(),cs,4,3,1,24))return false;
     if(!flowAdaptPass_.loadShader("FlowAdapt.dxil",cs)||!flowAdaptPass_.create(context_.device(),cs,3,1,1))return false;
-    if (!yuvPass_.loadShader("YuvToLinearRgb.dxil", cs) || !yuvPass_.create(context_.device(), cs, 8, 2, 1, 12)) return false;
-    if((desc_.rgbInput||desc_.yuy2Input)&&(!rgbPass_.loadShader(desc_.yuy2Input?"Yuy2ToLinear.dxil":"RgbToLinear.dxil",cs)||!rgbPass_.create(context_.device(),cs,8,1,1)))return false;
+    if (!yuvPass_.loadShader("YuvToLinearRgb.dxil", cs) || !yuvPass_.create(context_.device(), cs, 12, 2, 1, 12+kColorGradeConstantCount, 4)) return false;
+    const char* rgbShader=desc_.packedInput?"PackedCaptureToLinear.dxil":desc_.yuy2Input?"Yuy2ToLinear.dxil":"RgbToLinear.dxil";
+    if((desc_.rgbInput||desc_.yuy2Input||desc_.packedInput)&&(!rgbPass_.loadShader(rgbShader,cs)||!rgbPass_.create(context_.device(),cs,12,1,1,8+kColorGradeConstantCount,4)))return false;
     if (!encPass_.loadShader("ParityEncode.dxil", cs) || !encPass_.create(context_.device(), cs, 8, 1, 1)) return false;
     if (!decPass_.loadShader("ParityDecode.dxil", cs) || !decPass_.create(context_.device(), cs, 8)) return false;
     if (!blitPass_.loadShader("ScaleBlit.dxil", cs) || !blitPass_.create(context_.device(), cs, 19, 1, 1)) return false;
@@ -843,7 +1148,7 @@ bool EnhanceGraph::createViews()
         stagedSrv(videoSrOutput_.Get(),DXGI_FORMAT_R8G8B8A8_UNORM,hdrVideoSrPass_,6);
     }
     // Immutable per-resource views.
-    if(desc_.rgbInput||desc_.yuy2Input){
+    if(desc_.rgbInput||desc_.yuy2Input||desc_.packedInput){
         stagedSrv(rgbTex_.Get(),DXGI_FORMAT_R8G8B8A8_UNORM,rgbPass_,0);
         makeUav(context_.device(),srcRgba_.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT,cpu(rgbPass_,1));
     }
@@ -870,6 +1175,21 @@ bool EnhanceGraph::createViews()
     if(videoSrOutput_&&viewsTex)stagedSrv(videoSrOutput_.Get(),DXGI_FORMAT_R8G8B8A8_UNORM,blitPass_,17);
     if (viewsTex) stagedSrv(residualRgba_.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT,blitPass_,18);
     if (viewsTex) stagedSrv(srcRgba_.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, blitPass_, 0);
+    // Colour-grade tables: four SRVs at the extra table's fixed register base.
+    if(colorActive_){
+        D3D12_SHADER_RESOURCE_VIEW_DESC lutSrv{};
+        lutSrv.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;
+        lutSrv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE3D;
+        lutSrv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        lutSrv.Texture3D.MipLevels=1;
+        for(auto* pass:{&yuvPass_,&rgbPass_}){
+            if(!pass->heap)continue;
+            stager_.stageSrv(colorCurveTex_.Get(),nullptr,pass->heap.Get(),8);
+            stager_.stageSrv(colorHueTex_.Get(),nullptr,pass->heap.Get(),9);
+            stager_.stageSrv(colorLumTex_.Get(),nullptr,pass->heap.Get(),10);
+            stager_.stageSrv(colorLutTex_.Get(),&lutSrv,pass->heap.Get(),11);
+        }
+    }
     if (viewsUav) makeUav(context_.device(), workRgba_.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, cpu(blitPass_, 1));
     if (viewsTex) stagedSrv(nrEnabled_&&!desc_.nrBeforeSr ? residualRgba_.Get() : workRgba_.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, blitPass_, 2);
     if (viewsUav) makeUav(context_.device(), videoFrame_[0].Get(), outputFormat(), cpu(blitPass_, 3));
@@ -960,7 +1280,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
             hdr10Output()?"PQ-BT2020-RGB10":desc_.hdrOutput?"scRGB-FP16":"sRGB-RGB8",
             desc_.hdrOutput?"none":"BT2390-luminance+neutral-ray-gamut-compression"));
     }
-    if (resolved.isHdrPath()&&(!desc_.hdrInput||desc_.rgbInput||desc_.yuy2Input)) {
+    if (resolved.isHdrPath()&&(!desc_.hdrInput||desc_.rgbInput||desc_.yuy2Input||desc_.packedInput)) {
         veyra::log::error("graph", "HDR input requires an explicit YUV HDR contract; RGB/YUY2 HDR ingress is unsupported"); return false;
     }
     if(std::abs(ptsMs)>9e13){veyra::log::error("timeline","PTS outside representable range");return false;}
@@ -1019,14 +1339,16 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
         previousLuma_=std::move(sample);
     };
 
-    if(desc_.rgbInput||desc_.yuy2Input){
-        if(desc_.yuy2Input?frame->format!=AV_PIX_FMT_YUYV422:(frame->format!=AV_PIX_FMT_RGBA&&frame->format!=AV_PIX_FMT_BGRA&&frame->format!=AV_PIX_FMT_RGB0&&frame->format!=AV_PIX_FMT_BGR0)){
-            veyra::log::error("graph","direct RGB input contract requires packed RGBA/BGRA/RGB0/BGR0 frame");return false;
+    if(desc_.rgbInput||desc_.yuy2Input||desc_.packedInput){
+        const bool packed=desc_.packedInput!=0;
+        if(packed?frame->format!=packedIngressFormat(desc_.packedInput):(desc_.yuy2Input?frame->format!=AV_PIX_FMT_YUYV422:(frame->format!=AV_PIX_FMT_RGBA&&frame->format!=AV_PIX_FMT_BGRA&&frame->format!=AV_PIX_FMT_RGB0&&frame->format!=AV_PIX_FMT_BGR0))){
+            veyra::log::error("graph",std::format("direct capture input contract mismatch packing={} frameFormat={}",desc_.packedInput,int(frame->format)));return false;
         }
-        if(frame->width!=int(srcW_)||frame->height!=int(srcH_)||!frame->data[0]||std::abs(int64_t(frame->linesize[0]))<int64_t(srcW_)*(desc_.yuy2Input?2:4))return false;
+        const unsigned ingressRowBytes=packed?packedIngressRowBytes(desc_.packedInput,srcW_):srcW_*(desc_.yuy2Input?2:4);
+        if(frame->width!=int(srcW_)||frame->height!=int(srcH_)||!frame->data[0]||std::abs(int64_t(frame->linesize[0]))<int64_t(ingressRowBytes))return false;
         for(uint32_t y=0;y<srcH_;++y){
             auto* dst=mappedRgb_[parity]+y*rgbPitch_;const auto* src=frame->data[0]+ptrdiff_t(y)*frame->linesize[0];
-            if(desc_.yuy2Input||frame->format==AV_PIX_FMT_RGBA)std::memcpy(dst,src,size_t(srcW_)*(desc_.yuy2Input?2:4));
+            if(packed||desc_.yuy2Input||frame->format==AV_PIX_FMT_RGBA)std::memcpy(dst,src,size_t(ingressRowBytes));
             else for(uint32_t x=0;x<srcW_;++x){
                 const bool bgr=frame->format==AV_PIX_FMT_BGRA||frame->format==AV_PIX_FMT_BGR0;
                 dst[x*4]=src[x*4+(bgr?2:0)];dst[x*4+1]=src[x*4+1];dst[x*4+2]=src[x*4+(bgr?0:2)];
@@ -1037,15 +1359,17 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
             std::vector<uint8_t> sample;sample.reserve(64*36);
             const bool bgr=frame->format==AV_PIX_FMT_BGRA||frame->format==AV_PIX_FMT_BGR0;
             for(unsigned y=0;y<36;++y)for(unsigned x=0;x<64;++x){
-                const auto* p=frame->data[0]+ptrdiff_t(y*srcH_/36)*frame->linesize[0]+(x*srcW_/64)*(desc_.yuy2Input?2:4);
-                sample.push_back(desc_.yuy2Input?p[0]:uint8_t((54*unsigned(p[bgr?2:0])+183*unsigned(p[1])+19*unsigned(p[bgr?0:2])+128)>>8));
+                const unsigned sx=x*srcW_/64,sy=y*srcH_/36;
+                if(packed)sample.push_back(packedIngressLuma(*frame,desc_.packedInput,sx,sy));
+                else{const auto* p=frame->data[0]+ptrdiff_t(sy)*frame->linesize[0]+sx*(desc_.yuy2Input?2:4);
+                    sample.push_back(desc_.yuy2Input?p[0]:uint8_t((54*unsigned(p[bgr?2:0])+183*unsigned(p[1])+19*unsigned(p[bgr?0:2])+128)>>8));}
             }
             analyzeLuma(std::move(sample));
         }
         tracker_.transition(list,rgbTex_.Get(),D3D12_RESOURCE_STATE_COPY_DEST);
         D3D12_TEXTURE_COPY_LOCATION dst{},src{};dst.pResource=rgbTex_.Get();dst.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         src.pResource=upRgb_[parity].Get();src.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        src.PlacedFootprint.Footprint={DXGI_FORMAT_R8G8B8A8_UNORM,desc_.yuy2Input?srcW_/2:srcW_,srcH_,1,UINT(rgbPitch_)};
+        src.PlacedFootprint.Footprint={DXGI_FORMAT_R8G8B8A8_UNORM,packed?packedIngressTexels(desc_.packedInput,srcW_):desc_.yuy2Input?srcW_/2:srcW_,srcH_,1,UINT(rgbPitch_)};
         list->CopyTextureRegion(&dst,0,0,0,&src,nullptr);
         tracker_.transition(list,rgbTex_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     } else if (frame->format == AV_PIX_FMT_D3D12) {
@@ -1152,19 +1476,22 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
     if (desc_.stageMark) desc_.stageMark("upload");
 
     // 2. YUV -> RGBA16F.
+    if(colorActive_&&colorDirty_)uploadColorTables(list);
     tracker_.transition(list, srcRgba_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    if(desc_.rgbInput||desc_.yuy2Input){
-        const float c[8]={uintBits(srcW_),uintBits(srcH_),uintBits(workingTransferCode(resolved)),uintBits(resolved.range==ColorRange::Limited?1u:0u),
-            resolved.range==ColorRange::Full?0.0f:1.0f,resolved.matrix==YuvMatrix::BT2020NCL?2.0f:resolved.matrix==YuvMatrix::BT601?0.0f:1.0f,resolved.primaries==ColorPrimaries::BT2020?1.0f:0.0f,0};
-        rgbPass_.bind(list,c,gpuHandleOf(rgbPass_,0).ptr,gpuHandleOf(rgbPass_,1).ptr);
+    if(desc_.rgbInput||desc_.yuy2Input||desc_.packedInput){
+        float c[8+kColorGradeConstantCount]={uintBits(srcW_),uintBits(srcH_),uintBits(workingTransferCode(resolved)),uintBits(resolved.range==ColorRange::Limited?1u:0u),
+            resolved.range==ColorRange::Full?0.0f:1.0f,resolved.matrix==YuvMatrix::BT2020NCL?2.0f:resolved.matrix==YuvMatrix::BT601?0.0f:1.0f,resolved.primaries==ColorPrimaries::BT2020?1.0f:0.0f,uintBits(desc_.packedInput)};
+        if(colorActive_)packColorGradeConstants(colorTables_,c+8);
+        rgbPass_.bind(list,c,gpuHandleOf(rgbPass_,0).ptr,gpuHandleOf(rgbPass_,1).ptr,gpuHandleOf(rgbPass_,8).ptr);
         list->Dispatch((srcW_+15)/16,(srcH_+15)/16,1);
     }else{
-        const float constants[12] = { resolved.range==ColorRange::Full?0.0f:1.0f,
+        float constants[12+kColorGradeConstantCount] = { resolved.range==ColorRange::Full?0.0f:1.0f,
             resolved.matrix==YuvMatrix::BT2020NCL?2.0f:resolved.matrix==YuvMatrix::BT601?0.0f:1.0f,
             resolved.transfer==TransferFunction::HLG?5.0f:resolved.transfer==TransferFunction::PQ?4.0f:float(workingTransferCode(resolved)), (nv12Texture?(nv12Texture->GetDesc().Format==DXGI_FORMAT_P010?1.0f:0.0f):(desc_.captureBitDepth==16?2.0f:desc_.wideYuvInput()?1.0f:0.0f)),
             uintBits(srcW_), uintBits(srcH_), uintBits((desc_.hdrOutput?1u:0u)|(resolved.primaries==ColorPrimaries::BT2020?2u:0u)),
             uintBits(resolved.reconstructChroma?std::max(1u,unsigned(resolved.chromaLocation)):0u),toneMapPeakNits_,203.0f,0,0 };
-        yuvPass_.bind(list, constants, gpuHandleOf(yuvPass_, nv12Texture ? 3 + parity * 2 : 0).ptr, gpuHandleOf(yuvPass_, 2).ptr);
+        if(colorActive_)packColorGradeConstants(colorTables_,constants+12);
+        yuvPass_.bind(list, constants, gpuHandleOf(yuvPass_, nv12Texture ? 3 + parity * 2 : 0).ptr, gpuHandleOf(yuvPass_, 2).ptr,gpuHandleOf(yuvPass_,8).ptr);
         list->Dispatch((srcW_ + 15) / 16, (srcH_ + 15) / 16, 1);
     }
     tracker_.uavBarrier(list, srcRgba_.Get());
@@ -1450,7 +1777,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
         tracker_.transition(list, videoFrame_[parity].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         const float constants[8] = {
             uintBits(workW_), uintBits(workH_),
-            uintBits(workW_), uintBits(workH_), hdr10Output()?2.0f:desc_.hdrOutput?0.0f:1.0f, 0, 0, 0 };
+            uintBits(workW_), uintBits(workH_), hdr10Output()?2.0f:desc_.hdrOutput?0.0f:1.0f, outputDitherStep(), 0, 0 };
         blitPass_.bind(list, constants, gpuHandleOf(blitPass_, srcSlot).ptr, gpuHandleOf(blitPass_, uavSlot).ptr);
         list->Dispatch((workW_ + 15) / 16, (workH_ + 15) / 16, 1);
         tracker_.uavBarrier(list, videoFrame_[parity].Get());
@@ -1588,6 +1915,13 @@ bool EnhanceGraph::applySettings(const engine::EnhancementSettings& s){
     // XeSS has a fixed 2X proxy swapchain contract. Settings callers must
     // rebuild instead of accepting a change that cannot take effect in place.
     if(s.nrRuntime!=desc_.nrRuntime||std::max(2u,s.multiplier)!=desc_.fgMultiplier||s.frameGenerationBackend!=desc_.frameGenerationBackend||s.videoSrQuality!=desc_.videoSrQuality||!s.validate().empty()||(s.multiplier>1&&!engine::presentSinkFrameGeneration(s.frameGenerationBackend)&&(!fgCapsAvailable_||s.multiplier-1>uint32_t(fgMultiFrameMax_))))return false;
+    // The colour master switch changes the graph shape (tables + shader branch)
+    // and must rebuild; every other colour field is a live uniform update.
+    if(s.color.enabled!=desc_.color.enabled)return false;
+    // Switching the referenced .cube re-stages a descriptor, which needs the
+    // queue drained: treat it as a rebuild (parameters stay live).
+    if(s.color.lutNameString()!=desc_.color.lutNameString())return false;
+    if(!(s.color==desc_.color)){desc_.color=s.color;refreshColorTables();}
     desc_.contentRate=s.content;desc_.model=s.model;desc_.residual=s.residual;desc_.protection=s.protection;desc_.settingsRevision=s.revision;
     desc_.fgMultiplier=std::max(2u,s.multiplier);desc_.enableNvofStandalone=s.nr&&!desc_.stillImage;nvofStandalone_=desc_.enableNvofStandalone;
     setNrEnabled(s.nr);setFgEnabled(s.multiplier>1&&!engine::presentSinkFrameGeneration(s.frameGenerationBackend));
@@ -1694,6 +2028,7 @@ void EnhanceGraph::shutdown()
     // feature (the unlock is process memory only; the file on disk is untouched).
     ngx::AdaMfgUnlock::release();
     ngx::AmpereMfgUnlock::release();
+    ngx::NvapiArchSpoof::release();
 
     // Staged explicit release (scope-end destructors then have nothing left).
     decPass_ = ComputePass{};

@@ -93,9 +93,12 @@ public:
     // keep their own paths and are refused here.
     static bool adapterIsAmpere(uint32_t vendorId, uint32_t deviceId);
 
-    // Installs the sm_86 fatbin redirection and the architecture compares.
-    // Refuses (and rolls back) unless every audited structure matches.
-    static State apply(HMODULE module);
+    // Installs the sm_86 fatbin redirection and (unless `retargetArchGates` is
+    // false) the architecture compares. Refuses (and rolls back) unless every
+    // audited structure matches. Callers that make the provider see Blackwell
+    // through the NVAPI spoof must pass false so the provider's own 0x1b0
+    // compare stays byte-identical and therefore passes.
+    static State apply(HMODULE module, bool retargetArchGates = true);
 
     // Restores every patched byte and frees the rebuilt fatbins. Safe to call
     // repeatedly and when nothing was applied.

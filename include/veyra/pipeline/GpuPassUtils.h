@@ -104,6 +104,7 @@ struct ComputePass {
     ComPtr<ID3D12PipelineState> pso;
     ComPtr<ID3D12DescriptorHeap> heap;
     UINT increment = 0, constantCount = 8;
+    bool hasExtraSrv = false;
 
     bool loadShader(const char* name, std::vector<uint8_t>& bytes) const
     {
@@ -123,11 +124,15 @@ struct ComputePass {
         return !bytes.empty();
     }
 
+    // extraSrvCount adds a second SRV table at a fixed register base (8): the
+    // colour-grade tables. Passes that do not use it keep the original
+    // three-parameter root signature.
     bool create(ID3D12Device* device, const std::vector<uint8_t>& cs, UINT heapSlots,
-                UINT srvCount = 3, UINT uavCount = 1, UINT constants = 8)
+                UINT srvCount = 3, UINT uavCount = 1, UINT constants = 8, UINT extraSrvCount = 0)
     {
         if(constants==0||constants>60)return false;
         constantCount=constants;
+        hasExtraSrv=extraSrvCount>0;
         D3D12_DESCRIPTOR_RANGE1 srvRange{};
         srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
         srvRange.NumDescriptors = srvCount;
@@ -136,7 +141,7 @@ struct ComputePass {
         uavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
         uavRange.NumDescriptors = uavCount;
         uavRange.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
-        D3D12_ROOT_PARAMETER1 rp[3]{};
+        D3D12_ROOT_PARAMETER1 rp[4]{};   // 4th slot is the optional extra SRV table
         rp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         rp[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
         rp[0].Constants.ShaderRegister = 0;
@@ -149,19 +154,35 @@ struct ComputePass {
         rp[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
         rp[2].DescriptorTable.NumDescriptorRanges = 1;
         rp[2].DescriptorTable.pDescriptorRanges = &uavRange;
+        D3D12_DESCRIPTOR_RANGE1 extraRange{};
+        if(hasExtraSrv){
+            extraRange.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+            extraRange.NumDescriptors=extraSrvCount;
+            extraRange.BaseShaderRegister=8;
+            extraRange.Flags=D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
+            rp[3].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            rp[3].ShaderVisibility=D3D12_SHADER_VISIBILITY_ALL;
+            rp[3].DescriptorTable.NumDescriptorRanges=1;
+            rp[3].DescriptorTable.pDescriptorRanges=&extraRange;
+        }
         D3D12_VERSIONED_ROOT_SIGNATURE_DESC rd{};
         rd.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-        rd.Desc_1_1.NumParameters = 3;
+        rd.Desc_1_1.NumParameters = hasExtraSrv?4:3;
         rd.Desc_1_1.pParameters = rp;
         ComPtr<ID3DBlob> sig, err;
-        if (FAILED(D3D12SerializeVersionedRootSignature(&rd, &sig, &err))) return false;
+        const HRESULT serializeHr=D3D12SerializeVersionedRootSignature(&rd, &sig, &err);
+        if (FAILED(serializeHr)) {
+            veyra::log::error("gfx-util",std::format("root signature serialize failed hr=0x{:08X} msg={}",unsigned(serializeHr),
+                err?std::string(static_cast<const char*>(err->GetBufferPointer()),err->GetBufferSize()):std::string()));
+            return false;
+        }
         if (FAILED(device->CreateRootSignature(0, sig->GetBufferPointer(),
-                sig->GetBufferSize(), IID_PPV_ARGS(&rootSig)))) return false;
+                sig->GetBufferSize(), IID_PPV_ARGS(&rootSig)))) { veyra::log::error("gfx-util","CreateRootSignature failed"); return false; }
         D3D12_COMPUTE_PIPELINE_STATE_DESC pd{};
         pd.pRootSignature = rootSig.Get();
         pd.CS.pShaderBytecode = cs.data();
         pd.CS.BytecodeLength = cs.size();
-        if (FAILED(device->CreateComputePipelineState(&pd, IID_PPV_ARGS(&pso)))) return false;
+        if (FAILED(device->CreateComputePipelineState(&pd, IID_PPV_ARGS(&pso)))) { veyra::log::error("gfx-util",std::format("CreateComputePipelineState failed constants={} extra={}",constantCount,extraSrvCount)); return false; }
         D3D12_DESCRIPTOR_HEAP_DESC hd{};
         hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         hd.NumDescriptors = heapSlots;
@@ -172,7 +193,7 @@ struct ComputePass {
     }
 
     void bind(ID3D12GraphicsCommandList* list, const float* constants,
-              uint64_t srvGpu, uint64_t uavGpu) const
+              uint64_t srvGpu, uint64_t uavGpu, uint64_t extraSrvGpu = 0) const
     {
         ID3D12DescriptorHeap* heaps[] = { heap.Get() };
         list->SetDescriptorHeaps(1, heaps);
@@ -183,6 +204,10 @@ struct ComputePass {
         const D3D12_GPU_DESCRIPTOR_HANDLE uav{ uavGpu };
         list->SetComputeRootDescriptorTable(1, srv);
         list->SetComputeRootDescriptorTable(2, uav);
+        if(hasExtraSrv){
+            const D3D12_GPU_DESCRIPTOR_HANDLE extra{ extraSrvGpu };
+            list->SetComputeRootDescriptorTable(3, extra);
+        }
     }
 };
 

@@ -30,6 +30,7 @@ int wmain(int argc,wchar_t**argv){
     gd.sourceWidth=gd.workWidth=info.width;gd.sourceHeight=gd.workHeight=info.height;
     gd.rgbInput=info.color.pixelFormat==pipeline::SourcePixelFormat::Bgra8;
     gd.yuy2Input=info.color.pixelFormat==pipeline::SourcePixelFormat::Yuy2;
+    gd.packedInput=pipeline::packedInputCode(info.color.pixelFormat);
     gd.captureBitDepth=info.color.pixelFormat==pipeline::SourcePixelFormat::P010?10:info.color.pixelFormat==pipeline::SourcePixelFormat::P016?16:8;
     gd.enableNr=gd.enableFg=false;gd.noFeatures=true;
     const HWND window=CreateWindowExW(0,L"STATIC",L"Veyra color diagnostic",WS_POPUP,0,0,info.width,info.height,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
@@ -43,20 +44,36 @@ int wmain(int argc,wchar_t**argv){
         if(result==source::SourceReadStatus::Frame)++frames;
     }
     if(frames<20||!frame)return 7;
+    std::cout<<"frame ptr="<<static_cast<const void*>(frame)<<" format="<<frame->format<<" "<<frame->width<<"x"<<frame->height
+        <<" data0="<<static_cast<const void*>(frame->data[0])<<" data1="<<static_cast<const void*>(frame->data[1])
+        <<" linesize0="<<frame->linesize[0]<<" linesize1="<<frame->linesize[1]<<std::endl;
     const auto pixelFormat=AVPixelFormat(frame->format);
     const unsigned rowBytes=unsigned(av_image_get_linesize(pixelFormat,int(info.width),0));
+    std::cout<<"rowBytes="<<rowBytes<<std::endl;
     std::ofstream raw(dir/"source.raw",std::ios::binary);
     const auto* pixelDesc=av_pix_fmt_desc_get(pixelFormat);
+    std::cout<<"planes="<<av_pix_fmt_count_planes(pixelFormat)<<std::endl;
     for(int plane=0;plane<av_pix_fmt_count_planes(pixelFormat);++plane){
-        const unsigned rows=plane?AV_CEIL_RSHIFT(info.height,pixelDesc->log2_chroma_h):info.height;
+        // AV_CEIL_RSHIFT on an unsigned operand wraps through unsigned negation
+        // (1080 -> 2147484188 rows and a buffer overrun); keep the shift on a
+        // signed value like the FFmpeg macro expects.
+        const unsigned rows=plane?unsigned(AV_CEIL_RSHIFT(int(info.height),int(pixelDesc->log2_chroma_h))):info.height;
         const int bytes=av_image_get_linesize(pixelFormat,int(info.width),plane);
+        std::cout<<"plane="<<plane<<" rows="<<rows<<" bytes="<<bytes<<" src="<<static_cast<const void*>(frame->data[plane])<<" stride="<<frame->linesize[plane]<<std::endl;
         for(unsigned y=0;y<rows;++y)raw.write(reinterpret_cast<const char*>(frame->data[plane]+ptrdiff_t(y)*frame->linesize[plane]),bytes);
     }
     raw.close();
+    std::cout<<"raw written"<<std::endl;
     pipeline::EnhanceGraph::FrameOutputs out;sink::RgbaImage gpu,display;
-    const bool ok=graph.process(frame,packet.pts.toDouble()*1000,true,out,packet.sequence,&packet.colorInfo)&&
-        sink::readRgba8(ctx,ring,graph.videoFrameResource(out.videoSlot),gpu)&&sink::saveImage((dir/"gpu.png").wstring(),gpu)&&
-        presenter.present(ctx,ring,graph,out.videoSlot,false)&&presenter.readPresentedFrameForTest(ctx,ring,display)&&sink::saveImage((dir/"present.png").wstring(),display);
+    // Split the chain so a crash reports the exact stage instead of dying
+    // silently inside one boolean expression.
+    bool ok=graph.process(frame,packet.pts.toDouble()*1000,true,out,packet.sequence,&packet.colorInfo);
+    std::cout<<"stage process="<<ok<<" slot="<<out.videoSlot<<std::endl;
+    if(ok){ok=sink::readRgba8(ctx,ring,graph.videoFrameResource(out.videoSlot),gpu);std::cout<<"stage readRgba8="<<ok<<" bytes="<<gpu.pixels.size()<<std::endl;}
+    if(ok){ok=sink::saveImage((dir/"gpu.png").wstring(),gpu);std::cout<<"stage saveGpu="<<ok<<std::endl;}
+    if(ok){ok=presenter.present(ctx,ring,graph,out.videoSlot,false);std::cout<<"stage present="<<ok<<std::endl;}
+    if(ok){ok=presenter.readPresentedFrameForTest(ctx,ring,display);std::cout<<"stage readPresented="<<ok<<std::endl;}
+    if(ok){ok=sink::saveImage((dir/"present.png").wstring(),display);std::cout<<"stage savePresent="<<ok<<std::endl;}
     int error=-1;if(ok&&gpu.pixels.size()==display.pixels.size()){error=0;for(size_t i=0;i<gpu.pixels.size();++i)error=std::max(error,std::abs(int(gpu.pixels[i])-int(display.pixels[i])));}
     const auto metrics=source.metrics();
     std::ofstream report(dir/"result.json");report<<"{\"success\":"<<(ok?"true":"false")<<",\"width\":"<<info.width<<",\"height\":"<<info.height<<",\"avPixelFormat\":"<<frame->format<<",\"rowBytes\":"<<rowBytes<<",\"matrix\":"<<int(info.color.matrix)<<",\"range\":"<<int(info.color.range)<<",\"transfer\":"<<int(info.color.transfer)<<",\"presentMaxError8\":"<<error<<",\"callbackFps\":"<<metrics.callbackFps<<",\"received\":"<<metrics.received<<",\"nrEvaluations\":"<<graph.metrics().nrEvaluateCount<<"}\n";report.close();

@@ -1,9 +1,11 @@
 // Native 4:2:2 capture. One RGBA8 texel stores Y0 U Y1 V for two pixels.
 // No CPU RGB expansion, intermediate 8-bit RGB rounding, or 4:2:0 conversion.
 #include "HdrColor.hlsli"
+#include "ColorGrade.hlsli"
 cbuffer Params : register(b0) {
     uint width; uint height; uint transfer; uint reserved;
     float limited; float matrix709; float primaries2020; float padding;
+    float4 colorRow0; float4 colorRow1; float4 colorRow2; float4 colorControls; float4 colorFlags;
 };
 Texture2D<float4> packedYuy2 : register(t0);
 RWTexture2D<float4> linearRgb : register(u0);
@@ -28,5 +30,6 @@ void main(uint3 p : SV_DispatchThreadID) {
     rgb=saturate(rgb);
     float3 decoded=float3(decode(rgb.r),decode(rgb.g),decode(rgb.b));
     if(primaries2020>0.5)decoded=HdrTo709(decoded);
+    if(colorFlags.x>0.5){ColorGradeParams grade={colorRow0,colorRow1,colorRow2,colorControls,colorFlags};decoded=ColorGradeApply(decoded,grade);}
     linearRgb[p.xy]=float4(decoded,1);
 }

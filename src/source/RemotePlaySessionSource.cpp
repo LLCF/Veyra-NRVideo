@@ -26,13 +26,16 @@ void RemotePlaySessionSource::run(std::stop_token stop, RemotePlayConnectDesc de
     for(;;){
     recovery.beginAttempt(milliseconds());
     bool retry=false;
+    // RP_IN_USE needs its own, much longer backoff: the console keeps the old
+    // session slot for roughly twenty seconds after it ends.
+    bool retryWasRpInUse=false;
     uint64_t receivedBase=0,droppedBase=0;
     {std::lock_guard lock(mutex_);receivedBase=rates_.received;droppedBase=rates_.ingressDropped;}
     std::jthread feeder;
     std::jthread monitor;
     try {
         const bool ok=source.connect(desc);
-        if(!ok)retry=recovery.poll(milliseconds(),false,true)==remoteplay::StreamRecovery::Action::Reconnect;
+        if(!ok){retryWasRpInUse=source.nativeSnapshot().startupRetryAllowed;retry=recovery.poll(milliseconds(),false,true)==remoteplay::StreamRecovery::Action::Reconnect;}
         {std::lock_guard lock(mutex_);publishedInfo_=source.info();if(!initialized_)started_=ok;failed_=!ok&&!retry;initialized_=true;telemetryInbox_=source.telemetryInbox();
             if(failed_)recovery_.message=L"PS5 串流连接失败，请检查主机及网络；已保存的配对无需重输。";}
         ready_.notify_all();
@@ -127,7 +130,7 @@ void RemotePlaySessionSource::run(std::stop_token stop, RemotePlayConnectDesc de
                     if(action==remoteplay::StreamRecovery::Action::Keyframe){
                         source.recoverVideo();log::warn("remoteplay-recovery",std::format("request keyframe; received={} decoded={} videoCallbacks={} rejected={} packetReceived={} packetLost={}",snapshot.video.accessUnits,snapshot.decodedFrames,native.videoCallbacks,native.callbackRejected,native.packetReceived,native.packetLost));
                         std::lock_guard lock(mutex_);recovery_.active=true;recovery_.message=L"画面中断，正在请求关键帧恢复…";
-                    }else if(action==remoteplay::StreamRecovery::Action::Reconnect){retry=true;break;}
+                    }else if(action==remoteplay::StreamRecovery::Action::Reconnect){retryWasRpInUse=native.startupRetryAllowed;retry=true;break;}
                     else if(action==remoteplay::StreamRecovery::Action::Fail){
                         log::error("remoteplay-recovery",std::format("recovery stopped attempts={} quitReason={} error={}",recovery.reconnects(),native.lastQuitReason,snapshot.errorCode));
                         std::lock_guard lock(mutex_);failed_=true;recovery_.active=false;
@@ -145,7 +148,10 @@ void RemotePlaySessionSource::run(std::stop_token stop, RemotePlayConnectDesc de
         ready_.notify_all();
     }
     if(retry&&!stop.stop_requested()){
-        std::lock_guard lock(mutex_);recovery_={true,recovery.episodeRetries(),std::format(L"串流中断，正在重新连接（{}/3）…",recovery.episodeRetries())};
+        std::lock_guard lock(mutex_);
+        recovery_={true,recovery.episodeRetries(),retryWasRpInUse
+            ?std::format(L"PS5 正在释放上一个串流会话，等待后自动重试（{}/3）…",recovery.episodeRetries())
+            :std::format(L"串流中断，正在重新连接（{}/3）…",recovery.episodeRetries())};
         latest_.reset();pendingControllers_.clear();controller_={};feedback_={};
     }
     log::info("remoteplay-recovery",std::format("teardown begin attempt={} retry={} cancelled={}",recovery.reconnects(),retry,stop.stop_requested()));
@@ -156,8 +162,14 @@ void RemotePlaySessionSource::run(std::stop_token stop, RemotePlayConnectDesc de
     log::info("remoteplay-recovery",std::format("teardown complete attempt={}",recovery.reconnects()));
     if(!retry||stop.stop_requested())break;
     log::warn("remoteplay-recovery",std::format("old session joined; reconnect={} using existing in-memory pairing",recovery.reconnects()));
-    // Interruptible 1/2/4 second backoff; manual Stop prevents the next start.
-    for(unsigned i=0;i<(1u<<(recovery.episodeRetries()-1))*20&&!stop.stop_requested();++i)std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    // Interruptible backoff; manual Stop prevents the next start. The console
+    // keeps the previous session slot for ~20 s after it ends, so an RP_IN_USE
+    // refusal gets 10/20/40 s instead of the generic 1/2/4 s: the short budget
+    // spent all three retries inside that window (field log 2026-09-17: three
+    // refusals in 11 s, while a 25 s wait reconnected fine).
+    const unsigned backoffSeconds=retryWasRpInUse?(10u<<(recovery.episodeRetries()-1)):(1u<<(recovery.episodeRetries()-1));
+    if(retryWasRpInUse)log::warn("remoteplay-recovery",std::format("PS5 still holds the previous session; waiting {}s before retry {}/3",backoffSeconds,recovery.episodeRetries()));
+    for(unsigned i=0;i<backoffSeconds*20&&!stop.stop_requested();++i)std::this_thread::sleep_for(std::chrono::milliseconds(50));
     if(stop.stop_requested())break;
     }
     {std::lock_guard lock(mutex_);recovery_.active=false;}

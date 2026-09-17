@@ -6,7 +6,7 @@
 #include "veyra/sink/CaptureAudioSession.h"
 #include "veyra/source/AudioInputRecovery.h"
 namespace veyra::source {
-struct CaptureFormat {int index=0;unsigned width=0,height=0;double fps=0;std::wstring label;std::wstring key;};
+struct CaptureFormat {int index=0;unsigned width=0,height=0;double fps=0;std::wstring label;std::wstring key;int rank=0;int tier=0;};
 struct CaptureDevice {
     std::wstring name;
     // DirectShow moniker DevicePath/display name. This is stable across a
@@ -45,10 +45,16 @@ public:
     // 0 automatic, 1 PCM only, 2 bitstream preferred. Takes effect on the next
     // connect/reconnect because the audio media type is negotiated there.
     void setAudioIngress(unsigned mode);
+    // 0 auto, 1 minimum, 2 driver default (see CaptureBuffer.h). Applied on the
+    // next connect: the allocator is created while the graph is built.
+    void setBufferMode(unsigned mode);
     // Manual ingest flip for devices whose declared DIB orientation does not
     // match the samples (RGB24 upside-down reports). Applies to the next
     // sample; works for RGB and YUV without touching the device.
     void setVerticalFlip(bool enabled);
+    // N1 diagnostic: keep the legacy per-pixel CPU unpack (BGR0/YUY2 targets)
+    // instead of the GPU unpack path. Applied on the next connect.
+    void setCpuUnpack(bool enabled);
     CaptureMetrics metrics()const;
     void videoPresented(double ptsMs,int64_t host100ns,int64_t arrival100ns);
     void videoReset(bool resetAudio=true);
@@ -61,6 +67,9 @@ public:
     void close()noexcept override;
 private:
     bool connectDirectShowAudio(const SourceOpenDesc&);
+    // AVerMedia capture cards need their installed vendor component to arm
+    // non-PCM (Dolby/DTS) passthrough before the audio pin is negotiated.
+    bool applyVendorAudioSwitch(const std::wstring& audioName,const std::wstring& audioPath);
     SourceReadStatus readWithWait(pipeline::FramePacket&,const AVFrame**,unsigned milliseconds);
     struct Impl;std::unique_ptr<Impl> p_;
     SourceOpenDesc reconnectDesc_;

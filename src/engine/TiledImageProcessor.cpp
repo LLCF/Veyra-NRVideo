@@ -18,6 +18,9 @@ bool TiledImageProcessor::process(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotR
     // This path preserves input resolution; SR is not an implicit tile resize.
     if(desc.enableSr){veyra::log::error("image-tiles","SR requires a separate full-image output plan");return false;}
     constexpr uint32_t coreLimit=1280,halo=128,overlap=64;
+    // The NR exclusion feather ramps inside the padding; a halo smaller than
+    // the accepted feather range (0-64 px) would clip the ramp at tile edges.
+    static_assert(halo>=64,"tile halo must cover the maximum protection feather");
     const uint32_t coreW=std::min(coreLimit,input.width),coreH=std::min(coreLimit,input.height);
     const uint32_t tileW=coreW+2*halo,tileH=coreH+2*halo;
     const uint32_t countX=(input.width-1)/coreW+1,countY=(input.height-1)/coreH+1;

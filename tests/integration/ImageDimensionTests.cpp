@@ -182,11 +182,17 @@ bool protectionPixels(){
     if(av_frame_get_buffer(f,32)<0){av_frame_free(&f);return false;}
     for(unsigned y=0;y<256;++y)for(unsigned x=0;x<256;++x){auto* p=f->data[0]+size_t(y)*f->linesize[0]+x*4;p[0]=(x*7+y*3)%256;p[1]=(x*3+y*11)%256;p[2]=(x*5+y*17)%256;p[3]=255;}
     sink::RgbaImage baseline;bool ok=true;int protectedError=0,outsideError=0;uint64_t changed=0;
-    for(unsigned mode=0;mode<7&&ok;++mode){
-        engine::EnhancementSettings settings;settings.protection.enabled=mode>0;settings.protection.featherPixels=0;
+    for(unsigned mode=0;mode<8&&ok;++mode){
+        // applySettings() drives the NR stage from the settings snapshot, so a
+        // default struct would switch NR off and the protection math below
+        // would measure an unmodified image (pre-existing test defect: the
+        // section reported changed=0/nr=0 and could never pass).
+        engine::EnhancementSettings settings;settings.nr=true;settings.protection.enabled=mode>0;settings.protection.featherPixels=0;
         if(mode==2)settings.protection.regions[0]={0,0,1,1};
         if(mode>=3)settings.protection.regions[0]={.25f,.25f,.75f,.75f};
-        if(mode==4||mode==5)settings.protection.featherPixels=mode==4?2.f:32.f;
+        // The accepted feather range is 0-64 px; 64 is the widest ramp the
+        // panel exposes and must stay inside the NR exclusion contract.
+        if(mode==4||mode==5||mode==7)settings.protection.featherPixels=mode==4?2.f:mode==5?32.f:64.f;
         if(mode==6){settings.protection.regions[0]={.125f,.125f,.375f,.375f};settings.protection.regions[1]={.625f,.625f,.875f,.875f};}
         pipeline::EnhanceGraph::FrameOutputs out;sink::RgbaImage result;
         ok=graph.applySettings(settings)&&graph.process(f,0,true,out,mode+1)&&sink::readRgba8(ctx,ring,graph.videoFrameResource(out.videoSlot),result);
@@ -195,21 +201,21 @@ bool protectionPixels(){
             for(unsigned y=0;y<256;++y)for(unsigned x=0;x<256;++x)for(unsigned c=0;c<3;++c){auto i=(size_t(y)*256+x)*4+c;auto original=f->data[0][size_t(y)*f->linesize[0]+x*4+c];
                 if(!mode){changed+=result.pixels[i]!=original;continue;}
                 float edge=std::min(std::min(x+.5f-64,192.f-x-.5f),std::min(y+.5f-64,192.f-y-.5f));
-                if(mode==4||mode==5){
+                if(mode==4||mode==5||mode==7){
                     int v=result.pixels[i],a=original,b=baseline.pixels[i];
                     envelope=std::max(envelope,std::max(std::min(a,b)-v,v-std::max(a,b)));
                     if(edge>0&&edge<settings.protection.featherPixels){mixed+=std::abs(v-a)>1&&std::abs(v-b)>1;continue;}
                 }
-                bool protectedPixel=mode==2||(mode>=3&&mode<=5&&edge>=settings.protection.featherPixels)||(mode==6&&((x>=32&&x<96&&y>=32&&y<96)||(x>=160&&x<224&&y>=160&&y<224)));
+                bool protectedPixel=mode==2||((mode>=3&&mode<=5||mode==7)&&edge>=settings.protection.featherPixels)||(mode==6&&((x>=32&&x<96&&y>=32&&y<96)||(x>=160&&x<224&&y>=160&&y<224)));
                 if(protectedPixel)protectedError=std::max(protectedError,std::abs(int(result.pixels[i])-int(original)));
                 else outsideError=std::max(outsideError,std::abs(int(result.pixels[i])-int(baseline.pixels[i])));
             }
         }
-        if(mode==4||mode==5){ok=ok&&envelope<=1&&mixed>100;std::cout<<"PROTECTION_FEATHER pixels="<<settings.protection.featherPixels<<" mixedChannels="<<mixed<<" envelopeError8="<<envelope<<" pass="<<ok<<std::endl;}
+        if(mode==4||mode==5||mode==7){ok=ok&&envelope<=1&&mixed>100;std::cout<<"PROTECTION_FEATHER pixels="<<settings.protection.featherPixels<<" mixedChannels="<<mixed<<" envelopeError8="<<envelope<<" pass="<<ok<<std::endl;}
         std::cout<<"PROTECTION_MODE mode="<<mode<<" protectedError8="<<protectedError<<" outsideError8="<<outsideError<<std::endl;
         out={};
     }
-    ok=ok&&changed>100&&protectedError<=1&&outsideError==0&&graph.metrics().nrEvaluateCount==7;
+    ok=ok&&changed>100&&protectedError<=1&&outsideError==0&&graph.metrics().nrEvaluateCount==8;
     std::cout<<"PROTECTION_PIXELS empty/full/rectangle/feather/disjoint changed="<<changed<<" protectedError8="<<protectedError<<" outsideError8="<<outsideError<<" nr="<<graph.metrics().nrEvaluateCount<<" pass="<<ok<<std::endl;
     ring.drainQueue();graph.shutdown();av_frame_free(&f);ring.shutdown();ctx.shutdown();return ok;
 }

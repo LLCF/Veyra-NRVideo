@@ -148,7 +148,11 @@ bool NvencD3D12Encoder::encode(unsigned frameSlot,bool generated,int64_t pts){au
     Status st=Status::Ok;uint32_t slot=0;auto* list=p.ring->acquireNext(slot,st);if(!list)return false;
     auto* color=generated?p.graph->generatedFrameResource(frameSlot):p.graph->videoFrameResource(frameSlot);
     p.states.transition(list,color,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);p.states.transition(list,p.y.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);p.states.transition(list,p.uv.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    const float dims[8]={std::bit_cast<float>(p.w),std::bit_cast<float>(p.h),std::bit_cast<float>(p.hdr?(p.graph->hdr10Output()?2u:1u):0u),0,0,0,0,0};p.convert.bind(list,dims,gpuHandleOf(p.convert,frameSlot+(generated?2:0)).ptr,gpuHandleOf(p.convert,8).ptr);list->Dispatch((p.w+15)/16,(p.h+15)/16,1);
+    // reserved.y carries the output dither step so a graded export does not add
+    // banding at the 8-bit (or 10-bit HDR) conversion; ungraded exports keep the
+    // exact legacy bytes because the graph reports a zero step.
+    const float dither=p.graph?p.graph->outputDitherStep():0.0f;
+    const float dims[8]={std::bit_cast<float>(p.w),std::bit_cast<float>(p.h),std::bit_cast<float>(p.hdr?(p.graph->hdr10Output()?2u:1u):0u),std::bit_cast<float>(dither),0,0,0,0};p.convert.bind(list,dims,gpuHandleOf(p.convert,frameSlot+(generated?2:0)).ptr,gpuHandleOf(p.convert,8).ptr);list->Dispatch((p.w+15)/16,(p.h+15)/16,1);
     p.states.uavBarrier(list,p.y.Get());p.states.uavBarrier(list,p.uv.Get());p.states.transition(list,p.y.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE);p.states.transition(list,p.uv.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE);p.states.transition(list,s.input.Get(),D3D12_RESOURCE_STATE_COPY_DEST);
     for(unsigned plane=0;plane<2;++plane){D3D12_TEXTURE_COPY_LOCATION a{},b{};a.pResource=plane?p.uv.Get():p.y.Get();a.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;b.pResource=s.input.Get();b.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;b.SubresourceIndex=plane;list->CopyTextureRegion(&b,0,0,0,&a,nullptr);}
     p.states.transition(list,s.input.Get(),D3D12_RESOURCE_STATE_COMMON);p.states.transition(list,color,D3D12_RESOURCE_STATE_COMMON);if(!p.ring->submitAndSignal(slot))return false;
