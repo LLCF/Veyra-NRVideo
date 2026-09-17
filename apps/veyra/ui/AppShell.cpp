@@ -50,6 +50,9 @@ uint32_t multiplierFromDailyIndex(int index){const int i=index+1;return (index>=
 // was deleted (2026-09-17). It is intentionally never created: named colour
 // presets live in the colour page and carry look parameters only.
 enum {Open=101,Play,Stop,Save,Nr,Sr,Fg,Seek,Info,Capture,Export,Realtime,Recent,Multiplier,Settings,OriginalHold,CompareToggle,Split,Reference,Fullscreen,ModeSwitch=220,Master,RetiredPresetSlot,Volume,Mute,Subtitle,SubtitleLoad,SubtitleSize,ImageOpen,InspectorDrawer,TabEnhance,TabFg,TabColor,TabExport,JobProgress,Details,Brand,MediaTitle,TimeLabel,EmptyTitle,EmptyHint,ProRailVideo,ProRailCapture,WindowMin,WindowMax,WindowClose,FpsLabel,RemotePlay,TabAudio,VideoSurface=1000};
+// Settings-panel status text: it belongs to the player's bottom bar now, next to
+// the submitted-FPS readout (id 64 is free in the main window's id space).
+constexpr int ColourStatus=64;
 veyra::engine::EngineController engine;
 #ifdef VEYRA_ENABLE_REMOTEPLAY
 veyra::remoteplay::ControllerInput remoteController;
@@ -333,6 +336,8 @@ void layout(){
     const bool daily=!pro&&!full&&!transition.running;TransportLayout controls(tw,daily);
     const int timeWidth=std::min(240,std::max(0,(tw-154)/2));
     put(TimeLabel,tx,barTop+10,timeWidth,20,transport);
+    // Settings messages live here now (the panel no longer draws its own line).
+    put(ColourStatus,tx+tw-154-446,barTop+10,440,20,transport);
     int remoteSpace=0;
 #ifdef VEYRA_ENABLE_REMOTEPLAY
     remoteSpace=daily?60:0;
@@ -349,7 +354,7 @@ void layout(){
     icon(GetDlgItem(mainWindow,Open),Icon::Video,controls.captions);icon(GetDlgItem(mainWindow,Capture),Icon::Capture,controls.captions);
     icon(GetDlgItem(mainWindow,Master),Icon::Enhance,pro||controls.captions);icon(GetDlgItem(mainWindow,Sr),Icon::Upscale,true);
     icon(GetDlgItem(mainWindow,ModeSwitch),pro?Icon::PanelClose:Icon::PanelOpen,pro||controls.captions);
-    for(int id:{Open,Capture,Recent,Master,Save,Sr,Play,Stop,Mute,Volume,Subtitle,Fullscreen,TimeLabel,MediaTitle,FpsLabel,ModeSwitch})surface(GetDlgItem(mainWindow,id),pro&&!full?panel:cinemaPanel);
+for(int id:{Open,Capture,Recent,Master,Save,Sr,Play,Stop,Mute,Volume,Subtitle,Fullscreen,TimeLabel,MediaTitle,FpsLabel,ColourStatus,ModeSwitch})surface(GetDlgItem(mainWindow,id),pro&&!full?panel:cinemaPanel);
     put(OriginalHold,tx,barTop+160,96,32,!full&&pro);put(Split,tx+102,barTop+160,92,32,!full&&pro);put(CompareToggle,tx+200,barTop+160,96,32,!full&&pro&&tw>=600);
     put(Reference,tx+(tw>=600?302:200),barTop+160,std::min(172,tw-(tw>=600?302:200)-88),180,!full&&pro&&tw>=500);
     put(Details,tx+tw-76,barTop+160,76,32,!full&&pro);put(Info,12,h-66,44,44,!full&&pro);pos(metricLabel,tx,barTop+212,tw,120,!full&&pro&&uiState.diagnostics);
@@ -497,6 +502,7 @@ const wchar_t* tabs[]={L"增强",L"运动",L"色彩",L"导出"};for(int i=0;i<4;
 control(L"BUTTON",L"音量",Mute,BS_PUSHBUTTON,0,0,54,36);auto vol=control(TRACKBAR_CLASSW,L"音量",Volume,TBS_HORZ|TBS_NOTICKS,0,0,80,26);SendMessageW(vol,TBM_SETRANGE,TRUE,MAKELPARAM(0,100));SendMessageW(vol,TBM_SETPOS,TRUE,100);
 control(L"BUTTON",L"字幕",Subtitle,BS_PUSHBUTTON,0,0,62,36);control(L"STATIC",L"尚未打开媒体",MediaTitle,SS_LEFT|SS_ENDELLIPSIS,0,0,250,26);control(L"STATIC",L"00:00 / 00:00",TimeLabel,SS_LEFT,0,0,200,20);
 control(L"STATIC",L"处理 0.0 fps",FpsLabel,SS_RIGHT,0,0,154,20);
+control(L"STATIC",L"",ColourStatus,SS_RIGHT|SS_ENDELLIPSIS,0,0,440,20);
 control(L"STATIC",L"开始观看",EmptyTitle,SS_CENTER,0,0,500,48);emptyFont=veyra::ui::makeFont(hwnd,26,FW_NORMAL);SendDlgItemMessageW(hwnd,EmptyTitle,WM_SETFONT,WPARAM(emptyFont),TRUE);control(L"STATIC",L"打开本地视频，或连接采集卡\n精细调整与原生导出在专业模式中",EmptyHint,SS_CENTER,0,0,500,68);
 control(L"BUTTON",L"性能  ▾",Details,BS_PUSHBUTTON,0,0,112,32);control(L"BUTTON",L"",JobProgress,BS_PUSHBUTTON,0,0,280,32);metricLabel=control(L"STATIC",L"",0,SS_LEFT,0,0,500,132);
 control(L"BUTTON",L"最小化",WindowMin,BS_PUSHBUTTON,0,0,32,32);control(L"BUTTON",L"最大化",WindowMax,BS_PUSHBUTTON,0,0,32,32);control(L"BUTTON",L"关闭窗口",WindowClose,BS_PUSHBUTTON,0,0,32,32);
@@ -506,7 +512,10 @@ veyra::ui::icon(GetDlgItem(hwnd,ProRailVideo),Icon::Video);veyra::ui::icon(GetDl
 veyra::ui::icon(GetDlgItem(hwnd,Recent),Icon::Recent);veyra::ui::icon(GetDlgItem(hwnd,Open),Icon::Video,true);veyra::ui::icon(GetDlgItem(hwnd,Capture),Icon::Capture,true);
 for(int id:{Open,Capture,Recent,Master,Save,Sr,ModeSwitch,WindowMin,WindowMax,WindowClose,Stop,Mute,Subtitle,Fullscreen,ProRailVideo,ProRailCapture,ImageOpen,Info})veyra::ui::ghost(GetDlgItem(hwnd,id));
 SetPropW(GetDlgItem(hwnd,Open),L"veyra.tip",HANDLE(L"打开视频 / 图片 · Ctrl+O"));SetPropW(GetDlgItem(hwnd,Capture),L"veyra.tip",HANDLE(L"连接采集卡"));SetPropW(GetDlgItem(hwnd,Sr),L"veyra.tip",HANDLE(L"超分辨率 · 专业面板选择 DLSS / RTX 视频超分"));
-inspector=veyra::ui::createSettingsPanel(hwnd,engine,applySettings);liveStatusPanel=veyra::ui::createLiveStatusPanel(hwnd,engine);selectInspector(uiPreferences.inspector);SendDlgItemMessageW(hwnd,Volume,TBM_SETPOS,TRUE,LPARAM(uiPreferences.volume*100));veyra::ui::marked(GetDlgItem(hwnd,Play));
+inspector=veyra::ui::createSettingsPanel(hwnd,engine,applySettings);
+// Settings messages go to the player's bottom bar instead of a line inside the panel.
+veyra::ui::settingsStatusSink([](const std::wstring& text){setText(GetDlgItem(mainWindow,ColourStatus),text);});
+liveStatusPanel=veyra::ui::createLiveStatusPanel(hwnd,engine);selectInspector(uiPreferences.inspector);SendDlgItemMessageW(hwnd,Volume,TBM_SETPOS,TRUE,LPARAM(uiPreferences.volume*100));veyra::ui::marked(GetDlgItem(hwnd,Play));
 for(auto [id,help]:std::initializer_list<std::pair<int,const wchar_t*>>{
  {Nr,L"实验性DLSS5 NR增强：重建画面细节，效果看素材，不是游戏原生集成。"},
  {Fg,L"开关补帧。专业模式可选倍率和后端；数字翻倍，显卡工作量也会涨。"},

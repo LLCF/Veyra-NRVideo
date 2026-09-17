@@ -20,6 +20,8 @@ namespace veyra::ui {
 namespace {
 HWND window=nullptr,body=nullptr;engine::EngineController* controller=nullptr;HFONT font=nullptr;
 std::function<bool(engine::EnhancementSettings)> apply;
+// Filled by AppShell: settings messages are shown in the player's bottom bar.
+std::function<void(const std::wstring&)> statusSink;
 engine::PresetStore store(runtime::localDataDirectory()/"user-presets.v1");bool loaded=false,dirty=false,populating=false,enhancementEnabled=true;int page=0,scroll=0,contentHeight=0;uint64_t displayedRevision=0;engine::EnhancementSettings configuredSettings;
 std::wstring displayedBackendWarning;
 engine::EnhancementSettings displayedSettings;
@@ -242,8 +244,14 @@ void layoutColorPage(){
     // Sticky-header bookkeeping (see the section loop below).
     int previousHeaderId=-1,previousHeaderY=0;
     place(800,y,36,false);y+=42;
-    // Preset toolbar: which look, a name to save under, and the actions.
-    place(803,y,200,false);place(804,y,180,false);y+=38;
+    // Preset toolbar: pick a saved look, type a name, then save/apply/delete or
+    // import/export. The combo and the name field used to both stretch to the
+    // full width and cover each other, which is why users reported "there is no
+    // place to save a preset".
+    const int presetHalf=std::max(dip(window,120),(bodyWidthDip-36)/2);
+    place(803,y,30,false,12,presetHalf);
+    place(804,y,30,false,12+presetHalf+12,presetHalf-6);
+    y+=36;
     place(805,y,32,false);place(806,y,32,false);place(807,y,32,false);place(808,y,32,false);place(809,y,32,false);y+=40;
     place(801,y,32,false);place(802,y,32,false);place(824,y,32,false);place(822,y,32,false);place(823,y,32,false);y+=38;
     place(821,y,32,false);y+=42;
@@ -267,13 +275,15 @@ void layoutColorPage(){
         if(section==4){
             // body width is not in scope here; the viewport width is enough to
             // split the wheel grid into two columns.
-            y+=12;   // keep the section title clear of the wheels
+            // A folded section must not reserve the wheel grid's height - that is
+            // what left huge gaps between collapsed headers.
             const int cellWidth=std::max<int>(dip(window,120),(bodyWidthDip-24-8)/2);
-            place(colorWheelId(0),y,190,collapsed,12,cellWidth);
-            place(colorWheelId(1),y,190,collapsed,12+cellWidth+8,cellWidth);
-            place(colorWheelId(2),y+196,190,collapsed,12,cellWidth);
-            place(colorWheelId(3),y+196,190,collapsed,12+cellWidth+8,cellWidth);
-            y+=400;
+            const int wheelsTop=y+(collapsed?0:12);
+            place(colorWheelId(0),wheelsTop,190,collapsed,12,cellWidth);
+            place(colorWheelId(1),wheelsTop,190,collapsed,12+cellWidth+8,cellWidth);
+            place(colorWheelId(2),wheelsTop+196,190,collapsed,12,cellWidth);
+            place(colorWheelId(3),wheelsTop+196,190,collapsed,12+cellWidth+8,cellWidth);
+            if(!collapsed)y+=412;
         }
         // Mixer header: correction dropdown + the eight colour ranges. The 24
         // rows stay in the table but only the selected range is on screen.
@@ -281,8 +291,9 @@ void layoutColorPage(){
             // No correction dropdown: the three mixer rows are always on screen
             // for the selected colour range; the B&W row appears when the switch
             // is on (that switch IS the black & white mixer).
-            place(colorMixerModeId,y,30,collapsed,12,bodyWidthDip-24);y+=34;
-            place(colorBandsId,y,32,collapsed,12,bodyWidthDip-24);y+=40;
+            place(colorMixerModeId,y,30,collapsed,12,bodyWidthDip-24);
+            place(colorBandsId,y+(collapsed?0:34),32,collapsed,12,bodyWidthDip-24);
+            if(!collapsed)y+=74;
         }
         // Tone curve: channel tabs + reset, then the grid canvas.
         if(section==2){
@@ -290,9 +301,8 @@ void layoutColorPage(){
             for(int channel=0;channel<4;++channel)
                 place(colorCurveChannelId+channel,y,30,collapsed,12+tabWidth*channel+6*channel,tabWidth);
             place(colorCurveResetId,y,30,collapsed,12+tabWidth*4+24,40);
-            y+=36;
-            place(colorCurveCanvasId,y,bodyWidthDip-24-6,collapsed,12,bodyWidthDip-24-6);
-            y+=bodyWidthDip-24+8;
+            place(colorCurveCanvasId,y+36,bodyWidthDip-24-6,collapsed,12,bodyWidthDip-24-6);
+            if(!collapsed)y+=36+bodyWidthDip-24+8;
         }
         for(size_t i=0;i<colorParams.size();++i){
             const auto& param=colorParams[i];
@@ -830,7 +840,8 @@ bool colourFieldEdited(int index,float value){
     syncColorControls();
     return true;
 }
-void message(const std::wstring& text){putText(401,text.c_str());}
+void settingsStatusSink(std::function<void(const std::wstring&)> sink){statusSink=std::move(sink);}
+void message(const std::wstring& text){if(statusSink)statusSink(text);else putText(401,text.c_str());}
 bool submit(engine::EnhancementSettings s){if(!apply(s)){dirty=true;message(L"总增强正在切换；本次修改未接受，请稍后重试。");return false;}dirty=false;return true;}
 void syncProtection(const engine::ProtectionSettings& protection){
     check(206,protection.enabled?BST_CHECKED:BST_UNCHECKED);unsigned count=0;for(auto q:protection.regions)count+=!q.empty();
@@ -1411,7 +1422,7 @@ case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.
         }
         // Preset toolbar.
         combo(803,2,0,{});add(L"EDIT",L"",804,ES_AUTOHSCROLL|WS_TABSTOP,2,12,0,-1,26);send(804,EM_SETLIMITTEXT,48,0);
-        button(L"保存预设",805,2,12,0,96);button(L"应用",806,2,12,0,80);button(L"删除",807,2,12,0,80);
+        button(L"保存为预设",805,2,12,0,110);button(L"应用",806,2,12,0,80);button(L"删除",807,2,12,0,80);
         button(L"导出",808,2,12,0,80);button(L"导入",809,2,12,0,80);
         SetPropW(item(804),L"veyra.tip",HANDLE(L"给当前色彩设置起个名字，点“保存预设”存下来；导出会生成 .vpcolor 文件，可以发给别人导入。"));
         SetPropW(item(805),L"veyra.tip",HANDLE(L"把当前色彩设置保存为命名预设。同名会覆盖。"));

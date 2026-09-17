@@ -32,5 +32,9 @@ bool settingsCurveTestPoint(float x,float y,POINT& out);
 // Expand/collapse one colour section (acceptance code needs the target section
 // unfolded regardless of what the previous run persisted).
 void settingsColorSectionForTest(int section,bool expanded);
+// The settings panel used to draw its own status line. AppShell routes those
+// messages to the player's bottom bar instead (the panel's own line stays as a
+// fallback when no sink is installed).
+void settingsStatusSink(std::function<void(const std::wstring&)>);
 int colourSectionEyeControlId(int section);
 }
