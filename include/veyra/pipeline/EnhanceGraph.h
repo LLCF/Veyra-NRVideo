@@ -55,6 +55,8 @@ class NvOfSession;
 
 namespace veyra::pipeline {
 struct ColorDescription;
+// Decoded-surface view for the D3D11VA ingress (defined in FramePacket.h).
+struct HardwareSurfaceInput;
 
 // One generated-frame texture per (parity, subframe): 2 parities x 5 generated
 // frames = 6X multi-frame generation. Sized once, reused for every FG backend.
@@ -159,7 +161,10 @@ public:
     // temporal epoch (open/seek/...): NVOF/FG history is not consumed.
     // Returns false on hard failure (run verdict must FAIL).
     using FgAdmission=std::function<bool(const FrameBatch&)>;
-    bool process(const AVFrame* frame, double ptsMs, bool reset, FrameOutputs& out, uint64_t sourceFrameId = 0, const ColorDescription* color = nullptr, bool retainReferences = true, const FgAdmission& admitFg = {});
+    // `hardwareSurface` carries the decoded texture for paths whose surface
+    // does not travel inside the AVFrame (D3D11VA). It must be provided exactly
+    // when frame->format == AV_PIX_FMT_D3D11 and is unused otherwise.
+    bool process(const AVFrame* frame, double ptsMs, bool reset, FrameOutputs& out, uint64_t sourceFrameId = 0, const ColorDescription* color = nullptr, const HardwareSurfaceInput* hardwareSurface = nullptr, bool retainReferences = true, const FgAdmission& admitFg = {});
     bool nextFrameSlotAvailable()const {
         const unsigned slot=unsigned(realFrameIndex_%2);
         if(!realLeases_[slot].expired())return false;

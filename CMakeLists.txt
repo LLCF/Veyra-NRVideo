@@ -416,7 +416,9 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
   # (Playbook 5.3: never let third-party headers block the build).
   target_compile_options(veyra_media PRIVATE /WX-)
   target_compile_features(veyra_media PUBLIC cxx_std_20)
-  target_link_libraries(veyra_media PUBLIC veyra_base veyra_gfx)
+  # d3d11: the HEVC hardware path decodes on a private D3D11VA device and shares
+  # the surfaces with the D3D12 graph as NT handles.
+  target_link_libraries(veyra_media PUBLIC veyra_base veyra_gfx d3d11)
   target_include_directories(veyra_media PUBLIC ${FFMPEG_INCLUDE_DIRS})
   target_link_directories(veyra_media PUBLIC ${FFMPEG_LIBRARY_DIRS})
   target_link_libraries(veyra_media PUBLIC ${FFMPEG_LIBRARIES})
@@ -750,6 +752,12 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
   target_compile_features(veyra_hw_import_image_tests PRIVATE cxx_std_20)
   target_compile_definitions(veyra_hw_import_image_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   target_link_libraries(veyra_hw_import_image_tests PRIVATE veyra_engine)
+  # Headless export harness: verifies the frame-timestamp policy (tail snap,
+  # dropped-sample gap fill, hard refusal) without the GUI.
+  add_executable(veyra_export_probe tools/export_probe/main.cpp)
+  target_compile_features(veyra_export_probe PRIVATE cxx_std_20)
+  target_compile_definitions(veyra_export_probe PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_link_libraries(veyra_export_probe PRIVATE veyra_engine)
   target_compile_features(veyra_hdr_color_tests PRIVATE cxx_std_20)
   target_compile_definitions(veyra_hdr_color_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   target_link_libraries(veyra_hdr_color_tests PRIVATE veyra_engine)

@@ -40,7 +40,7 @@ int wmain(int argc,wchar_t** argv){
     if(ok)ok=test("reset",{},0,{{160,10,0,0,0},{280,80,0,255,0}});
     if(ok){
         for(int y=0;y<32;++y)for(int x=0;x<64;++x){auto* p=f->data[0]+y*f->linesize[0]+x*4;p[0]=0;p[1]=0;p[2]=255;p[3]=255;}
-        pipeline::EnhanceGraph::FrameOutputs current;ok=graph.process(f,33.333,false,current,2,nullptr,false);
+        pipeline::EnhanceGraph::FrameOutputs current;ok=graph.process(f,33.333,false,current,2,nullptr,nullptr,false);
         if(ok){out=std::move(current);ok=test("invalid-reference",{},1,{{40,80,0,0,255},{280,160,0,0,255}});}
     }
     ring.drainQueue();out={};presenter.close();graph.shutdown();av_frame_free(&f);ring.shutdown();ctx.shutdown();DestroyWindow(window);CoUninitialize();return ok?0:1;

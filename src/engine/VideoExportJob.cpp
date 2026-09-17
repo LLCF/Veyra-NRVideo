@@ -43,7 +43,7 @@ bool exportVideo(const std::wstring& input,const std::wstring& output,PlayerOpti
     std::unique_ptr<sink::VideoEncoder> encoder;
     AVFormatContext *mux=nullptr,*audioInput=nullptr;AVStream* videoStream=nullptr;AVStream* audioStream=nullptr;AVPacket* audioPacket=av_packet_alloc();
     int audioIndex=-1;bool audioPending=false,audioEof=false,ok=false,headerWritten=false;int64_t written=0;double audioEndSeconds=0,videoOriginSeconds=0;
-    uint64_t tailSnapped=0;
+    uint64_t tailSnapped=0,gapFilledSlots=0,gapFillEvents=0;
     std::wstring encoderName;
     std::wstring failureReason;
     auto failAv=[&](const wchar_t* stage,int code){
@@ -206,12 +206,32 @@ bool exportVideo(const std::wstring& input,const std::wstring& output,PlayerOpti
                 if(timeline.tailAccepts(sourceCount,pts,estimatedFrames)){
                     ++tailSnapped;
                     veyra::log::warn("export-timeline",std::format("tail snap source={} pts={} expected={} deviationMs={:.3f} estimatedFrames={} outputIndex={}",sourceCount,pts,expectedPts,deviationMs,estimatedFrames,outputIndex));
+                } else if(const uint64_t missing=timeline.missingSlots(sourceCount,pts);missing>0&&lastReal){
+                    // The source is missing whole samples here (a dropped frame
+                    // that kept the timeline). Repeat the previous real frame for
+                    // every missing slot so the exported grid stays continuous,
+                    // then re-align the validator. No interpolation is invented
+                    // for the hole and this is reported to the user, never silent.
+                    const uint32_t multiplier=options.fg?options.fgMultiplier:1u;
+                    veyra::log::warn("export-timeline",std::format(
+                        "gap filled source={} pts={} expected={} deviationMs={:.3f} missingSlots={} outputIndex={} multiplier={} (previous frame repeated; no interpolation invented)",
+                        sourceCount,pts,expectedPts,deviationMs,missing,outputIndex,multiplier));
+                    ++gapFillEvents;gapFilledSlots+=missing;
+                    bool fillOk=true;
+                    for(uint64_t slotIndex=0;slotIndex<missing&&fillOk;++slotIndex){
+                        for(uint32_t j=0;j<multiplier;++j){
+                            if(!encoder->encode(lastReal->slot,false,outputIndex++)){fillOk=false;break;}
+                            ++holdCount;
+                        }
+                    }
+                    if(!fillOk){if(failureReason.empty())failureReason=L"缺口补帧编码失败，请查看编码器诊断";error=true;break;}
+                    timeline.resync(sourceCount,pts);
                 } else {
                     progress(0,std::format(L"源文件第 {} 帧时间戳偏移 {:.1f} 毫秒，无法按恒定帧率无损对齐；已停止写入并保留 partial",sourceCount,deviationMs));
                     veyra::log::error("export-timeline",std::format("CFR rejected source={} pts={} expected={} deviationMs={:.3f} estimatedFrames={} outputIndex={}",sourceCount,pts,expectedPts,deviationMs,estimatedFrames,outputIndex));error=true;break;
                 }
             }
-            pipeline::EnhanceGraph::FrameOutputs out;if(!graph.process(frame,packet.pts.toDouble()*1000,sourceCount==0||pipeline::breaksHistory(packet.flags),out,packet.sequence,&packet.colorInfo,false)){error=true;break;}
+            pipeline::EnhanceGraph::FrameOutputs out;if(!graph.process(frame,packet.pts.toDouble()*1000,sourceCount==0||pipeline::breaksHistory(packet.flags),out,packet.sequence,&packet.colorInfo,&packet.hardwareSurface,false)){error=true;break;}
             const auto readyStart=std::chrono::steady_clock::now();
             while(!cancel&&!graph.resolveGeneration(out)){
                 if(std::chrono::steady_clock::now()-readyStart>std::chrono::seconds(2)){error=true;break;}
@@ -236,7 +256,7 @@ bool exportVideo(const std::wstring& input,const std::wstring& output,PlayerOpti
         if(error||cancel)break;
         if(options.fg&&lastReal)for(uint32_t j=1;j<options.fgMultiplier;++j){if(!encoder->encode(lastReal->slot,false,outputIndex++)){error=true;break;}++holdCount;}
         if(error)break;
-        veyra::log::info("export-counts",std::format("source={} generated={} hold={} output={} multiplier={} tailSnapped={} backend={} encoder={} bitrateMbps={} note={} (CFR holds are not DLSSG)",sourceCount,generatedCount,holdCount,outputIndex,options.fg?options.fgMultiplier:1,tailSnapped,frameGenerationBackendName(options.settings.frameGenerationBackend),std::string(sink::encoderBackendName(encoder->backend())),options.settings.exportBitrateMbps,utf8(fgNote)));
+        veyra::log::info("export-counts",std::format("source={} generated={} hold={} output={} multiplier={} tailSnapped={} gapFillEvents={} gapFilledSlots={} backend={} encoder={} bitrateMbps={} note={} (CFR holds are not DLSSG)",sourceCount,generatedCount,holdCount,outputIndex,options.fg?options.fgMultiplier:1,tailSnapped,gapFillEvents,gapFilledSlots,frameGenerationBackendName(options.settings.frameGenerationBackend),std::string(sink::encoderBackendName(encoder->backend())),options.settings.exportBitrateMbps,utf8(fgNote)));
         progress(.99,L"正在收尾：等待编码器输出剩余帧");
         if(!encoder->finish()){if(failureReason.empty())failureReason=L"编码器收尾失败，请查看编码器诊断";break;}
         if(!writeAudioUntil(audioEndSeconds))break;
@@ -286,6 +306,7 @@ bool exportVideo(const std::wstring& input,const std::wstring& output,PlayerOpti
     if(ok){
         std::wstring done=encoderName.empty()?L"视频导出完成，逐帧完整性验证通过":std::format(L"视频导出完成（{}），逐帧完整性验证通过",encoderName);
         if(tailSnapped>0)done+=std::format(L"（尾部 {} 帧时间戳已按恒定帧率对齐）",tailSnapped);
+        if(gapFilledSlots>0)done+=std::format(L"（源文件缺帧 {} 处/{} 帧，已按恒定帧率复制上一帧补齐）",gapFillEvents,gapFilledSlots);
         progress(1,fgNote.empty()?done:fgNote+L"；"+done);
     }
     else {

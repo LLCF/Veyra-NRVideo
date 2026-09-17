@@ -19,6 +19,7 @@ struct AdapterInfo {
     uint32_t vendorId = 0;
     uint32_t deviceId = 0;               // PCI device id, e.g. 0x2684 = AD102
     std::string vendorIdHex;             // "0x10DE"
+    uint64_t luid = 0;                   // DXGI_ADAPTER_DESC1 LUID (High<<32 | Low)
     std::string luidString;              // "0xHigh:0xLow"
     uint64_t dedicatedVideoMemoryBytes = 0;
     bool isNvidia = false;

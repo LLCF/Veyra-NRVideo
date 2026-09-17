@@ -150,8 +150,12 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
     status(L"正在初始化GPU与本地运行时…");
     gfx::D3D12DeviceContext ctx;gfx::CommandSlotRing ring;source::MediaFileSource source;
     sink::AudioPipeline audioPipe;sink::AudioRenderer audio;VideoPresenter presenter;
-    pipeline::EnhanceGraph graph(ctx,ring);AVFrame* imageFrame=nullptr;AVFrame* cachedFrame=nullptr;pipeline::FramePacket cachedPacket;
-    source::CaptureCardSource captureSource;const bool physicalCapture=path.starts_with(L"capture:")||path.starts_with(L"capture2:");
+   pipeline::EnhanceGraph graph(ctx,ring);AVFrame* imageFrame=nullptr;AVFrame* cachedFrame=nullptr;pipeline::FramePacket cachedPacket;
+   source::CaptureCardSource captureSource;const bool physicalCapture=path.starts_with(L"capture:")||path.starts_with(L"capture2:");
+    // Set when a live parameter change arrives while paused (or on a still
+    // image): the cached source frame must be re-rendered before the next
+    // present, otherwise the new colour tables never reach the GPU.
+    bool refreshPausedFrame_=false;
 #ifdef VEYRA_ENABLE_REMOTEPLAY
     auto remote=remoteRequest?std::make_shared<source::RemotePlaySessionSource>():nullptr;
     const bool isRemote=bool(remote);
@@ -195,10 +199,11 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 // capability check and records its fallback.
                 od.preferHardwareDecode=true;
                 od.d3d12Device=ctx.device();od.d3d12Queue=ctx.directQueue();
+                od.d3d12AdapterLuid=ctx.adapter().luid;
                 // Diagnostic uses the production graph/presenter to validate
                 // D3D12VA imports without needing a paired PS5 or credentials.
                 if(!isCapture&&GetEnvironmentVariableW(L"VEYRA_TEST_FILE_HW_DECODE",nullptr,0)){
-                    od.preferHardwareDecode=true;od.d3d12Device=ctx.device();od.d3d12Queue=ctx.directQueue();
+                    od.preferHardwareDecode=true;od.d3d12Device=ctx.device();od.d3d12Queue=ctx.directQueue();od.d3d12AdapterLuid=ctx.adapter().luid;
                 }
                 // Audio ingress policy has to be in place before the capture
                 // graph negotiates its media type, otherwise the first connect
@@ -733,6 +738,26 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                         finishReset(diagnostics::ResetOutcome::RolledBack);
                         std::lock_guard lock(mutex_);desired_.rejectVideoRequest(requested,previous);snapshot_.desired=desired_;snapshot_.rejectedRevision=requested.revision;snapshot_.applying=desired_!=previous;snapshot_.status=L"设置应用失败，已恢复上一套参数";snapshot_.backendWarning=requested.nrRuntime!=previous.nrRuntime?L"NR运行版本切换失败，已恢复上一套参数":requested.frameGenerationBackend==FrameGenerationBackend::XeSS?L"XeSS 未能启用，已恢复上一套参数":requested.frameGenerationBackend==FrameGenerationBackend::Fsr?L"AMD FSR 帧生成未能启用，已恢复上一套参数":L"后端切换失败，已恢复上一套参数";}
                 }
+                // Live uniform update. The revision identifies the graph *shape*
+                // (NR/SR/FG/resolution and the colour master switch); colour
+                // parameters keep the same revision on purpose, so they must be
+                // pushed into the running graph here - no rebuild, no history
+                // reset. Without this the panel only took effect after an
+                // unrelated rebuild (toggling NR): the "sliders do nothing" report.
+                if(requested.revision==previous.revision&&!(requested==previous)){
+                    if(graph.applySettings(requested)){
+                        options=PlayerOptions::from(requested);
+                        {std::lock_guard lock(mutex_);snapshot_.applied=options.snapshot();snapshot_.applying=desired_!=snapshot_.applied;}
+                        veyra::log::info("settings",std::format("live parameter update revision={} colourEnabled={} exposure={:.2f} contrast={:.2f} temperature={:.2f}",requested.revision,requested.color.enabled?1:0,requested.color.exposure,requested.color.contrast,requested.color.temperature));
+                        // Colour lives inside the ingest dispatch, so a paused
+                        // frame has no process() call to upload the new tables or
+                        // re-run the chain: remember that the cached frame must
+                        // be re-rendered before the next present.
+                        if(paused_||isImage)refreshPausedFrame_=true;
+                    }else{
+                        std::lock_guard lock(mutex_);desired_.rejectVideoRequest(requested,previous);snapshot_.desired=desired_;snapshot_.applying=desired_!=previous;snapshot_.status=L"这套参数需要重建管线，已回到上一套数值";
+                    }
+                }
                 if(stop_)break;
                 double seek;{std::lock_guard lock(mutex_);seek=seekSeconds_.exchange(-1);if(seek>=0)activeSeekId=snapshot_.seekRequested;}
                 if(seek>=0&&!isImage&&!isCapture){
@@ -745,6 +770,25 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     discardBefore=seek*1000;seekPreviewPending=true;reset=true;pendingResetCause=pipeline::ResetReason::Seek;anchorMs=discardBefore;anchor=Clock::now();lastAudioClockMs=discardBefore;audioClockExhausted=false;audioRebuffering=false;if(audioStarted){audioPipe.setPaused(paused_);audioPipe.requestSeek(discardBefore);}
                 }
                 if(!transaction&&((paused_&&!seekPreviewPending)||(isImage&&hasOutput))){
+                    // A parameter change while paused (or on a still image) only
+                    // reaches the picture if the cached source frame is pushed
+                    // through the graph again: the grade is fused into the ingest
+                    // dispatch, so nothing else would upload the new tables.
+                    if(refreshPausedFrame_){
+                        refreshPausedFrame_=false;
+                        if(cachedFrame){
+                            pipeline::EnhanceGraph::FrameOutputs refreshed;
+                            const double refreshPtsMs=cachedPacket.pts.toDouble()*1000.0;
+                            if(graph.process(cachedFrame,refreshPtsMs,true,refreshed,cachedPacket.sequence,&cachedPacket.colorInfo,&cachedPacket.hardwareSurface,false)){
+                                out=refreshed;
+                                hasOutput=true;
+                                {std::lock_guard lock(mutex_);++snapshot_.pausedFrameRefreshes;}
+                                veyra::log::info("settings",std::format("paused frame re-rendered with the new parameters ptsMs={:.3f}",refreshPtsMs));
+                            }else{
+                                veyra::log::warn("settings","paused frame re-render failed; keeping the previous output");
+                            }
+                        }
+                    }
                     drainLivePresentation();
                     if(!wasPaused){holdFileAudio();if(physicalCapture)captureSource.videoReset();
 #ifdef VEYRA_ENABLE_REMOTEPLAY
@@ -938,7 +982,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 // settings/history or inventing GPU execution timestamps.
                 wchar_t testWork[16]{};
                 if(!isImage&&GetEnvironmentVariableW(L"VEYRA_TEST_VIDEO_WORK_MS",testWork,16))std::this_thread::sleep_for(std::chrono::milliseconds(std::clamp(_wtoi(testWork),0,150)));
-                bool processed=false;{processWaitBase=ring.cpuWaitCount();processWaitMsBase=ring.cpuWaitMilliseconds();processSubmitBase=ring.submitCount();processed=!injectedReject&&graph.process(frame,pts,historyReset,out,pkt.sequence,&pkt.colorInfo,comparisonMode_!=0,admitFg);processSlotWaitMs=ring.cpuWaitMilliseconds()-processWaitMsBase;}
+                bool processed=false;{processWaitBase=ring.cpuWaitCount();processWaitMsBase=ring.cpuWaitMilliseconds();processSubmitBase=ring.submitCount();processed=!injectedReject&&graph.process(frame,pts,historyReset,out,pkt.sequence,&pkt.colorInfo,&pkt.hardwareSurface,comparisonMode_!=0,admitFg);processSlotWaitMs=ring.cpuWaitMilliseconds()-processWaitMsBase;}
                 previewSkipSinceProcess=false;
                 if(!processed){
                     const auto failedComponent=graph.failedBackend();
@@ -966,7 +1010,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     if(transaction){
                         ring.drainQueue();out={};presenter.close();graph.shutdown();options=PlayerOptions::from(previous);
                         gd=previousDesc;
-                        if(graph.initialize(gd)&&presenter.open(ctx,window,graph,options.settings.captureCompatible)&&graph.createViews()&&graph.process(frame,pts,true,out,pkt.sequence,&pkt.colorInfo,comparisonMode_!=0)){
+                        if(graph.initialize(gd)&&presenter.open(ctx,window,graph,options.settings.captureCompatible)&&graph.createViews()&&graph.process(frame,pts,true,out,pkt.sequence,&pkt.colorInfo,&pkt.hardwareSurface,comparisonMode_!=0)){
                             finishReset(diagnostics::ResetOutcome::RolledBack);
                             std::lock_guard lock(mutex_);desired_.rejectVideoRequest(requested,previous);snapshot_.desired=desired_;snapshot_.rejectedRevision=requested.revision;snapshot_.applying=desired_!=previous;snapshot_.status=L"参数执行失败，已整套回滚";transaction=false;
                         }else{status(L"参数回滚失败，已停止",true);break;}

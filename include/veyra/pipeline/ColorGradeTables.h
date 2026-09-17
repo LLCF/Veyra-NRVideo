@@ -30,6 +30,9 @@ struct ColorGradeTables {
     bool blackWhite=false;            // monochrome mixer instead of the HSL mixer
     bool identity=true;               // master switch off or every parameter neutral
     static ColorGradeTables bake(const engine::ColorSettings& settings);
+    // The exact piecewise-linear response the bake uses, exposed so the UI can
+    // draw the same curve the shader will apply (no second implementation).
+    static float curveValue(const engine::ColorCurve& curve,float x);
     // Exposed for the tests and for callers that need the same log mapping.
     static float encodeLog(float linear);
     static float decodeLog(float encoded);

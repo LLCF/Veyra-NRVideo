@@ -36,14 +36,15 @@ bool ColorLookStore::load(){
     std::istringstream stream(data);
     stream.imbue(std::locale::classic());
     std::string magic;int version=0;
-    if(!(stream>>magic>>version)||magic!="VEYRA_COLOR_LOOKS"||version!=1){corrupt_=true;error_=L"色彩预设文件损坏或版本不支持；原文件已保留";return false;}
+    if(!(stream>>magic>>version)||magic!="VEYRA_COLOR_LOOKS"||version<1||version>2){corrupt_=true;error_=L"色彩预设文件损坏或版本不支持；原文件已保留";return false;}
     std::vector<ColorLook> loaded;
     for(;;){
         std::string name;
         if(!(stream>>std::quoted(name)))break;
         ColorLook look;look.name=wide(name);
         std::string lut;
-        if(!readColorSettings(stream,look.color,lut)){corrupt_=true;error_=L"色彩预设文件损坏；原文件已保留";return false;}
+        // Version 1 predates the per-section bypass mask (schema 18).
+        if(!readColorSettings(stream,look.color,lut,version>=2?19:18)){corrupt_=true;error_=L"色彩预设文件损坏；原文件已保留";return false;}
         if(!lut.empty()&&!look.color.setLutName(wide(lut))){corrupt_=true;error_=L"色彩预设里的 LUT 名字非法；原文件已保留";return false;}
         if(!nameOk(look.name)){corrupt_=true;error_=L"色彩预设名字非法；原文件已保留";return false;}
         loaded.push_back(std::move(look));
@@ -60,7 +61,7 @@ bool ColorLookStore::save(){
     if(ec){error_=L"无法创建预设目录";return false;}
     std::ostringstream out;
     out.imbue(std::locale::classic());out<<std::setprecision(std::numeric_limits<float>::max_digits10);
-    out<<"VEYRA_COLOR_LOOKS 1\n";
+    out<<"VEYRA_COLOR_LOOKS 2\n";
     for(const auto& look:entries_){
         out<<std::quoted(utf8(look.name))<<' ';
         writeColorSettings(out,look.color,utf8(look.color.lutNameString()));
@@ -107,7 +108,7 @@ bool ColorLookStore::exportFile(size_t index,const std::filesystem::path& target
     const auto& look=entries_[index];
     std::ostringstream out;
     out.imbue(std::locale::classic());out<<std::setprecision(std::numeric_limits<float>::max_digits10);
-    out<<"VEYRA_COLOR_LOOK 1\n"<<std::quoted(utf8(look.name))<<' ';
+    out<<"VEYRA_COLOR_LOOK 2\n"<<std::quoted(utf8(look.name))<<' ';
     writeColorSettings(out,look.color,utf8(look.color.lutNameString()));
     out<<'\n';
     const auto data=out.str();
@@ -126,10 +127,10 @@ bool ColorLookStore::importFile(const std::filesystem::path& source,std::wstring
     std::istringstream stream(data);
     stream.imbue(std::locale::classic());
     std::string magic,name;int version=0;
-    if(!(stream>>magic>>version)||magic!="VEYRA_COLOR_LOOK"||version!=1){error_=L"不是有效的 .vpcolor 文件";return false;}
+    if(!(stream>>magic>>version)||magic!="VEYRA_COLOR_LOOK"||version<1||version>2){error_=L"不是有效的 .vpcolor 文件";return false;}
     if(!(stream>>std::quoted(name))){error_=L"导入文件缺少预设名";return false;}
     ColorSettings colour;std::string lut;
-    if(!readColorSettings(stream,colour,lut)){error_=L"导入文件的参数块损坏";return false;}
+    if(!readColorSettings(stream,colour,lut,version>=2?19:18)){error_=L"导入文件的参数块损坏";return false;}
     if(!lut.empty()&&!colour.setLutName(wide(lut))){error_=L"导入文件里的 LUT 名字非法";return false;}
     stream>>std::ws;
     if(!stream.eof()){error_=L"导入文件尾部有残余内容";return false;}

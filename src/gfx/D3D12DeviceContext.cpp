@@ -95,6 +95,8 @@ bool fillAdapterInfo(const DXGI_ADAPTER_DESC1& desc, AdapterInfo& info)
     info.description = desc.Description;
     info.vendorId = desc.VendorId;
     info.vendorIdHex = std::format("0x{:04X}", desc.VendorId);
+    info.luid = (static_cast<uint64_t>(static_cast<uint32_t>(desc.AdapterLuid.HighPart)) << 32)
+        | static_cast<uint32_t>(desc.AdapterLuid.LowPart);
     info.luidString = std::format("0x{:08X}:0x{:016X}",
         static_cast<uint32_t>(desc.AdapterLuid.HighPart),
         static_cast<uint64_t>(desc.AdapterLuid.LowPart));

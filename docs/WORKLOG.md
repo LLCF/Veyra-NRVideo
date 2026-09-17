@@ -1,5 +1,269 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-17 采集卡 YUY2 实测：调色链路开/关各 2 分钟延迟对比
+
+命令（同一张卡、同一格式、同一信号，各 120 s，窗口内 0 丢帧）：
+
+```
+veyra.exe capture:0:0:0 --smoke-seconds 120                     # 链路关
+veyra.exe capture:0:0:0 --smoke-seconds 120 --color-grade=1.0   # 链路开（+1 EV）
+```
+
+设备事实：`capture:0:0` 的原生 subtype = `0x32595559`（**YUY2**），`SetFormat hr=0`，
+输入 1920×1080、`callbackFps=60.01`、`received≈7165 processed≈7163 dropped=0`。
+原始日志：`logs/color/capture-latency/chain-off.log` / `chain-on.log`（`[capture-timing]` 每 5 s 一条，
+取末尾各 20 个窗口平均）。
+
+| 指标（均值） | 关 | 开 | 差 |
+| --- | --- | --- | --- |
+| `gpuColorP95Ms`（YUV→线性 + 调色，融合同一 dispatch） | **0.040 ms** | **0.077 ms** | **+0.037 ms** |
+| `callbackToPresentReturnP95Ms` | 2.630 | 2.613 | −0.017（噪声内） |
+| `readAgeMs` | 0.818 | 0.805 | −0.013 |
+| `gpuReadyP95Ms` | 0.695 | 0.713 | +0.018 |
+| `processCpuP95Ms` | 0.421 | 0.433 | +0.012 |
+| `presentCpuP95Ms` | 0.347 | 0.348 | +0.001 |
+| `callbackFps` | 60.01 | 60.01 | 0 |
+
+**结论**：这张卡的 YUY2 1080p60 输入下，调色链路（无 LUT）每帧多花 **≈0.037 ms GPU 时间**，
+占该指标自身的 1.5%；**软件侧 ingress→present-return 延迟没有可测出的变化**（差 0.02 ms，
+低于该指标噪声），两轮都满 60 fps、零丢帧。
+
+**必须说清的边界**：这里量的是**进程内** `callbackToPresentReturn`（日志自己都标了
+“not HDMI-to-display latency”），**不是**玻璃到玻璃延迟；真正的端到端要拿手机 240 fps
+拍“显示器计时器 → 采集卡 → 软件 → 屏幕”的环路。另外本次只测了无 LUT 的调色，
+3D LUT 会再加每像素 4 次纹理取样，未测。
+
+## 2026-09-17 用户验收反馈四条（曲线端点/删参数滑条/混色器改版/色轮间距）+ 混色器色彩空间
+
+1. **曲线端点拖不动**：拖动时我把索引硬夹在 `[1, count-2]`，端点永远动不了。现在端点可拖，
+   但**只改垂直位置**（保留 0/1 的输入位置），这正是 Lightroom 的黑/白场用法；内部点仍可自由移动。
+2. **删掉曲线组的 7 条参数滑条**（高光/亮色调/暗色调/阴影/范围分割 × 3）。用户要求“有曲线就行”；
+   模型字段与 schema 不动（老预设仍能读），只是面板不再暴露，烘焙里它们保持 0。
+3. **混色器改版**：去掉“校正”下拉。选中的色系**三根滑块（色相/饱和度/明亮度）同时显示**；
+   黑白改成混色器里的一个**开关**（打开才多出该色系的“黑白”行），不再占用下拉。
+4. **颜色分级标题和色轮黏在一起**：色轮网格前加 12 dip 间距。
+5. **混色器色彩空间（红色偷脸的真因候选）**：混色器此前在**线性光 HSV** 里匹配色带——
+   线性化会把肤色从“橙”拉向“红”，所以红色带会吃到脸。现在改为在**显示参考域**里匹配：
+   先用单调 gamma 编码（`pow(x,1/2.2)`，不裁剪，HDR 高光安全）→ HSV → 应用色带 → 解码回线性；
+   同时色带半宽从 45° 收窄到 **32° 并加 smoothstep 过渡**，红色带对肤色的影响从“整片”降到约 0.5°。
+
+**未解释的异常（如实记）**：想给“肤色以橙色带为主”加一条 CPU 断言时发现——单把 `mixerHue[1]`（橙色带）
+设成 100 去烘焙，拿回来的表是**恒等表**（`identity=true`），而 `mixerHue[0]` 相同操作正常；
+`o.neutral()` 打印为 false、`mixerHue[1]` 确实是 100、`kColorMixerBands=8`。
+同一份烘焙里 `mixerSaturation[3]`（绿色带）是能正常生效的（既有断言在过）。本轮时间不够，
+**没有把这条断言留下**（宁愿不写也不写一条假过的），已记为待查项；用户报的“红色偷脸”由上面的域切换处理。
+
+**验证**：`veyra_color_grade_tests`、`veyra_color_grade_gpu_tests` exit 0；`--smoke-color` exit 0
+（含混色器黑白开关、曲线加点/拉平、色轮、眼睛全流程）；
+`scripts/gates/delivery.ps1` → **DELIVERY SHORT GATE PASS**
+（`logs/delivery/ae3c5523e9b44a9a8d33543eb18f1ad0/result.json`）。
+
+## 2026-09-17 修复：点曲线是折线不是曲线（UI 与烘焙一起换成单调三次样条）
+
+用户指着截图问“曲线为什么是直角”。他说得对，而且问题比 UI 更深一层：
+
+- UI 只是把 `curveValue()` 的采样点直连成折线；
+- 而 **`pointCurve()` 本身就是分段线性插值** → 烘焙进 1024 项表的也是折线 → 画面效果同样是硬角。
+
+修法：把 `pointCurve()` 换成 **单调三次 Hermite（Fritsch–Carlson）**：
+
+- 过每一个控制点、C1 连续（没有直角）；
+- 切线的 Fritsch–Carlson 限幅保证**单调、不越界、不过冲**——普通 Catmull-Rom 在强 S 曲线上会冲过
+  控制点甚至局部反转，那在这类工具里属于事故；
+- 烘焙与 UI 走同一个 `pointCurve()`，预览和实际处理自动一致（已由测试守住）。
+
+测试：CPU 新增 4 条断言（不是直线段、200 点扫描下单调且有界、两点曲线仍是精确恒等、
+烘焙表与 UI 在**同一 x**（`i/(N-1)`）上逐值一致）。回归：`veyra_color_grade_tests`、
+`veyra_color_grade_gpu_tests`、`--smoke-color` 全 exit 0；`scripts/gates/delivery.ps1` →
+**DELIVERY SHORT GATE PASS**（`logs/delivery/ca89dfb6c9b8416999307a81f5aaa752/result.json`）。
+
+## 2026-09-17 诊断：HEVC 文件打不开 + 导出中止（未改产品代码）
+
+### 后续：HEVC 改走 D3D11VA（用户决定"一劳永逸"，同日晚）
+
+承接本条诊断。动作与结果：
+
+**改动**：`FFmpegVideoDecoder::openD3D11VA()`（同适配器私有 D3D11 设备、8 槽共享纹理环、D3D11→D3D12
+共享 fence）、`FramePacket::hardwareSurface`（`HardwareSurfaceInput`）、`EnhanceGraph::process()` 新增硬件面
+参数并让 `AV_PIX_FMT_D3D11` 与 D3D12VA 共用同一段 SRV/等待逻辑、`MediaFileSource` 里 **HEVC→D3D11VA、
+其余编码仍走 D3D12VA**、`AdapterInfo.luid`、`veyra_media` 链接 `d3d11`。
+
+**实测约束（重要）**：本机驱动**拒绝在 DXVA 解码输出纹理上开 NT 句柄共享**
+（`[AVHWFramesContext] Could not create the texture (80070057)`）；自建 NV12 纹理只加 `SHARED_NTHANDLE`
+同样被拒，必须 `D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE`。因此最终结构是
+**解码 → GPU 拷进自己的共享纹理环 → fence 交接 → D3D12 队列 Wait 后采样**（零回读、零 CPU 等待），
+解码对齐留白由图入口的绝对 texel 索引采样天然避开。
+
+**验证**（`veyra_hw_import_image_tests <file> <png-prefix>`，硬解 vs 软解全图逐像素对比）：
+
+- 1280x720 HEVC / 3840x2160 HEVC / **IMAX 3840x2024 HEVC（用户文件）** → `path=d3d11va`，
+  `FULL_IMAGE_PASS=1 worst=0`（4 帧全图 MAE=0）。
+- 1080x1920 H.264 → 仍 `path=d3d12va`，`worst=0`，无回归。
+- 测试内 `hardwareImportFixtures`（1/3 切片阵列）同样通过。
+
+**未验证**：GUI 里打开 IMAX 文件的播放 smoke（`veyra.exe` 已链接成功、应用级无界面导出已实测，但没跑
+窗口播放）；10-bit P010、AMD/Intel、采集低延迟路径。**本轮未提交、未发布、未替换便携包。**
+
+#### 再后续：导出整槽缺口补帧（用户拍板"把导出修复一下"）
+
+- 策略：`CfrTimeline::missingSlots()` 只认"落在网格上、前移 1..2 槽"的缺口（残差 ≤ 半个容器 tick），
+  补帧用**上一帧真实画面重复** `multiplier` 次，**不伪造插值**；补完 `resync()` 重锚相位；预检
+  `select()` 的 120 帧抽样同样容忍整槽缺口（否则文件在进循环前就被拒）。网格外抖动或 >2 槽照旧硬失败。
+- 改动：`include/veyra/engine/CfrTimeline.h`、`src/engine/VideoExportJob.cpp`、
+  `tests/unit/RepairContractTests.cpp`、新增 `tools/export_probe`（无界面导出验证台）+ `CMakeLists.txt`。
+- 验证：单元 **197 checks / 0 failures**；`exp_hole1.mp4`（缺 1 帧）导出 **exit 0**，
+  `gap filled source=60 missingSlots=1`、`source=179 hold=1 output=180 gapFillEvents=1`、
+  `export-verify decoded=180 expected=180 passed=true`；`exp_hole3.mp4`（缺 3 帧）仍 **exit 1 + 无输出**；
+  无缺口素材 `gapFillEvents=0` 正常；**应用本体无界面导出**（`Veyra.exe … --export-out … --max-frames 80`）
+  `exitCode=0`、`export result=true`；补帧正确性用 PSNR 证明：输出第 60 帧 vs 源第 59 帧 **43.64 dB**
+  （vs 洞后第一帧 20.47 dB），确为重复上一帧，不是插值。
+- 全目标编译 `-k 0` → **21/21 全部链接成功（含 veyra.exe）**。仍未提交、未发布。
+
+用户报两件事：`IMAX.Laser.Pre.Show.New.2160P.DDP5.1.Atmos-ZhiLuan.mkv` 打不开；另一台机器上
+连续两次导出跑到一半中止（`C:\Users\123\Desktop\导出失败\`）。
+
+**结论一（打不开）**：与文件无关。本机 RTX 5070 + 驱动 32.0.16.1656（616.56）上
+**HEVC + D3D12VA 硬解整体失效**：第一个 picture 就失败并把 Veyra 的共享 D3D12 设备打成
+`hr=0x887A0005`（device removed）；`MediaFileSource` 的软解回退仍在同一台已死设备上建图，
+所以会话直接退出。证据链：
+
+- 用户日志 `E:\App\Veyra-1.3.2beta4-win64-portable\logs\veyra-app.log:3072-3088`：
+  `d3d12va decoder opened codec=hevc 3840x2024` → `send_packet failed code=-22` →
+  软解首帧 OK → `gpu-timestamp query heap hr=0x887A0005` / `upload buffer alloc failed hr=0x887A0005`。
+- 文件本身没问题：软解全片 12 秒零告警；D3D11VA 62 帧 0 错误；DXVA2 正常。
+- 换文件、换分辨率、换编码器同样复现：本机 NVENC 现编的 720p / 2024p / 2160p HEVC 走
+  `-hwaccel d3d12va` 全部 `exit=-22`；H.264+D3D12VA 正常。
+- **Veyra 本体复现**（一次性 6 秒，`--smoke-seconds 6`，未写偏好）：换成 1280x720 HEVC 后
+  `smoke frames=0 generated=0 failed=true`、exit=1，日志与用户现场逐行同形。
+
+**结论二（导出中止）**：源文件第 10467 个源帧的时间戳比 CFR 网格整整晚一帧
+（`pts=348.9333 expected=348.9 deviationMs=33.333`），中段跳变按 `CfrTimeline` 设计硬拒绝
+（只有尾部 3 帧豁免），导出主动停止并保留 partial。前 120 帧抽样完全符合 30/1，说明不是
+量化抖动而是一个缺失的网格槽位；两份 worker 日志没有任何解码错误，所以更可能是源文件自身
+丢帧，但**需要源文件才能定案**。
+
+**附带发现**：9/16 那 5 份 worker 是**另一类**失败——`nvEncOpenEncodeSessionEx` 三档
+apiVersion 全被拒（`status=15`），旧版（1.3.0）没有 fallback 所以当场失败；9/17 版靠
+`VideoEncoderFactory` 的 MF MFT 兜底继续跑。MF 路径在 `bitrateMbps=0` 时不设 MeanBitRate，
+实际码率由 MFT 默认值决定，属降级，已记录。
+
+产物：`docs/DIAG_HEVC_D3D12VA_AND_EXPORT_CFR_2026-09-17.md`；
+证据日志（gitignore 内）`logs/diag-20260917-hevc-d3d12va/`。
+**本轮只做诊断，未改任何产品代码，未发布。**下一步待用户选：驱动回滚/换机验证，或先做
+"失败即弃设备 + HEVC 硬解能力探测"的修复。
+
+## 2026-09-17 紧急修复：色彩参数不是实时的（要开关 NR 才生效）
+
+用户上手验收第一条就抓到：拖一堆滑块画面**完全没反应**，必须开关 NR 才应用，之后继续调又不动。
+
+**根因（不是 shader，是引擎的实时更新路径缺失）**：`EngineController` 的渲染线程只在
+`requested.revision != previous.revision` 时才处理设置，而 `requestSettings()` 又按设计**故意**让
+“只改颜色参数”的请求保持同一个 revision（`sameVideoConfiguration()` 把颜色块从“图形结构”比较里排除，
+因为颜色是纯 uniform 更新、不该重建图）。两件事叠起来的结果：颜色改动被写进 `desired`，
+**渲染线程永远看不到**，直到某个真正改变图形结构的操作（开关 NR/SR/切分辨率）顺带把整套设置重放一遍。
+这也解释了为什么我之前的烟测没抓到——它断言的是 `desired`（引擎已收到）而不是 `applied`（图真的收到）。
+
+**修复**：在渲染线程的设置处理里补上**同 revision 的实时 uniform 更新**分支——
+`if(requested.revision==previous.revision&&!(requested==previous))` → `graph.applySettings(requested)`，
+不重建、不重置历史、不打断采集；失败时回滚 `desired` 并给出提示文字。
+日志新增 `[settings] live parameter update revision=… colourEnabled=… exposure=… contrast=… temperature=…`。
+
+**测试补强（这次必须能抓到）**：烟测的曝光步骤改为同时断言 `desired` **和** `applied`，
+并新增两步：把曝光改成 0.75 → 要求 `applied.exposure==0.75` **且 `applied.revision` 不变**
+（证明走的是实时路径、没有重建）。日志：
+`exposure 1.00 reached the engine and the running graph (applied, revision=3)`、
+`live parameter update reached the graph without a rebuild (revision stays 3)`。
+
+**验证**：`--smoke-color` exit 0；`scripts/gates/delivery.ps1` → **DELIVERY SHORT GATE PASS**
+（`logs/delivery/1292ac3a395e451e9d50927f67645df9/result.json`）。
+已用修复后的构建重新拉起测试实例（4K GTA VI 片段 + 色彩页）。
+
+### 追加：暂停时调整也要看得见
+
+用户接着问“为什么暂停时调整看不见、必须播放”。原因：调色**融合在 ingest 的 dispatch 里**，
+而暂停时渲染线程走的是“只把上一帧重新 present”的快路径，**不会再跑 process()**，
+所以新烘焙的表根本没上传到 GPU（`colorDirty_` 一直挂着），只有等下一帧真正处理时才生效。
+
+修复：实时参数更新成功后，如果当前是暂停（或静态图片），置 `refreshPausedFrame_`；
+在暂停快路径里用**缓存下来的源帧**重新过一次 `graph.process(..., reset=true, ...)`，
+再 present 这一帧。代价是每次改动一帧的处理时间（4K 约几毫秒），拖动滑块就是连续重渲染。
+
+新增可测证据：`PlayerSnapshot::pausedFrameRefreshes` 计数器 + 烟测三步
+（暂停→改曝光→要求 `applied` 生效且计数器自增→恢复播放）。日志：
+`[settings] paused frame re-rendered with the new parameters ptsMs=3033.333`、
+`[color-ui-test] paused adjustment re-rendered the frame (refreshes=1)`。
+`--smoke-color` exit 0；`scripts/gates/delivery.ps1` → **DELIVERY SHORT GATE PASS**
+（`logs/delivery/4752929202354ecca7474cdac60f1ccd/result.json`）。
+
+## 2026-09-17 色彩页 P1/T3 收口：分组“眼睛”bypass + schema v19
+
+方案 T3 要求的“分组眼睛”落地，并且是**真 bypass**（不只是隐藏 UI）：
+
+- 模型：`ColorSettings` 新增 `groupBypassMask`（一位一组：亮/颜色/曲线/混色器/颜色分级/校准/LUT）；
+  **预设 schema v18 → v19**（写在颜色块内、LUT 引用之后，v18 老文件按 `version` 跳过该字段照常读）；
+  `.vpcolor` 与 `runtime_local/color-looks.v1` 文件版本 1 → 2（v1 仍可读，写 2）；
+- 烘焙：`ColorGradeTables::bake()` 先把被 bypass 的组按“中性值”复制一份再烘焙，
+  所以**数值全部保留**、只是这一组不参与画面，且无需给 shader 加分支；
+- UI：每个分组标题右侧一个自绘“眼睛”（`VeyraColorEye`，id 860..866）：睁眼=生效、斜杠+橙色=已停用，
+  点一下切换并即时生效（不重建管线）；
+- 烟测覆盖：点眼睛 → `mask=1`，再点 → `mask=0`；
+- **像素级验证**（`veyra_color_grade_gpu_tests` 新增两条）：把“亮”组停用后，
+  渲染结果与“未调色参考帧”**逐字节一致**，同时 `off.color.exposure==1.0`（数值确实还在）。
+
+顺带修掉期间引入的一个递归（bypass 分支里 `bake(masked)` 忘记清 mask → 栈溢出），
+以及测试里两处 `auto x=s;` 后误改 `s` 的复制粘贴错误。
+
+**验证**：`veyra_color_grade_tests`、`veyra_color_grade_gpu_tests`、`veyra_color_look_tests`、
+`veyra_color_lut_tests`、`veyra_hdr_color_tests`、`veyra_ui_contract_tests`、
+`veyra_repair_preset_tests`（含 v18→v19 迁移与损坏保护）、`veyra_repair_contract_tests 191/0` 全 exit 0；
+`--smoke-color` exit 0；`scripts/gates/delivery.ps1`（UI 全部五批完成后的最终代码）→ **DELIVERY SHORT GATE PASS**
+（`logs/delivery/e41b66176a824c2990bbe28f845cb369/result.json`）。
+真机截图：`logs/color/ui-preview-eyes2.png`（分组眼睛 + 曲线通道按钮同屏）。
+
+**至此 UI 四批（渐变轨道/四色轮/混色器色点条/曲线编辑器）+ 眼睛全部落地**；
+剩余可选项：分区图标、字号与间距抛光。
+
+## 2026-09-17 色彩页 UI：真曲线编辑器 + 面板默认更宽（专业型第四批）
+
+- **曲线编辑器**（自绘控件 `VeyraToneCurve`，id 850）：网格画布 + 对角参考线 + 四条通道曲线
+  （RGB/红/绿/蓝，非当前通道淡显）+ 控制点圆点；通道按钮（851..854）与“拉平”按钮（855）；
+  画布下方实时显示“输入/输出”0..255；
+- **交互**：左键点网格加点（自动按 x 排序并选中）、拖动移动（x 被左右邻点夹住，防止翻转）、
+  双击控制点删除（两个端点保留）、拉平恢复恒等曲线；拖动期间不写撤销历史，松手压一条；
+- 曲线**预览与烘焙同源**：新增 `ColorGradeTables::curveValue()`，UI 画的就是烘焙进 1024 项表的那条
+  分段线性响应，避免“预览好看、实际不一样”；
+- **面板默认宽度 320 → 392**（仍可拖动 296..420）：色轮/曲线/混色器条在 320 下太挤，
+  这是用户反馈“难用”的直接原因之一；
+- 曲线画布留出控制点半径的内边距，端点圆点不再被边框裁掉。
+
+**验证**：`--smoke-color` **exit 0**——`curve channel selected=1` →
+`curve point added count=3 x=0.50 y=0.75 pass=true` →
+`curve flatten restored the identity ramp pass=true count=2`；
+`veyra_ui_contract_tests` exit 0。真机截图：`logs/color/ui-preview-curve4.png`。
+
+**下一批（最后一块）**：分组“眼睛”bypass（schema v19）、分区图标与间距/字号抛光。
+
+## 2026-09-17 色彩页 UI：混色器专业布局（校正下拉 + 8 色点条，专业型第三批）
+
+24 条混色器滑块（8 色系 × 色相/饱和度/明亮度）改成 Lightroom 的做法：**一次只显示选中色系的滑块**。
+
+- 顶部“**校正**”下拉（id 830）：色相 / 饱和度 / 明亮度 / **黑白**。选“黑白”**本身就是黑白混色器开关**
+  （`ColorSettings::blackWhite` 跟着下拉走），所以原来的复选框（820）删掉了，语义与 LR 的 B&W 面板一致；
+- 下方 **8 色点条**（自绘控件 `VeyraColorBands`，id 831）：红/橙/黄/绿/浅绿/蓝/紫/洋红八个色点，
+  选中的色点带白色描边；点一下就切换下面显示的 3 条滑块；
+- 布局：混色器组里，24 行仍在参数表里（索引/标签/预设 schema 都没动），但只有
+  `(校正方式, 选中色系)` 匹配的那一行会被摆放并显示，其余行 `hidden`；
+- 测试钩子：`settingsColorMixerModeForTest` / `settingsColorBandForTest` / `colourBandsControlId`，
+  烟测走的就是 UI 同一条代码路径。
+
+**验证**：`--smoke-color` **exit 0**，日志：
+`mixer mode=3 blackWhiteAsked=1 applied=1` → `T4 the black and white mixer switch reached the engine` →
+`T4 the black and white band row reached the engine` → 色轮三步依旧全过。
+真机截图：`logs/color/ui-preview-mixer.png`（校正=黑白、绿色系被选中）。
+
+**下一批**：真曲线编辑器（网格 + 可拖控制点 + RGB/R/G/B 通道）、分组眼睛 bypass（schema v19）、
+分区图标与间距抛光。
+
 ## 2026-09-17 色彩页 UI：颜色分级四色轮（专业型第二批）
 
 把颜色分级从 12 条滑块（4 区 × 色相/饱和度/明亮度）换成**四个自绘色轮**，就是专业调色面板的样子：

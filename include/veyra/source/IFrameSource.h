@@ -18,9 +18,12 @@ namespace pipeline = veyra::pipeline;
 
 struct SourceOpenDesc {
     std::wstring path;
-    bool preferHardwareDecode = true; // D3D12VA first, software fallback explicit
+    bool preferHardwareDecode = true; // hardware first, software fallback explicit
     void* d3d12Device = nullptr;      // ID3D12Device* when hardware decode is wanted
     void* d3d12Queue = nullptr;       // ID3D12CommandQueue*
+    // Adapter the D3D12 device lives on. The D3D11VA path creates its own
+    // D3D11 device on the same adapter so decoded surfaces can be shared.
+    uint64_t d3d12AdapterLuid = 0;
     bool legacyCaptureRgbForDiagnostic = false; // explicit A/B only; never set by the player
 };
 
@@ -34,6 +37,10 @@ struct SourceInfo {
     int nominalRateNum = 0, nominalRateDen = 0; // candidate, not proof of CFR
     double timestampQuantum = 0.0;
     bool hardwareDecodeActive = false;
+    // Which decode path actually produced the frames: "d3d12va", "d3d11va" or
+    // "software". Descriptive only; the UI/telemetry must not claim a path the
+    // session is not using.
+    std::string videoDecodePath;
     // File diagnostics. These are descriptive capability results, not a
     // promise that every profile of the codec is supported.
     std::string containerName;

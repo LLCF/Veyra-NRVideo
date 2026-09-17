@@ -21,4 +21,16 @@ int colourWheelControlId(int zone);
 // Scroll the colour page so the given control is inside the viewport (used by
 // acceptance screenshots and by the smoke before it drives a control).
 void settingsColorScrollToTest(int id);
+// Mixer correction mode (0 hue / 1 saturation / 2 luminance / 3 black & white)
+// and the selected colour range, driven through the same code path the UI uses.
+void settingsColorMixerModeForTest(int mode);
+void settingsColorBandForTest(int band);
+int colourBandsControlId();
+int colourCurveCanvasControlId();
+// Client point on the curve canvas for a normalised (input, output) pair.
+bool settingsCurveTestPoint(float x,float y,POINT& out);
+// Expand/collapse one colour section (acceptance code needs the target section
+// unfolded regardless of what the previous run persisted).
+void settingsColorSectionForTest(int section,bool expanded);
+int colourSectionEyeControlId(int section);
 }

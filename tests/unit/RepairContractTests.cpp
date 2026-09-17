@@ -424,6 +424,25 @@ int main(){
         check(!tail.tailAccepts(51247,854.9,51249)&&!tail.tailAccepts(51247,854.133,0),"tail snap rejects larger deviations and unknown streams");
     }
     {
+        // User report 2026-09-17: an 11 minute CFR mp4 where ONE sample was
+        // dropped (frame 10467 carries the timestamp of slot 10468) aborted the
+        // export at 51%. A whole-slot hole is now filled with the previous frame
+        // and the validator re-aligns; off-grid jitter and bigger jumps still fail.
+        engine::CfrTimeline holes(30,1,1.0/90000,0);
+        bool seated=true;for(uint64_t i=0;i<10467;++i)seated &= holes.accepts(i,double(i)/30.0);
+        check(seated&&!holes.accepts(10467,10468/30.0),"a dropped mid-stream sample still breaks the strict phase test");
+        check(holes.missingSlots(10467,10468/30.0)==1,"whole-slot hole is detected as one missing sample");
+        check(holes.missingSlots(10467,10467/30.0)==0&&holes.missingSlots(10467,10467/30.0+0.0002)==0
+            &&holes.missingSlots(10467,10470/30.0)==0,"on-grid frames, off-grid jitter and oversized jumps are not fillable holes");
+        check(holes.missingSlots(10467,10468/30.0,1.0)==1&&holes.missingSlots(10467,10469/30.0,1.0)==0,"fill limit bounds how much damage is repaired");
+        holes.resync(10467,10468/30.0);
+        // resync consumes frame 10467 itself (the exporter keeps processing it),
+        // so the grid is verified from the next source frame onwards.
+        bool realigned=true;for(uint64_t i=10468;i<10468+120;++i)realigned &= holes.accepts(i,double(i+1)/30.0);
+        check(realigned,"gap resync re-aligns the grid for the rest of the stream");
+        check(holes.missingSlots(10587,10588.0/30.0)==0,"post-resync frames sit on the new grid instead of reporting another hole");
+    }
+    {
         // Subtitle engine: external SRT/ASS/WebVTT parsing, style mapping and
         // indexed lookup (the renderer and the embedded-track extraction share
         // this code).

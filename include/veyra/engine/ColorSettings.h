@@ -87,6 +87,11 @@ struct ColorSettings {
     // reference, 2 = PQ. The plan forbids silently applying a display-referred
     // LUT to HDR content, so the choice is explicit and logged.
     int lutInputSpace=0;
+    // Per-section bypass (plan T3 "分组眼睛"): bit per colour page section -
+    // 0 亮, 1 颜色, 2 曲线, 3 混色器, 4 颜色分级, 5 校准, 6 LUT. A bypassed section
+    // is baked as neutral, so the user can A/B one group without losing its
+    // numbers. Lives in the settings (not the UI) because it changes the pixels.
+    uint32_t groupBypassMask=0;
 
     bool operator==(const ColorSettings&)const=default;
     // Neutral means "renders exactly like no grading at all", ignoring the
@@ -147,7 +152,7 @@ struct ColorSettings {
     }
 };
 
-// PresetStore schema v18: one appended block per entry. The field order is part
+// PresetStore schema v19: one appended block per entry. The field order is part
 // of the on-disk format - never reorder without a new version. The stream is
 // narrow UTF-8 (PresetStore owns the wide/UTF-8 conversion of lutPath) so this
 // header stays free of platform includes.
@@ -158,6 +163,9 @@ inline void writeColorSettings(std::ostream& out,const ColorSettings& c,const st
        <<c.splitHighlights<<' '<<c.splitMidtones<<' '<<c.splitShadows<<' '
        <<(c.blackWhite?1:0)<<' '<<c.gradingBlending<<' '<<c.gradingBalance<<' '<<c.calibrationShadowTint<<' '
        <<c.lutStrength<<' '<<c.lutInputSpace<<' '<<std::quoted(lutPathUtf8);
+    // v19 keeps the per-section bypass after the LUT reference, so v18 files stay
+    // readable (they simply have no mask) and the curves keep their positions.
+    out<<' '<<c.groupBypassMask;
     for(const auto& curve:c.curves){
         out<<' '<<curve.count;
         for(int i=0;i<curve.count;++i)out<<' '<<curve.points[std::size_t(i)].x<<' '<<curve.points[std::size_t(i)].y;
@@ -170,7 +178,10 @@ inline void writeColorSettings(std::ostream& out,const ColorSettings& c,const st
     for(float v:c.calibrationHue)out<<' '<<v;
     for(float v:c.calibrationSaturation)out<<' '<<v;
 }
-inline bool readColorSettings(std::istream& in,ColorSettings& c,std::string& lutPathUtf8){
+// `schemaVersion` is the *file* version: v18 files stop after the LUT reference,
+// v19 adds the per-section bypass mask. Callers pass their file's version so old
+// presets keep loading.
+inline bool readColorSettings(std::istream& in,ColorSettings& c,std::string& lutPathUtf8,int schemaVersion=19){
     int blackWhite=0,enabled=0;
     if(!(in>>enabled>>c.temperature>>c.tint>>c.exposure>>c.contrast>>c.highlights>>c.shadows>>c.whites>>c.blacks
         >>c.texture>>c.clarity>>c.dehaze>>c.vibrance>>c.saturation
@@ -180,6 +191,7 @@ inline bool readColorSettings(std::istream& in,ColorSettings& c,std::string& lut
         >>c.lutStrength>>c.lutInputSpace>>std::quoted(lutPathUtf8))||(blackWhite!=0&&blackWhite!=1)||(enabled!=0&&enabled!=1))return false;
     c.enabled=enabled!=0;
     c.blackWhite=blackWhite!=0;
+    if(schemaVersion>=19&&!(in>>c.groupBypassMask))return false;
     for(auto& curve:c.curves){
         if(!(in>>curve.count))return false;
         for(int i=0;i<curve.count&&i<kColorCurvePoints;++i)if(!(in>>curve.points[std::size_t(i)].x>>curve.points[std::size_t(i)].y))return false;

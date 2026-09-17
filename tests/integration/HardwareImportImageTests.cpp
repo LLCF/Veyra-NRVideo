@@ -20,18 +20,23 @@ int wmain(int argc,wchar_t** argv){
  if(!ctx.initialize({},st)||!ring.initialize(ctx.device(),ctx.directQueue(),ctx.fence(),ctx.fenceEvent(),6,st))return 3;
  std::vector<sink::RgbaImage> reference;double worst=0;
  for(bool hardware:{false,true}){
-  source::MediaFileSource source;source::SourceOpenDesc sd;sd.path=argv[1];sd.preferHardwareDecode=hardware;sd.d3d12Device=ctx.device();sd.d3d12Queue=ctx.directQueue();
+  source::MediaFileSource source;source::SourceOpenDesc sd;sd.path=argv[1];sd.preferHardwareDecode=hardware;sd.d3d12Device=ctx.device();sd.d3d12Queue=ctx.directQueue();sd.d3d12AdapterLuid=ctx.adapter().luid;
   if(!source.open(sd))return 4;
   pipeline::EnhanceGraph graph(ctx,ring);pipeline::EnhanceGraphDesc gd;
   gd.sourceWidth=gd.workWidth=source.info().width;gd.sourceHeight=gd.workHeight=source.info().height;gd.enableNr=false;gd.enableSr=false;gd.enableFg=false;
   if(!graph.initialize(gd)||!graph.createViews())return 5;
+  std::cout<<"DECODE_PATH hardware="<<hardware<<" path="<<source.info().videoDecodePath<<" visible="<<source.info().width<<"x"<<source.info().height<<std::endl;
   for(unsigned i=0;i<4;++i){
    pipeline::FramePacket packet;const AVFrame* frame=nullptr;source::SourceReadStatus result;
    do{result=source.read(packet,&frame);}while(result==source::SourceReadStatus::Waiting);
-   if(result!=source::SourceReadStatus::Frame||(frame->format==AV_PIX_FMT_D3D12)!=hardware)return 6;
-   if(hardware){auto* native=reinterpret_cast<AVD3D12VAFrame*>(frame->data[0]);auto d=native->texture->GetDesc();std::cout<<"GPU_IMPORT frame="<<i<<" visible="<<frame->width<<"x"<<frame->height<<" resource="<<d.Width<<"x"<<d.Height<<" array="<<d.DepthOrArraySize<<" slice="<<native->subresource_index<<" format="<<d.Format<<std::endl;}
+   // Hardware decode is D3D12VA for most codecs and D3D11VA (NT-handle shared)
+   // for HEVC; both must hand the ingress an importable NV12/P010 surface.
+   const bool hwFrame=frame->format==AV_PIX_FMT_D3D12||frame->format==AV_PIX_FMT_D3D11;
+   if(result!=source::SourceReadStatus::Frame||hwFrame!=hardware)return 6;
+   if(hardware&&frame->format==AV_PIX_FMT_D3D12){auto* native=reinterpret_cast<AVD3D12VAFrame*>(frame->data[0]);auto d=native->texture->GetDesc();std::cout<<"GPU_IMPORT d3d12va frame="<<i<<" visible="<<frame->width<<"x"<<frame->height<<" resource="<<d.Width<<"x"<<d.Height<<" array="<<d.DepthOrArraySize<<" slice="<<native->subresource_index<<" format="<<d.Format<<std::endl;}
+   else if(hardware){if(!packet.hardwareSurface.present())return 6;std::cout<<"GPU_IMPORT d3d11va frame="<<i<<" visible="<<frame->width<<"x"<<frame->height<<" resource="<<packet.hardwareSurface.textureWidth<<"x"<<packet.hardwareSurface.textureHeight<<" slice="<<packet.hardwareSurface.subresourceIndex<<" fence="<<(packet.hardwareSurface.waitFence!=nullptr)<<" value="<<packet.hardwareSurface.waitValue<<std::endl;}
    pipeline::EnhanceGraph::FrameOutputs out;
-   if(!graph.process(frame,i*1000.0/30,i==0,out,i+1,&packet.colorInfo))return 7;
+   if(!graph.process(frame,i*1000.0/30,i==0,out,i+1,&packet.colorInfo,&packet.hardwareSurface))return 7;
    sink::RgbaImage image;if(!sink::readRgba8(ctx,ring,graph.videoFrameResource(out.videoSlot),image))return 8;
    if(i==0&&!sink::saveImage(std::wstring(argv[2])+(hardware?L"-hardware.png":L"-software.png"),image))return 9;
    if(!hardware)reference.push_back(std::move(image));

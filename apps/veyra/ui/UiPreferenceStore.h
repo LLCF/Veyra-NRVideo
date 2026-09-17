@@ -7,7 +7,10 @@
 namespace veyra::ui {
 struct UiPreferences {
     float volume=1;bool muted=false,subtitles=true;
-    int inspectorWidth=320;
+    // The colour page is a professional panel now (colour wheels, tone curve,
+    // mixer strip): start wider so those controls are usable, still draggable
+    // between 296 and 420.
+    int inspectorWidth=392;
     int width=1280,height=800,x=0,y=0,inspector=0,subtitleSize=22;bool positioned=false;
     // v3: subtitle look (outline/background bar/font index/extra bottom margin)
     // and the dual-language switch.

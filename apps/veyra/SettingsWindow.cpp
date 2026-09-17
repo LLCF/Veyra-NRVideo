@@ -6,6 +6,7 @@
 #include "veyra/engine/PresetStore.h"
 #include "veyra/engine/ColorLookStore.h"
 #include "veyra/engine/ColorLut.h"
+#include "veyra/pipeline/ColorGradeTables.h"
 #include "veyra/RuntimePaths.h"
 #include "veyra/gfx/XessMfgUnlock.h"
 #include <filesystem>
@@ -122,6 +123,9 @@ struct ColorParam{
     }
 };
 std::vector<ColorParam> colorParams;
+// Defined with the mixer controls further down; the layout needs it to decide
+// which of the 24 mixer rows is on screen.
+int mixerModeOf(const ColorParam& param);
 // id layout: master 800, reset 801, undo 802, header 810+s, label 830+i,
 // edit 850+i, slider 870+i.
 // The colour page owns 1200..1499: label/edit/slider per parameter, so the four
@@ -133,6 +137,23 @@ constexpr int colorSliderId(int i){return 1400+i;}
 // Colour wheels (4 zones) and their class name; ids sit above the button block.
 constexpr int colorWheelId(int zone){return 840+zone;}
 constexpr const wchar_t* kColorWheelClass=L"VeyraColorWheel";
+// Colour-mixer band strip and the "correction" dropdown that decide which of the
+// 24 mixer rows is on screen (Lightroom shows one colour range at a time).
+constexpr int colorMixerModeId=830,colorBandsId=831;
+constexpr const wchar_t* kColorBandsClass=L"VeyraColorBands";
+int colourMixerMode=0;   // 0 hue, 1 saturation, 2 luminance, 3 black & white
+int colourMixerBand=0;   // 0..7, the eight colour ranges
+bool colourBlackWhite=false;   // the mixer's black & white switch
+// Tone-curve editor: which channel is being edited (0 RGB, 1 R, 2 G, 3 B) and
+// which control point is being dragged.
+constexpr int colorCurveCanvasId=850,colorCurveChannelId=851,colorCurveResetId=855;
+constexpr const wchar_t* kColorCurveClass=L"VeyraToneCurve";
+// Per-section bypass "eye" (plan T3). One small owner-drawn control per section,
+// sitting at the right end of its header row.
+constexpr int colorSectionEyeId(int section){return 860+section;}
+constexpr const wchar_t* kColorEyeClass=L"VeyraColorEye";
+int colourCurveChannel=0;
+int colourCurveDragPoint=-1;
 constexpr int kColorMaxParams=100;
 engine::ColorSettings colourTarget(){
     return (enhancementEnabled?controller->snapshot().desired:configuredSettings).color;
@@ -218,6 +239,8 @@ void layoutColorPage(){
         for(auto& entry:items)if(GetDlgCtrlID(entry.h)==id){entry.y=y;entry.height=height;entry.hidden=hidden;if(x>=0)entry.x=x;if(w!=-2)entry.w=w;return;}
     };
     int y=12;
+    // Sticky-header bookkeeping (see the section loop below).
+    int previousHeaderId=-1,previousHeaderY=0;
     place(800,y,36,false);y+=42;
     // Preset toolbar: which look, a name to save under, and the actions.
     place(803,y,200,false);place(804,y,180,false);y+=38;
@@ -226,7 +249,16 @@ void layoutColorPage(){
     place(821,y,32,false);y+=42;
     for(int section=0;section<kColorSections;++section){
         const bool collapsed=(colorFoldMask>>section)&1u;
-        place(810+section,y,32,false);
+        // Sticky section headers (Lightroom does this too): a header never
+        // scrolls under the top edge of the viewport - it is clamped to the
+        // visible top and pushed up by the next header that reaches it. Without
+        // the clamp a scrolled header was cut in half ("字只剩一半").
+        int headerY=y;
+        if(headerY<scroll)headerY=scroll;
+        if(previousHeaderId>=0)place(previousHeaderId,std::min(previousHeaderY,headerY-36),36,false);
+        place(810+section,headerY,36,false);
+        place(colorSectionEyeId(section),headerY+5,26,false,bodyWidthDip-40,26);
+        previousHeaderId=810+section;previousHeaderY=headerY;
         const auto title=std::format(L"{}  {}",collapsed?L"▸":L"▾",colorSectionName(section));
         putText(810+section,title.c_str());
         y+=38;
@@ -235,6 +267,7 @@ void layoutColorPage(){
         if(section==4){
             // body width is not in scope here; the viewport width is enough to
             // split the wheel grid into two columns.
+            y+=12;   // keep the section title clear of the wheels
             const int cellWidth=std::max<int>(dip(window,120),(bodyWidthDip-24-8)/2);
             place(colorWheelId(0),y,190,collapsed,12,cellWidth);
             place(colorWheelId(1),y,190,collapsed,12+cellWidth+8,cellWidth);
@@ -242,13 +275,36 @@ void layoutColorPage(){
             place(colorWheelId(3),y+196,190,collapsed,12+cellWidth+8,cellWidth);
             y+=400;
         }
+        // Mixer header: correction dropdown + the eight colour ranges. The 24
+        // rows stay in the table but only the selected range is on screen.
+        if(section==3){
+            // No correction dropdown: the three mixer rows are always on screen
+            // for the selected colour range; the B&W row appears when the switch
+            // is on (that switch IS the black & white mixer).
+            place(colorMixerModeId,y,30,collapsed,12,bodyWidthDip-24);y+=34;
+            place(colorBandsId,y,32,collapsed,12,bodyWidthDip-24);y+=40;
+        }
+        // Tone curve: channel tabs + reset, then the grid canvas.
+        if(section==2){
+            const int tabWidth=std::max(dip(window,40),(bodyWidthDip-24-40-18)/4);
+            for(int channel=0;channel<4;++channel)
+                place(colorCurveChannelId+channel,y,30,collapsed,12+tabWidth*channel+6*channel,tabWidth);
+            place(colorCurveResetId,y,30,collapsed,12+tabWidth*4+24,40);
+            y+=36;
+            place(colorCurveCanvasId,y,bodyWidthDip-24-6,collapsed,12,bodyWidthDip-24-6);
+            y+=bodyWidthDip-24+8;
+        }
         for(size_t i=0;i<colorParams.size();++i){
             const auto& param=colorParams[i];
             if(param.section!=section)continue;
-            place(colorLabelId(int(i)),y,24,collapsed);
-            place(colorEditId(int(i)),y-2,26,collapsed);
-            place(colorSliderId(int(i)),y+24,16,collapsed);
-            if(!collapsed)y+=46;
+            const int mode=mixerModeOf(param);
+            // Hue/saturation/luminance always visible for the selected band; the
+            // black & white row only while the B&W switch is on.
+            const bool hidden=collapsed||(mode>=0&&(param.index!=colourMixerBand||(mode==3&&!colourBlackWhite)));
+            place(colorLabelId(int(i)),y,24,hidden);
+            place(colorEditId(int(i)),y-2,26,hidden);
+            place(colorSliderId(int(i)),y+24,16,hidden);
+            if(!hidden)y+=46;
         }
         if(section==6){
             place(817,y,200,collapsed);y+=32;
@@ -277,7 +333,12 @@ void syncColorControls(){
         }
     }
     if(auto space=item(819))if(int(SendMessageW(space,CB_GETCURSEL,0,0))!=colour.lutInputSpace)SendMessageW(space,CB_SETCURSEL,WPARAM(colour.lutInputSpace),0);
-    check(820,colour.blackWhite?BST_CHECKED:BST_UNCHECKED);
+    colourBlackWhite=colour.blackWhite;
+    check(colorMixerModeId,colourBlackWhite?BST_CHECKED:BST_UNCHECKED);
+    if(auto bands=item(colorBandsId))InvalidateRect(bands,nullptr,FALSE);
+    if(auto canvas=item(colorCurveCanvasId))InvalidateRect(canvas,nullptr,FALSE);
+    for(int channel=0;channel<4;++channel)if(auto tab=item(colorCurveChannelId+channel))selected(tab,channel==colourCurveChannel);
+    for(int section=0;section<kColorSections;++section)if(auto eye=item(colorSectionEyeId(section)))InvalidateRect(eye,nullptr,FALSE);
     for(int zone=0;zone<engine::kColorGradingZones;++zone)if(auto wheel=item(colorWheelId(zone)))InvalidateRect(wheel,nullptr,FALSE);
     syncingColour=false;
 }
@@ -454,6 +515,303 @@ void registerColorWheelClass(){
     classDescription.hInstance=GetModuleHandleW(nullptr);
     classDescription.lpszClassName=kColorWheelClass;
     classDescription.hCursor=LoadCursorW(nullptr,IDC_ARROW);
+    RegisterClassW(&classDescription);
+}
+// Which of the four mixer corrections a row belongs to (-1 = not a mixer row).
+int mixerModeOf(const ColorParam& param){
+    switch(param.target){
+    case ColorTarget::MixerHue:return 0;
+    case ColorTarget::MixerSaturation:return 1;
+    case ColorTarget::MixerLuminance:return 2;
+    case ColorTarget::BlackWhiteMix:return 3;
+    default:break;
+    }
+    return -1;
+}
+const COLORREF kBandColours[engine::kColorMixerBands]={
+    RGB(226,64,64),RGB(226,152,58),RGB(226,214,58),RGB(74,200,80),
+    RGB(58,206,190),RGB(58,116,226),RGB(168,64,214),RGB(226,64,168)};
+RECT bandDotRect(HWND h,const RECT& area,int band){
+    const int count=engine::kColorMixerBands;
+    const int cellWidth=std::max(1,int(area.right-area.left)/count);
+    const int radius=std::max(dip(h,7),std::min(dip(h,12),cellWidth/2-dip(h,3)));
+    const int centreX=area.left+cellWidth*band+cellWidth/2;
+    const int centreY=(area.top+area.bottom)/2;
+    return {centreX-radius,centreY-radius,centreX+radius,centreY+radius};
+}
+void paintColorBands(HWND h,HDC dc,RECT r){
+    fillSurface(dc,r,h);
+    AlphaGraphics drawing(dc);
+    auto& graphics=drawing.get();
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    for(int band=0;band<engine::kColorMixerBands;++band){
+        const auto dot=bandDotRect(h,r,band);
+        const float radius=float(dot.right-dot.left)*0.5f;
+        Gdiplus::SolidBrush brush(color(kBandColours[band]));
+        graphics.FillEllipse(&brush,float(dot.left),float(dot.top),radius*2,radius*2);
+        if(band==colourMixerBand){
+            Gdiplus::Pen ring(color(RGB(245,247,249)),float(dip(h,2)));
+            graphics.DrawEllipse(&ring,float(dot.left)-radius*0.35f,float(dot.top)-radius*0.35f,radius*2.7f,radius*2.7f);
+        }
+    }
+}
+void registerColorBandsClass(){
+    static bool registered=false;
+    if(registered)return;
+    registered=true;
+    WNDCLASSW classDescription{};
+    classDescription.style=CS_DBLCLKS;
+    classDescription.lpfnWndProc=[](HWND h,UINT msg,WPARAM wp,LPARAM lp)->LRESULT{
+        if(msg==WM_ERASEBKGND)return 1;
+        if(msg==WM_PAINT||msg==WM_PRINTCLIENT){PaintBuffer paint(h,reinterpret_cast<HDC>(wp));paintColorBands(h,paint.dc,paint.rect);return 0;}
+        if(msg==WM_LBUTTONDOWN){
+            RECT r{};GetClientRect(h,&r);
+            const int cellWidth=std::max(1,int(r.right-r.left)/engine::kColorMixerBands);
+            const int band=std::clamp(GET_X_LPARAM(lp)/cellWidth,0,engine::kColorMixerBands-1);
+            if(band!=colourMixerBand){
+                colourMixerBand=band;
+                veyra::log::info("color-ui",std::format("mixer band={}",band));
+            }
+            InvalidateRect(h,nullptr,FALSE);
+            arrange();
+            return 0;
+        }
+        return DefWindowProcW(h,msg,wp,lp);
+    };
+    classDescription.hInstance=GetModuleHandleW(nullptr);
+    classDescription.lpszClassName=kColorBandsClass;
+    classDescription.hCursor=LoadCursorW(nullptr,IDC_HAND);
+    RegisterClassW(&classDescription);
+}
+// ---------------------------------------------------------------------------
+// Tone curve editor (plan section 3.3): a real grid canvas with draggable
+// control points for the RGB / R / G / B curves, drawn with the same
+// piecewise-linear response the bake uses so the preview cannot lie.
+// ---------------------------------------------------------------------------
+engine::ColorCurve& curveForChannel(engine::ColorSettings& colour,int channel){
+    return colour.curves[std::size_t(std::clamp(channel,0,3))];
+}
+RECT curveCanvasRect(HWND h,const RECT& area){
+    // Inset by the control-point radius so the (0,0) and (1,1) anchors are not
+    // clipped by the canvas border.
+    const int inset=dip(h,7);
+    const int size=std::max(dip(h,120),std::min(int(area.right-area.left)-inset*2,int(area.bottom-area.top)-inset*2));
+    return {area.left+inset,area.top+inset,area.left+inset+size,area.top+inset+size};
+}
+POINT curvePointToScreen(HWND h,const RECT& canvas,const engine::ColorCurvePoint& point){
+    return {canvas.left+int(point.x*float(canvas.right-canvas.left)),
+            canvas.bottom-int(point.y*float(canvas.bottom-canvas.top))};
+}
+void paintToneCurve(HWND h,HDC dc,RECT r){
+    fillSurface(dc,r,h);
+    const auto colour=colourTarget();
+    const auto canvas=curveCanvasRect(h,r);
+    AlphaGraphics drawing(dc);
+    auto& graphics=drawing.get();
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    // Backdrop + quarter grid.
+    Gdiplus::SolidBrush backdrop(color(RGB(18,19,20)));
+    graphics.FillRectangle(&backdrop,Gdiplus::RectF(float(canvas.left),float(canvas.top),float(canvas.right-canvas.left),float(canvas.bottom-canvas.top)));
+    Gdiplus::Pen grid(color(RGB(52,54,57)),1.0f);
+    for(int division=1;division<4;++division){
+        const int x=canvas.left+(canvas.right-canvas.left)*division/4;
+        const int y=canvas.top+(canvas.bottom-canvas.top)*division/4;
+        graphics.DrawLine(&grid,Gdiplus::PointF(float(x),float(canvas.top)),Gdiplus::PointF(float(x),float(canvas.bottom)));
+        graphics.DrawLine(&grid,Gdiplus::PointF(float(canvas.left),float(y)),Gdiplus::PointF(float(canvas.right),float(y)));
+    }
+    Gdiplus::Pen border(color(line),1.0f);
+    graphics.DrawRectangle(&border,Gdiplus::RectF(float(canvas.left),float(canvas.top),float(canvas.right-canvas.left-1),float(canvas.bottom-canvas.top-1)));
+    Gdiplus::Pen identity(color(RGB(70,72,76)),1.0f);
+    graphics.DrawLine(&identity,Gdiplus::PointF(float(canvas.left),float(canvas.bottom)),Gdiplus::PointF(float(canvas.right),float(canvas.top)));
+    const COLORREF curveColours[4]={RGB(236,238,240),RGB(232,88,88),RGB(88,214,120),RGB(96,150,244)};
+    for(int channel=0;channel<4;++channel){
+        const auto& curve=colour.curves[std::size_t(channel)];
+        const bool active=channel==colourCurveChannel;
+        Gdiplus::Pen pen(color(curveColours[channel],active?255:70),active?2.0f:1.0f);
+        // Seed the polyline with the curve's real value at x=0. Seeding it with
+        // the canvas corner drew a fake near-vertical segment at the shadow end
+        // (the "why is there an angle down here" report) that the highlight end
+        // never showed, because the loop happens to end exactly at x=1.
+        int previousX=canvas.left;
+        int previousY=canvas.bottom-int(std::clamp(veyra::pipeline::ColorGradeTables::curveValue(curve,0.0f),0.0f,1.0f)*float(canvas.bottom-canvas.top));
+        for(int step=1;step<=64;++step){
+            const float t=float(step)/64.0f;
+            const float value=veyra::pipeline::ColorGradeTables::curveValue(curve,t);
+            const int x=canvas.left+int(t*float(canvas.right-canvas.left));
+            const int y=canvas.bottom-int(std::clamp(value,0.0f,1.0f)*float(canvas.bottom-canvas.top));
+            graphics.DrawLine(&pen,Gdiplus::PointF(float(previousX),float(previousY)),Gdiplus::PointF(float(x),float(y)));
+            previousX=x;previousY=y;
+        }
+    }
+    // Control points of the active channel.
+    const auto& active=colour.curves[std::size_t(colourCurveChannel)];
+    for(int index=0;index<active.count;++index){
+        const auto screen=curvePointToScreen(h,canvas,active.points[std::size_t(index)]);
+        const int radius=dip(h,5);
+        Gdiplus::SolidBrush brush(color(index==colourCurveDragPoint?accent:RGB(240,242,245)));
+        graphics.FillEllipse(&brush,float(screen.x-radius),float(screen.y-radius),float(radius*2),float(radius*2));
+        Gdiplus::Pen outline(color(RGB(14,15,16)),1.0f);
+        graphics.DrawEllipse(&outline,float(screen.x-radius),float(screen.y-radius),float(radius*2),float(radius*2));
+    }
+    // Readout for the dragged (or last) point, in 0..255 units.
+    const int reference=colourCurveDragPoint>=0?colourCurveDragPoint:std::min(1,active.count-1);
+    if(reference>=0&&reference<active.count){
+        const auto& point=active.points[std::size_t(reference)];
+        wchar_t text[96]{};swprintf_s(text,L"输入 %d   输出 %d",int(std::lround(point.x*255.0f)),int(std::lround(point.y*255.0f)));
+        const auto previous=SelectObject(dc,font);
+        SetBkMode(dc,TRANSPARENT);SetTextColor(dc,secondary);
+        RECT textRect{canvas.left,canvas.bottom+dip(h,3),canvas.right,canvas.bottom+dip(h,19)};
+        DrawTextW(dc,text,-1,&textRect,DT_CENTER|DT_SINGLELINE);
+        SelectObject(dc,previous);
+    }
+}
+void registerToneCurveClass(){
+    static bool registered=false;
+    if(registered)return;
+    registered=true;
+    WNDCLASSW classDescription{};
+    classDescription.style=CS_DBLCLKS;
+    classDescription.hInstance=GetModuleHandleW(nullptr);
+    classDescription.lpszClassName=kColorCurveClass;
+    classDescription.hCursor=LoadCursorW(nullptr,IDC_CROSS);
+    classDescription.lpfnWndProc=[](HWND h,UINT msg,WPARAM wp,LPARAM lp)->LRESULT{
+        if(msg==WM_ERASEBKGND)return 1;
+        if(msg==WM_PAINT||msg==WM_PRINTCLIENT){PaintBuffer paint(h,reinterpret_cast<HDC>(wp));paintToneCurve(h,paint.dc,paint.rect);return 0;}
+        const auto hitTest=[&](POINT point,int& index){
+            RECT r{};GetClientRect(h,&r);
+            const auto canvas=curveCanvasRect(h,r);
+            const auto colour=colourTarget();
+            const auto& curve=colour.curves[std::size_t(colourCurveChannel)];
+            index=-1;int best=dip(h,9);
+            for(int i=0;i<curve.count;++i){
+                const auto screen=curvePointToScreen(h,canvas,curve.points[std::size_t(i)]);
+                const int distance=std::max(std::abs(screen.x-point.x),std::abs(screen.y-point.y));
+                if(distance<=best){best=distance;index=i;}
+            }
+            return canvas;
+        };
+        if(msg==WM_LBUTTONDOWN||(msg==WM_MOUSEMOVE&&GetCapture()==h)||msg==WM_LBUTTONUP){
+            RECT r{};GetClientRect(h,&r);
+            const auto canvas=curveCanvasRect(h,r);
+            POINT cursor{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
+            if(msg==WM_LBUTTONDOWN){
+                int index=-1;hitTest(cursor,index);
+                if(index<0){
+                    // Clicking the canvas inserts a point on the spot (Lightroom).
+                    auto colour=colourTarget();
+                    auto& curve=curveForChannel(colour,colourCurveChannel);
+                    if(curve.count<engine::kColorCurvePoints){
+                        engine::ColorCurvePoint added{};
+                        added.x=std::clamp(float(cursor.x-canvas.left)/float(std::max<int>(1,canvas.right-canvas.left)),0.0f,1.0f);
+                        added.y=std::clamp(float(canvas.bottom-cursor.y)/float(std::max<int>(1,canvas.bottom-canvas.top)),0.0f,1.0f);
+                int slot=curve.count;
+                        for(int i=0;i<curve.count;++i)if(curve.points[std::size_t(i)].x>added.x){slot=i;break;}
+                        for(int i=curve.count;i>slot;--i)curve.points[std::size_t(i)]=curve.points[std::size_t(i-1)];
+                        curve.points[std::size_t(slot)]=added;++curve.count;
+                        index=slot;
+                        applyColour(colour,true,false);
+                    }
+                }
+                colourCurveDragPoint=index;
+                SetFocus(h);SetCapture(h);
+                veyra::log::info("color-ui",std::format("curve channel={} point={} count={}",colourCurveChannel,index,colourTarget().curves[std::size_t(colourCurveChannel)].count));
+            }else if(msg==WM_MOUSEMOVE&&colourCurveDragPoint>=0){
+                auto colour=colourTarget();
+                auto& curve=curveForChannel(colour,colourCurveChannel);
+                const int index=std::clamp(colourCurveDragPoint,0,curve.count-1);
+                colourCurveDragPoint=index;
+                const float y=std::clamp(float(canvas.bottom-cursor.y)/float(std::max<int>(1,canvas.bottom-canvas.top)),0.0f,1.0f);
+                // Endpoints move freely too (Lightroom's black/white points can
+                // be pulled inward), they are only bounded by their neighbour so
+                // the control points stay sorted left to right.
+                const float rawX=float(cursor.x-canvas.left)/float(std::max<int>(1,canvas.right-canvas.left));
+                const float lower=index>0?curve.points[std::size_t(index-1)].x+0.01f:0.0f;
+                const float upper=index<curve.count-1?curve.points[std::size_t(index+1)].x-0.01f:1.0f;
+                curve.points[std::size_t(index)]={std::clamp(rawX,lower,upper),y};
+                applyColour(colour,true,false);
+            }else if(msg==WM_LBUTTONUP){
+                ReleaseCapture();
+                if(colourCurveDragPoint>=0)colourHistoryPush(colourTarget());
+                colourCurveDragPoint=-1;
+            }
+            InvalidateRect(h,nullptr,FALSE);
+            return 0;
+        }
+        if(msg==WM_LBUTTONDBLCLK){
+            POINT cursor{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
+            int index=-1;hitTest(cursor,index);
+            // Double-click on a point deletes it; the two anchors stay.
+            if(index>0){
+                auto colour=colourTarget();
+                auto& curve=curveForChannel(colour,colourCurveChannel);
+                if(curve.count>2&&index<curve.count-1){
+                    for(int i=index;i<curve.count-1;++i)curve.points[std::size_t(i)]=curve.points[std::size_t(i+1)];
+                    --curve.count;
+                    if(applyColour(colour,true))veyra::log::info("color-ui",std::format("curve point deleted channel={} count={}",colourCurveChannel,curve.count));
+                }
+                colourHistoryPush(colourTarget());
+                InvalidateRect(h,nullptr,FALSE);
+            }
+            return 0;
+        }
+        if(msg==WM_SETCURSOR){SetCursor(LoadCursorW(nullptr,IDC_CROSS));return TRUE;}
+        return DefWindowProcW(h,msg,wp,lp);
+    };
+    RegisterClassW(&classDescription);
+}
+// Section bypass eye: open = active, struck through + dimmed = bypassed.
+void paintSectionEye(HWND h,HDC dc,RECT r){
+    const int section=GetDlgCtrlID(h)-colorSectionEyeId(0);
+    const bool bypassed=(colourTarget().groupBypassMask&(1u<<unsigned(std::max(0,section))))!=0;
+    fillSurface(dc,r,h);
+    AlphaGraphics drawing(dc);
+    auto& graphics=drawing.get();
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    const float centreX=float(r.right-r.left)*0.5f,centreY=float(r.bottom-r.top)*0.5f;
+    const float halfWidth=float(std::min(r.right-r.left,r.bottom-r.top))*0.38f,halfHeight=halfWidth*0.58f;
+    const COLORREF tint=bypassed?RGB(96,99,104):RGB(214,218,224);
+    Gdiplus::Pen outline(color(tint),1.6f);
+    Gdiplus::GraphicsPath path;
+    path.AddBezier(centreX-halfWidth,centreY,centreX-halfWidth*0.35f,centreY-halfHeight,
+                   centreX+halfWidth*0.35f,centreY-halfHeight,centreX+halfWidth,centreY);
+    path.AddBezier(centreX+halfWidth,centreY,centreX+halfWidth*0.35f,centreY+halfHeight,
+                   centreX-halfWidth*0.35f,centreY+halfHeight,centreX-halfWidth,centreY);
+    path.CloseFigure();
+    graphics.DrawPath(&outline,&path);
+    Gdiplus::SolidBrush pupil(color(tint));
+    const float pupilRadius=halfHeight*0.55f;
+    graphics.FillEllipse(&pupil,centreX-pupilRadius,centreY-pupilRadius,pupilRadius*2,pupilRadius*2);
+    if(bypassed){
+        Gdiplus::Pen strike(color(RGB(230,122,49)),1.8f);
+        graphics.DrawLine(&strike,centreX-halfWidth,centreY+halfHeight*1.15f,centreX+halfWidth,centreY-halfHeight*1.15f);
+    }
+}
+void registerSectionEyeClass(){
+    static bool registered=false;
+    if(registered)return;
+    registered=true;
+    WNDCLASSW classDescription{};
+    classDescription.hInstance=GetModuleHandleW(nullptr);
+    classDescription.lpszClassName=kColorEyeClass;
+    classDescription.hCursor=LoadCursorW(nullptr,IDC_HAND);
+    classDescription.lpfnWndProc=[](HWND h,UINT msg,WPARAM wp,LPARAM lp)->LRESULT{
+        if(msg==WM_ERASEBKGND)return 1;
+        if(msg==WM_PAINT||msg==WM_PRINTCLIENT){PaintBuffer paint(h,reinterpret_cast<HDC>(wp));paintSectionEye(h,paint.dc,paint.rect);return 0;}
+        if(msg==WM_LBUTTONDOWN){
+            const int section=GetDlgCtrlID(h)-colorSectionEyeId(0);
+            auto colour=colourTarget();
+            colour.groupBypassMask^=1u<<unsigned(std::max(0,section));
+            if(applyColour(colour,true)){
+                veyra::log::info("color-ui",std::format("section bypass section={} mask={}",section,colour.groupBypassMask));
+                message(colour.groupBypassMask&(1u<<unsigned(section))
+                    ?std::format(L"“{}”这一组已临时停用（数值保留，取消勾选即恢复）。",colorSectionName(section))
+                    :std::format(L"“{}”这一组已启用。",colorSectionName(section)));
+            }
+            syncColorControls();
+            return 0;
+        }
+        return DefWindowProcW(h,msg,wp,lp);
+    };
     RegisterClassW(&classDescription);
 }
 bool colourFieldEdited(int index,float value){
@@ -768,17 +1126,37 @@ LRESULT CALLBACK proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
         }
         syncColorControls();arrange();return 0;
     }
-    if(msg==WM_COMMAND&&LOWORD(wp)==820&&HIWORD(wp)==BN_CLICKED){
+    if(msg==WM_COMMAND&&LOWORD(wp)==colorMixerModeId&&HIWORD(wp)==BN_CLICKED){
+        colourBlackWhite=SendMessageW(item(colorMixerModeId),BM_GETCHECK,0,0)==BST_CHECKED;
         auto colour=colourTarget();
-        colour.blackWhite=SendMessageW(item(820),BM_GETCHECK,0,0)==BST_CHECKED;
-        if(!applyColour(colour,true)){
-            veyra::log::warn("color-ui","black and white mixer switch rejected");
-            syncColorControls();
-            return 0;
+        if(colour.blackWhite!=colourBlackWhite){
+            colour.blackWhite=colourBlackWhite;
+            if(!applyColour(colour,true)){
+                veyra::log::warn("color-ui","mixer correction switch rejected");
+                syncColorControls();
+                return 0;
+            }
         }
-        veyra::log::info("color-ui",std::format("black and white mixer={}",colour.blackWhite?1:0));
-        message(colour.blackWhite?L"黑白混色器已打开：下面八个“黑白”滑块控制各色系的灰阶明暗。":L"黑白混色器已关闭，回到 HSL 混色。");
+        veyra::log::info("color-ui",std::format("mixer blackWhite={}",colourBlackWhite?1:0));
+        message(colourBlackWhite?L"黑白混色器已打开：画面转单色，下面出现“黑白”滑块。":L"已回到 HSL 混色（色相/饱和度/明亮度）。");
         syncColorControls();
+        arrange();
+        return 0;
+    }
+    if(msg==WM_COMMAND&&LOWORD(wp)>=colorCurveChannelId&&LOWORD(wp)<=colorCurveChannelId+3&&HIWORD(wp)==BN_CLICKED){
+        colourCurveChannel=LOWORD(wp)-colorCurveChannelId;
+        veyra::log::info("color-ui",std::format("curve channel selected={}",colourCurveChannel));
+        if(auto canvas=item(colorCurveCanvasId))InvalidateRect(canvas,nullptr,FALSE);
+        return 0;
+    }
+    if(msg==WM_COMMAND&&LOWORD(wp)==colorCurveResetId&&HIWORD(wp)==BN_CLICKED){
+        auto colour=colourTarget();
+        curveForChannel(colour,colourCurveChannel).reset();
+        if(applyColour(colour,true)){
+            message(L"该通道曲线已拉平。");
+            veyra::log::info("color-ui",std::format("curve flattened channel={}",colourCurveChannel));
+        }
+        if(auto canvas=item(colorCurveCanvasId))InvalidateRect(canvas,nullptr,FALSE);
         return 0;
     }
     if(msg==WM_COMMAND&&LOWORD(wp)>=810&&LOWORD(wp)<810+kColorSections&&HIWORD(wp)==BN_CLICKED){
@@ -935,13 +1313,6 @@ case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.
             {1,L"色调",&engine::ColorSettings::tint,-100,100},
             {1,L"自然饱和度",&engine::ColorSettings::vibrance,-100,100},
             {1,L"饱和度",&engine::ColorSettings::saturation,-100,100},
-            {2,L"高光（参数曲线）",&engine::ColorSettings::paramHighlights,-100,100},
-            {2,L"亮色调（参数曲线）",&engine::ColorSettings::paramLights,-100,100},
-            {2,L"暗色调（参数曲线）",&engine::ColorSettings::paramDarks,-100,100},
-            {2,L"阴影（参数曲线）",&engine::ColorSettings::paramShadows,-100,100},
-            {2,L"高光范围分割",&engine::ColorSettings::splitHighlights,-100,100},
-            {2,L"中间调范围分割",&engine::ColorSettings::splitMidtones,-100,100},
-            {2,L"阴影范围分割",&engine::ColorSettings::splitShadows,-100,100},
         };
         for(const auto& definition:definitions)
             colorParams.push_back({definition.section,definition.label,definition.min,definition.max,ColorTarget::Scalar,definition.field,0,0.0f,
@@ -1000,11 +1371,28 @@ case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.
         SetPropW(item(822),L"veyra.tip",HANDLE(L"复制当前色彩设置，用来粘贴到别的预设或下一段素材。"));
         SetPropW(item(823),L"veyra.tip",HANDLE(L"粘贴刚才复制的色彩设置。"));
         SetPropW(item(821),L"veyra.tip",HANDLE(L"按住不放：临时显示没有调色的原图；松开恢复。用中性调色实现，不重建管线。"));
-        // group 2 = the colour page; 3 was the section index, not the page, and a
-        // control on another page is hidden (and therefore ignores BM_CLICK).
-        check(820,BST_UNCHECKED);add(L"BUTTON",L"黑白混色器（把画面转成黑白）",820,BS_AUTOCHECKBOX|WS_TABSTOP,2,12,0,-1,28);
-        SetPropW(item(820),L"veyra.tip",HANDLE(L"打开后画面变成黑白，下面八个“黑白”滑块控制各色系对应的灰阶明暗（和 Lightroom 的黑白混色器同一套语义）。"));
+        // Mixer header: the eight colour ranges plus the black & white switch.
+        // The selected range's hue/saturation/luminance rows are always shown;
+        // its 黑白 row is added while the switch is on.
+        registerColorBandsClass();
+        add(L"BUTTON",L"",colorMixerModeId,BS_AUTOCHECKBOX|WS_TABSTOP,2,12,0,dip(window,26),26);check(colorMixerModeId,BST_UNCHECKED);
+        add(kColorBandsClass,L"",colorBandsId,WS_TABSTOP,2,12,0,-1,32);
+        SetPropW(item(colorMixerModeId),L"veyra.tip",HANDLE(L"黑白混色器：打开后画面转成单色，下面的“黑白”滑块按色系控制灰阶明暗（色相/饱和度行这时不起作用）。"));
+        SetPropW(item(colorBandsId),L"veyra.tip",HANDLE(L"点色点切换要调整的色系；下方滑块只作用于选中的色系。"));
+        // Tone curve: channel tabs (RGB / R / G / B), a flatten button and the
+        // grid canvas itself.
+        registerToneCurveClass();
+        for(int channel=0;channel<4;++channel)
+            add(L"BUTTON",channel==0?L"RGB":channel==1?L"红":channel==2?L"绿":L"蓝",colorCurveChannelId+channel,BS_PUSHBUTTON|WS_TABSTOP,2,12,0,0,30);
+        button(L"拉平",colorCurveResetId,2,12,0,40);
+        add(kColorCurveClass,L"",colorCurveCanvasId,WS_TABSTOP,2,12,0,-1,260);
+        SetPropW(item(colorCurveCanvasId),L"veyra.tip",HANDLE(L"左键在网格上点一下加点、拖动移动；双击控制点删除（两个端点保留）；“拉平”恢复恒等曲线。"));
         for(int section=0;section<kColorSections;++section)add(L"BUTTON",L"",810+section,BS_PUSHBUTTON|WS_TABSTOP,2,12,12,-1,32);
+        registerSectionEyeClass();
+        for(int section=0;section<kColorSections;++section){
+            add(kColorEyeClass,L"",colorSectionEyeId(section),0,2,12,12,26,26);
+            SetPropW(item(colorSectionEyeId(section)),L"veyra.tip",HANDLE(L"点一下临时停用这一组（数值保留），再点恢复：用来对比某一组到底起了什么作用。"));
+        }
         // Preset toolbar.
         combo(803,2,0,{});add(L"EDIT",L"",804,ES_AUTOHSCROLL|WS_TABSTOP,2,12,0,-1,26);send(804,EM_SETLIMITTEXT,48,0);
         button(L"保存预设",805,2,12,0,96);button(L"应用",806,2,12,0,80);button(L"删除",807,2,12,0,80);
@@ -1170,6 +1558,25 @@ bool settingsColorWheelTestBarPoint(int zone,float luminance,POINT& out){
     return true;
 }
 int colourWheelControlId(int zone){return colorWheelId(zone);}
+int colourBandsControlId(){return colorBandsId;}
+int colourCurveCanvasControlId(){return colorCurveCanvasId;}
+int colourSectionEyeControlId(int section){return colorSectionEyeId(std::clamp(section,0,kColorSections-1));}
+void settingsColorSectionForTest(int section,bool expanded){
+    if(section<0||section>=kColorSections)return;
+    if(expanded)colorFoldMask&=~(1u<<section);
+    else colorFoldMask|=1u<<section;
+    saveColourFoldState();
+    arrange();
+}
+bool settingsCurveTestPoint(float x,float y,POINT& out){
+    const auto canvasControl=item(colorCurveCanvasId);
+    if(!canvasControl)return false;
+    RECT r{};GetClientRect(canvasControl,&r);
+    const auto canvas=curveCanvasRect(canvasControl,r);
+    out.x=LONG(canvas.left+std::clamp(x,0.0f,1.0f)*float(canvas.right-canvas.left));
+    out.y=LONG(canvas.bottom-std::clamp(y,0.0f,1.0f)*float(canvas.bottom-canvas.top));
+    return true;
+}
 void settingsColorScrollToTest(int id){
     if(!window||!body)return;
     for(auto& entry:items)if(GetDlgCtrlID(entry.h)==id&&entry.page==2){
@@ -1178,8 +1585,24 @@ void settingsColorScrollToTest(int id){
         if(entry.y<scroll)scroll=entry.y;
         if(entry.y+entry.height>scroll+height)scroll=entry.y+entry.height-height;
         arrange();
+        veyra::log::info("color-ui",std::format("scroll-to id={} y={} height={} viewport={} scroll={} content={}",id,entry.y,entry.height,height,scroll,colorPageContentHeight));
         return;
     }
+}
+void settingsColorMixerModeForTest(int mode){
+    colourBlackWhite=mode==3;
+    check(colorMixerModeId,colourBlackWhite?BST_CHECKED:BST_UNCHECKED);
+    auto colour=colourTarget();
+    bool applied=true;
+    if(colour.blackWhite!=colourBlackWhite){colour.blackWhite=colourBlackWhite;applied=applyColour(colour,true);}
+    veyra::log::info("color-ui",std::format("mixer blackWhiteAsked={} applied={}",colourBlackWhite?1:0,applied?1:0));
+    syncColorControls();
+    arrange();
+}
+void settingsColorBandForTest(int band){
+    colourMixerBand=std::clamp(band,0,engine::kColorMixerBands-1);
+    if(auto bands=item(colorBandsId))InvalidateRect(bands,nullptr,FALSE);
+    arrange();
 }
 int colourParamEditId(const wchar_t* label){
     if(!label)return -1;
