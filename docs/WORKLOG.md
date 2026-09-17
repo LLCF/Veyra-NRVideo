@@ -1,5 +1,57 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-17 色彩页 P1：T0 删预设入口 + T1 NR 剔除区羽化（含两个设置记忆缺陷修复）
+
+目标（用户指令）：按 `docs/COLOR_TAB_LR_FEATURE_PLAN_2026-09-17.md` v3 开工，先落 T0/T1。
+存档点 `checkpoint/color-p1-archive-20260917`（65e69b3），施工分支 `codex/color-tab-p1-20260917`，P1 全程不合并 main。
+
+**T0 预设入口删除（代码级，无残留入口）**
+
+- `SettingsWindow.cpp`：整页删除（静态 1105/1106、下拉 300、命名 301、按钮 310–315、`refreshPresets()`、WM_COMMAND 分支、`store.put/rename/erase/setDefault` 调用），第 2 页留作色彩页；
+- `SettingsWindow.h`：删除 `presetNames()` / `presetAt()`；`AppShell.cpp`：删除日常模式预设下拉
+  （`DailyPreset` 控件、`refreshDailyPresets()`、WM_APP+42 分支、帮助文本、布局槽位）；
+  枚举保留 `RetiredPresetSlot` 占位以**不改动后续控件 id**（不是入口，也不创建控件）；
+- 页签 `预设` → `色彩`，主窗口按钮 `参数与预设` → `参数与色彩`；`SettingHelp.h` 删除 300/301/310–314 帮助；
+- 按批复保留行为、无 UI 入口：`last-applied.v1`（启动自动套用上次增强参数）与 `user-presets.v1`（只读迁移）。
+
+**T1 NR 剔除区 + 羽化**
+
+- 改名：`NR保护区域` → `NR 剔除区`（复选框 206、计数文本、按钮 213/214、帮助 19/206/213/214、设置页静态 1109）；
+- 新增羽化控件：滑块 622（0–64 工作分辨率像素）+ 数值框 222 + 动态标签 1123（显示 px 与 ≈画面高度百分比，取自 `snapshot().metrics.resolution.base.height`）；
+- `EnhancementSettings::validate()` 羽化上限 32 → 64；`TiledImageProcessor` 加
+  `static_assert(halo>=64)`，保证瓦片外扩（128 px）覆盖最大羽化、导出分块不穿帮；
+- 布局由实测决定：新增 `VEYRA_DUMP_SETTINGS_LAYOUT=1` 一次性打印全部控件坐标（DIP）。
+  实测剔除区块 y=362/404/448，羽化行 y=530/530/562，与后续模型块 618+ 无重叠；
+- `--smoke-settings` 增加一步：把羽化框设为 48 并断言进入设置草稿（日志
+  `[settings-test] exclusion-feather draft=48 desired=2 applied=2` —— 首次启动增强关闭，草稿路径正确）。
+
+**验证时另修的三个缺陷（都不是本轮新引入，如实记录）**
+
+1. **v3 UI 偏好永远读不回来**：`UiPreferenceStore::load()` 的 v3 分支漏读 `inspectorWidth`（写 6 个字段只读 5 个），
+   任何 `VEYRA_UI 3` 文件都被判 corrupt → 窗口尺寸/音量/字幕样式/页签索引每次启动静默重置。
+2. **inspector 范围写死 0..3**：音频页是 `selectInspector(4)`，用户最后停在音频页同样导致整份偏好被丢弃。范围改为 0..4。
+3. **`ImageDimensionTests::protectionPixels()` 自身失效**：`applySettings()` 会按设置快照开关 NR，而该用例构造的
+   `EnhancementSettings` 默认 `nr=false` → 整个保护段 `changed=0/nr=0`，永远不可能通过（旧构建同样失败，非本轮引入）。
+   修正为 `settings.nr=true`，并把羽化用例扩到 2/32/64。
+
+**命令与结果（本机 RTX 5070，构建目录 `out/build/audio-continuity-repair-20260915`）**
+
+- 构建 `out\build\veyra-build-x64-release.cmd` → exit 0；
+- `veyra_image_dimension_tests <新目录>` → exit 0；
+  `PROTECTION_FEATHER pixels=2 mixedChannels=1581 / 32 → 15725 / 64 → 20248`，`envelopeError8=0`；
+  `PROTECTION_PIXELS ... changed=191323 protectedError8=0 outsideError8=0 nr=8 pass=1`；
+  `PROTECTION_PARTIAL_TILE feather=32 ... pass=1`；`PROTECTION_MOVING_RESULT ... pass=1`
+  （注：该用例输出目录必须为空，重复跑同一目录会在 1x1 PNG 往返处失败——既有测试卫生问题，未改）；
+- `veyra_ui_contract_tests <临时目录>` → exit 0（新增 v3 往返与"音频页 inspector=4"回归断言）；
+- `veyra_repair_preset_tests <临时文件>` → exit 0（66 组旧格式迁移 + v17 往返）；
+- `veyra_popup_selector_tests` → exit 0；`veyra_repair_contract_tests` → 191 项 0 失败；
+- `scripts/gates/delivery.ps1 -Root . -BuildDirectory out/build/audio-continuity-repair-20260915` →
+  `DELIVERY SHORT GATE PASS`（`logs/delivery/566557c4ad5f401ab06960af1c9d2f5e/result.json`）；
+- 布局证据：`VEYRA_DUMP_SETTINGS_LAYOUT=1` + `veyra.exe --smoke-empty --smoke-seconds 3`（92 条 `[settings-layout]`）。
+
+**未完成 / 下一步**：T2–T6（`ColorSettings` 模型与全浮点 Pass A、色彩页 UI 框架、各面板、LUT 与命名预设、HDR 标准处理与验收）。
+真机人工验收（1080/4K 目视对比、羽化手感）由用户执行；本轮未做发布。
+
 ## 2026-09-17 RTX 30（Ampere）帧生成攻坚：架构闸门定位 + 伪装实现（默认关闭）
 
 目标（用户指令）：把 30 系弄到能用，同时不改变 40/50 系行为；产出给 30 系用户测试的包。

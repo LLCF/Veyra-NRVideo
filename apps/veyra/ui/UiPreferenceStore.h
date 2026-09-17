@@ -21,11 +21,17 @@ public:
     explicit UiPreferenceStore(std::filesystem::path folder):folder_(std::move(folder)){}
     UiPreferences load(){UiPreferences result;auto path=folder_/"ui-preferences.v1";if(!std::filesystem::exists(path))return result;
         if(std::filesystem::file_size(path)>2048){corrupt_=true;return result;}std::ifstream file(path);std::string magic;int version=0,mute,sub,pos;UiPreferences read;
-        if(!(file>>magic>>version>>read.volume>>mute>>sub>>read.width>>read.height>>read.x>>read.y>>pos>>read.inspector>>read.subtitleSize)||magic!="VEYRA_UI"||(version<1||version>3)||!std::isfinite(read.volume)||read.volume<0||read.volume>1||mute<0||mute>1||sub<0||sub>1||pos<0||pos>1||read.width<720||read.width>10000||read.height<540||read.height>10000||abs(int64_t(read.x))>100000||abs(int64_t(read.y))>100000||read.inspector<0||read.inspector>3||read.subtitleSize<16||read.subtitleSize>56){corrupt_=true;return result;}
+        // inspector index 4 is the audio page (selectInspector(4)), so the valid
+        // range is 0..4. A narrower bound here silently discarded every saved
+        // window size, volume and subtitle style for users who last sat on it.
+        if(!(file>>magic>>version>>read.volume>>mute>>sub>>read.width>>read.height>>read.x>>read.y>>pos>>read.inspector>>read.subtitleSize)||magic!="VEYRA_UI"||(version<1||version>3)||!std::isfinite(read.volume)||read.volume<0||read.volume>1||mute<0||mute>1||sub<0||sub>1||pos<0||pos>1||read.width<720||read.width>10000||read.height<540||read.height>10000||abs(int64_t(read.x))>100000||abs(int64_t(read.y))>100000||read.inspector<0||read.inspector>4||read.subtitleSize<16||read.subtitleSize>56){corrupt_=true;return result;}
         if(version==2&&(!(file>>read.inspectorWidth)||read.inspectorWidth<296||read.inspectorWidth>420)){corrupt_=true;return result;}
         if(version>=3){
             int outline=0,background=0,second=0;
-            if(!(file>>outline>>background>>second>>read.subtitleMargin>>read.subtitleFont)||outline<0||outline>1||background<0||background>1||second<0||second>1||read.subtitleMargin<0||read.subtitleMargin>240||read.subtitleFont<0||read.subtitleFont>5){corrupt_=true;return result;}
+            // Field order must match save(): inspectorWidth precedes the three
+            // switches. It used to be read only for version 2, so every version
+            // 3 file was rejected as corrupt and all UI preferences were lost.
+            if(!(file>>read.inspectorWidth>>outline>>background>>second>>read.subtitleMargin>>read.subtitleFont)||read.inspectorWidth<296||read.inspectorWidth>420||outline<0||outline>1||background<0||background>1||second<0||second>1||read.subtitleMargin<0||read.subtitleMargin>240||read.subtitleFont<0||read.subtitleFont>5){corrupt_=true;return result;}
             read.subtitleOutline=outline!=0;read.subtitleBackground=background!=0;read.subtitleSecondLanguage=second!=0;
         }file>>std::ws;if(!file.eof()){corrupt_=true;return result;}read.muted=mute;read.subtitles=sub;read.positioned=pos;return read;
     }

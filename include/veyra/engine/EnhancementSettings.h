@@ -88,7 +88,9 @@ struct ProtectionSettings {
     std::array<ProtectionRect,4> regions{};
     bool operator==(const ProtectionSettings&)const=default;
     std::string validate()const{
-        if(!std::isfinite(featherPixels)||featherPixels<0||featherPixels>32)return "invalid protection feather";
+        // Upper bound is 64 px at the working extent; TiledImageProcessor keeps
+        // its tile halo above this value so export tiles cannot clip the ramp.
+        if(!std::isfinite(featherPixels)||featherPixels<0||featherPixels>64)return "invalid protection feather";
         for(auto r:regions){for(float v:{r.left,r.top,r.right,r.bottom})if(!std::isfinite(v)||v<0||v>1)return "invalid protection rectangle";
             if(r.left>r.right||r.top>r.bottom)return "inverted protection rectangle";}
         return {};
