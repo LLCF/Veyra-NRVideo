@@ -887,6 +887,17 @@ void populate(engine::EnhancementSettings s){
     const int multiplierCount=multiplierChoiceCount(s.frameGenerationBackend);
     if(send(202,CB_GETCOUNT)!=multiplierCount){send(202,CB_RESETCONTENT);const wchar_t* choices[]={L"关闭补帧",L"2X · 一张中间帧",L"3X · 两张中间帧",L"4X · 三张中间帧",L"6X · 五张中间帧"};for(int i=0;i<multiplierCount;++i)send(202,CB_ADDSTRING,0,LPARAM(choices[i]));}
     send(207,CB_SETCURSEL,s.videoSrQuality,0);send(202,CB_SETCURSEL,multiplierChoiceIndex(s.multiplier),0);
+    // 1.4.0: the AMD FSR frame-generation entry is gone from the panel. An old
+    // last-applied preset (or a command line) that still asks for it must not
+    // strand the session on a backend the UI can no longer change - fall back to
+    // DLSS, tell the user, and write it to the log. The engine-side backend is
+    // untouched (headless probes and --fg-fsr still exercise it).
+    if(s.frameGenerationBackend==engine::FrameGenerationBackend::Fsr){
+        s.frameGenerationBackend=engine::FrameGenerationBackend::Dlss;
+        if(controller)controller->requestSettings(s);
+        message(L"AMD FSR 补帧已在 1.4.0 从界面移除（后端保留）：本次已切回 DLSS 补帧。");
+        veyra::log::warn("settings","AMD FSR frame generation is no longer selectable in the UI; falling back to DLSS");
+    }
     send(208,CB_SETCURSEL,int(s.frameGenerationBackend),0);send(203,CB_SETCURSEL,int(s.nrPolicy),0);
     send(508,CB_SETCURSEL,int(engine::exportBitrateIndex(s.exportBitrateMbps)),0);
     send(218,CB_SETCURSEL,int(s.nrRuntime));
@@ -1278,7 +1289,12 @@ case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.
     SetPropW(item(219),L"veyra.tip",HANDLE(L"直播兼容模式：切换显示交换链，会短暂停顿；不改变增强算法或导出。不保证所有捕获方式有效。"));
     add(L"STATIC",L"补帧与运动估算",1103,0,1,12,12,-1,30);
     add(L"STATIC",L"补帧方式",1111,0,1,12,50,-1,24);
-    combo(208,1,78,{L"DLSS 帧生成",L"Intel XeSS · 实验显示补帧 2X-4X",L"AMD FSR 帧生成 · 2X"});
+    // 1.4.0: the AMD FSR *frame-generation* entry is gone from the panel. Users
+    // could get stuck on it (switching back did not restore the DLSS path) and
+    // the result was not good enough to ship. The backend stays in the engine and
+    // is still reachable through --fg-fsr for diagnostics; only the UI entry is
+    // removed. FSR *upscaling* (id 207) is a different feature and stays.
+    combo(208,1,78,{L"DLSS 帧生成",L"Intel XeSS · 实验显示补帧 2X-4X"});
     add(L"STATIC",L"补帧倍率",1112,0,1,12,122,-1,24);
     combo(202,1,150,{L"关闭补帧",L"2X · 一张中间帧",L"3X · 两张中间帧",L"4X · 三张中间帧"});
     add(L"STATIC",L"运动估算",1113,0,1,12,194,-1,24);
