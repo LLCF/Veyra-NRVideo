@@ -628,7 +628,12 @@ void paintToneCurve(HWND h,HDC dc,RECT r){
         const auto& curve=colour.curves[std::size_t(channel)];
         const bool active=channel==colourCurveChannel;
         Gdiplus::Pen pen(color(curveColours[channel],active?255:70),active?2.0f:1.0f);
-        int previousX=canvas.left,previousY=canvas.bottom;
+        // Seed the polyline with the curve's real value at x=0. Seeding it with
+        // the canvas corner drew a fake near-vertical segment at the shadow end
+        // (the "why is there an angle down here" report) that the highlight end
+        // never showed, because the loop happens to end exactly at x=1.
+        int previousX=canvas.left;
+        int previousY=canvas.bottom-int(std::clamp(veyra::pipeline::ColorGradeTables::curveValue(curve,0.0f),0.0f,1.0f)*float(canvas.bottom-canvas.top));
         for(int step=1;step<=64;++step){
             const float t=float(step)/64.0f;
             const float value=veyra::pipeline::ColorGradeTables::curveValue(curve,t);
