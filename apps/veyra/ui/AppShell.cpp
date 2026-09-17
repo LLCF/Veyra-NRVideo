@@ -775,10 +775,12 @@ else if(colorStep==50){colorStep=(colourSnapshot.desired.color.gradingBlending==
 // Black & white mixer (T4): the switch must reach the engine and the per-band
 // row must then change the monochrome result instead of being an inert slider.
 else if(colorStep==51){
-    if(auto box=colourControl(820)){
-        SendMessageW(box,BM_CLICK,0,0);
-        veyra::log::info("color-ui-test",std::format("bw switch checkedAfter={}",int(SendMessageW(box,BM_GETCHECK,0,0))));
-    }else veyra::log::info("color-ui-test","bw switch missing");
+    // The mixer's 黑白 correction is the black & white switch now; the green
+    // range is selected so the row under test is the one on screen.
+    veyra::ui::settingsColorMixerModeForTest(3);
+    veyra::ui::settingsColorBandForTest(3);
+    veyra::ui::settingsColorScrollToTest(veyra::ui::colourBandsControlId());
+    veyra::log::info("color-ui-test","mixer set to 黑白 correction with the green range selected");
     colorStep=45;
 }
 else if(colorStep==45&&colourSnapshot.desired.color.blackWhite){colorStep=46;

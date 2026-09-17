@@ -122,6 +122,9 @@ struct ColorParam{
     }
 };
 std::vector<ColorParam> colorParams;
+// Defined with the mixer controls further down; the layout needs it to decide
+// which of the 24 mixer rows is on screen.
+int mixerModeOf(const ColorParam& param);
 // id layout: master 800, reset 801, undo 802, header 810+s, label 830+i,
 // edit 850+i, slider 870+i.
 // The colour page owns 1200..1499: label/edit/slider per parameter, so the four
@@ -133,6 +136,12 @@ constexpr int colorSliderId(int i){return 1400+i;}
 // Colour wheels (4 zones) and their class name; ids sit above the button block.
 constexpr int colorWheelId(int zone){return 840+zone;}
 constexpr const wchar_t* kColorWheelClass=L"VeyraColorWheel";
+// Colour-mixer band strip and the "correction" dropdown that decide which of the
+// 24 mixer rows is on screen (Lightroom shows one colour range at a time).
+constexpr int colorMixerModeId=830,colorBandsId=831;
+constexpr const wchar_t* kColorBandsClass=L"VeyraColorBands";
+int colourMixerMode=0;   // 0 hue, 1 saturation, 2 luminance, 3 black & white
+int colourMixerBand=0;   // 0..7, the eight colour ranges
 constexpr int kColorMaxParams=100;
 engine::ColorSettings colourTarget(){
     return (enhancementEnabled?controller->snapshot().desired:configuredSettings).color;
@@ -242,13 +251,21 @@ void layoutColorPage(){
             place(colorWheelId(3),y+196,190,collapsed,12+cellWidth+8,cellWidth);
             y+=400;
         }
+        // Mixer header: correction dropdown + the eight colour ranges. The 24
+        // rows stay in the table but only the selected range is on screen.
+        if(section==3){
+            place(colorMixerModeId,y,30,collapsed,12,bodyWidthDip-24);y+=36;
+            place(colorBandsId,y,34,collapsed,12,bodyWidthDip-24);y+=42;
+        }
         for(size_t i=0;i<colorParams.size();++i){
             const auto& param=colorParams[i];
             if(param.section!=section)continue;
-            place(colorLabelId(int(i)),y,24,collapsed);
-            place(colorEditId(int(i)),y-2,26,collapsed);
-            place(colorSliderId(int(i)),y+24,16,collapsed);
-            if(!collapsed)y+=46;
+            const int mode=mixerModeOf(param);
+            const bool hidden=collapsed||(mode>=0&&(mode!=colourMixerMode||param.index!=colourMixerBand));
+            place(colorLabelId(int(i)),y,24,hidden);
+            place(colorEditId(int(i)),y-2,26,hidden);
+            place(colorSliderId(int(i)),y+24,16,hidden);
+            if(!hidden)y+=46;
         }
         if(section==6){
             place(817,y,200,collapsed);y+=32;
@@ -277,7 +294,8 @@ void syncColorControls(){
         }
     }
     if(auto space=item(819))if(int(SendMessageW(space,CB_GETCURSEL,0,0))!=colour.lutInputSpace)SendMessageW(space,CB_SETCURSEL,WPARAM(colour.lutInputSpace),0);
-    check(820,colour.blackWhite?BST_CHECKED:BST_UNCHECKED);
+    if(auto mode=item(colorMixerModeId))if(int(SendMessageW(mode,CB_GETCURSEL,0,0))!=colourMixerMode)SendMessageW(mode,CB_SETCURSEL,WPARAM(colourMixerMode),0);
+    if(auto bands=item(colorBandsId))InvalidateRect(bands,nullptr,FALSE);
     for(int zone=0;zone<engine::kColorGradingZones;++zone)if(auto wheel=item(colorWheelId(zone)))InvalidateRect(wheel,nullptr,FALSE);
     syncingColour=false;
 }
@@ -454,6 +472,72 @@ void registerColorWheelClass(){
     classDescription.hInstance=GetModuleHandleW(nullptr);
     classDescription.lpszClassName=kColorWheelClass;
     classDescription.hCursor=LoadCursorW(nullptr,IDC_ARROW);
+    RegisterClassW(&classDescription);
+}
+// Which of the four mixer corrections a row belongs to (-1 = not a mixer row).
+int mixerModeOf(const ColorParam& param){
+    switch(param.target){
+    case ColorTarget::MixerHue:return 0;
+    case ColorTarget::MixerSaturation:return 1;
+    case ColorTarget::MixerLuminance:return 2;
+    case ColorTarget::BlackWhiteMix:return 3;
+    default:break;
+    }
+    return -1;
+}
+const COLORREF kBandColours[engine::kColorMixerBands]={
+    RGB(226,64,64),RGB(226,152,58),RGB(226,214,58),RGB(74,200,80),
+    RGB(58,206,190),RGB(58,116,226),RGB(168,64,214),RGB(226,64,168)};
+RECT bandDotRect(HWND h,const RECT& area,int band){
+    const int count=engine::kColorMixerBands;
+    const int cellWidth=std::max(1,int(area.right-area.left)/count);
+    const int radius=std::max(dip(h,7),std::min(dip(h,12),cellWidth/2-dip(h,3)));
+    const int centreX=area.left+cellWidth*band+cellWidth/2;
+    const int centreY=(area.top+area.bottom)/2;
+    return {centreX-radius,centreY-radius,centreX+radius,centreY+radius};
+}
+void paintColorBands(HWND h,HDC dc,RECT r){
+    fillSurface(dc,r,h);
+    AlphaGraphics drawing(dc);
+    auto& graphics=drawing.get();
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    for(int band=0;band<engine::kColorMixerBands;++band){
+        const auto dot=bandDotRect(h,r,band);
+        const float radius=float(dot.right-dot.left)*0.5f;
+        Gdiplus::SolidBrush brush(color(kBandColours[band]));
+        graphics.FillEllipse(&brush,float(dot.left),float(dot.top),radius*2,radius*2);
+        if(band==colourMixerBand){
+            Gdiplus::Pen ring(color(RGB(245,247,249)),float(dip(h,2)));
+            graphics.DrawEllipse(&ring,float(dot.left)-radius*0.35f,float(dot.top)-radius*0.35f,radius*2.7f,radius*2.7f);
+        }
+    }
+}
+void registerColorBandsClass(){
+    static bool registered=false;
+    if(registered)return;
+    registered=true;
+    WNDCLASSW classDescription{};
+    classDescription.style=CS_DBLCLKS;
+    classDescription.lpfnWndProc=[](HWND h,UINT msg,WPARAM wp,LPARAM lp)->LRESULT{
+        if(msg==WM_ERASEBKGND)return 1;
+        if(msg==WM_PAINT||msg==WM_PRINTCLIENT){PaintBuffer paint(h,reinterpret_cast<HDC>(wp));paintColorBands(h,paint.dc,paint.rect);return 0;}
+        if(msg==WM_LBUTTONDOWN){
+            RECT r{};GetClientRect(h,&r);
+            const int cellWidth=std::max(1,int(r.right-r.left)/engine::kColorMixerBands);
+            const int band=std::clamp(GET_X_LPARAM(lp)/cellWidth,0,engine::kColorMixerBands-1);
+            if(band!=colourMixerBand){
+                colourMixerBand=band;
+                veyra::log::info("color-ui",std::format("mixer band={}",band));
+            }
+            InvalidateRect(h,nullptr,FALSE);
+            arrange();
+            return 0;
+        }
+        return DefWindowProcW(h,msg,wp,lp);
+    };
+    classDescription.hInstance=GetModuleHandleW(nullptr);
+    classDescription.lpszClassName=kColorBandsClass;
+    classDescription.hCursor=LoadCursorW(nullptr,IDC_HAND);
     RegisterClassW(&classDescription);
 }
 bool colourFieldEdited(int index,float value){
@@ -768,17 +852,24 @@ LRESULT CALLBACK proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
         }
         syncColorControls();arrange();return 0;
     }
-    if(msg==WM_COMMAND&&LOWORD(wp)==820&&HIWORD(wp)==BN_CLICKED){
+    if(msg==WM_COMMAND&&LOWORD(wp)==colorMixerModeId&&HIWORD(wp)==CBN_SELCHANGE){
+        colourMixerMode=std::clamp(int(SendMessageW(item(colorMixerModeId),CB_GETCURSEL,0,0)),0,3);
+        // Picking 黑白 is the B&W mixer switch itself (Lightroom's B&W panel),
+        // so the model flag follows the dropdown instead of a second checkbox.
         auto colour=colourTarget();
-        colour.blackWhite=SendMessageW(item(820),BM_GETCHECK,0,0)==BST_CHECKED;
-        if(!applyColour(colour,true)){
-            veyra::log::warn("color-ui","black and white mixer switch rejected");
-            syncColorControls();
-            return 0;
+        const bool wantBlackWhite=colourMixerMode==3;
+        if(colour.blackWhite!=wantBlackWhite){
+            colour.blackWhite=wantBlackWhite;
+            if(!applyColour(colour,true)){
+                veyra::log::warn("color-ui","mixer correction switch rejected");
+                syncColorControls();
+                return 0;
+            }
         }
-        veyra::log::info("color-ui",std::format("black and white mixer={}",colour.blackWhite?1:0));
-        message(colour.blackWhite?L"黑白混色器已打开：下面八个“黑白”滑块控制各色系的灰阶明暗。":L"黑白混色器已关闭，回到 HSL 混色。");
+        veyra::log::info("color-ui",std::format("mixer correction={} blackWhite={}",colourMixerMode,wantBlackWhite?1:0));
+        message(wantBlackWhite?L"黑白：画面转成单色，下方滑块控制各色系的灰阶明暗。":L"用下方滑块按色系微调（点色点切换色系）。");
         syncColorControls();
+        arrange();
         return 0;
     }
     if(msg==WM_COMMAND&&LOWORD(wp)>=810&&LOWORD(wp)<810+kColorSections&&HIWORD(wp)==BN_CLICKED){
@@ -1000,10 +1091,14 @@ case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.
         SetPropW(item(822),L"veyra.tip",HANDLE(L"复制当前色彩设置，用来粘贴到别的预设或下一段素材。"));
         SetPropW(item(823),L"veyra.tip",HANDLE(L"粘贴刚才复制的色彩设置。"));
         SetPropW(item(821),L"veyra.tip",HANDLE(L"按住不放：临时显示没有调色的原图；松开恢复。用中性调色实现，不重建管线。"));
-        // group 2 = the colour page; 3 was the section index, not the page, and a
-        // control on another page is hidden (and therefore ignores BM_CLICK).
-        check(820,BST_UNCHECKED);add(L"BUTTON",L"黑白混色器（把画面转成黑白）",820,BS_AUTOCHECKBOX|WS_TABSTOP,2,12,0,-1,28);
-        SetPropW(item(820),L"veyra.tip",HANDLE(L"打开后画面变成黑白，下面八个“黑白”滑块控制各色系对应的灰阶明暗（和 Lightroom 的黑白混色器同一套语义）。"));
+        // Mixer header: "校正" dropdown + the eight colour ranges. Only the
+        // selected range's rows are on screen, like Lightroom's colour mixer.
+        registerColorBandsClass();
+        combo(colorMixerModeId,2,0,{L"色相",L"饱和度",L"明亮度",L"黑白"});
+        send(colorMixerModeId,CB_SETCURSEL,WPARAM(colourMixerMode),0);
+        add(kColorBandsClass,L"",colorBandsId,WS_TABSTOP,2,12,0,-1,34);
+        SetPropW(item(colorMixerModeId),L"veyra.tip",HANDLE(L"校正方式：色相/饱和度/明亮度按色系微调；黑白把画面转成单色，并用同一组滑块控制各色系的灰阶明暗。"));
+        SetPropW(item(colorBandsId),L"veyra.tip",HANDLE(L"点色点切换要调整的色系；下方滑块只作用于选中的色系。"));
         for(int section=0;section<kColorSections;++section)add(L"BUTTON",L"",810+section,BS_PUSHBUTTON|WS_TABSTOP,2,12,12,-1,32);
         // Preset toolbar.
         combo(803,2,0,{});add(L"EDIT",L"",804,ES_AUTOHSCROLL|WS_TABSTOP,2,12,0,-1,26);send(804,EM_SETLIMITTEXT,48,0);
@@ -1170,6 +1265,7 @@ bool settingsColorWheelTestBarPoint(int zone,float luminance,POINT& out){
     return true;
 }
 int colourWheelControlId(int zone){return colorWheelId(zone);}
+int colourBandsControlId(){return colorBandsId;}
 void settingsColorScrollToTest(int id){
     if(!window||!body)return;
     for(auto& entry:items)if(GetDlgCtrlID(entry.h)==id&&entry.page==2){
@@ -1180,6 +1276,22 @@ void settingsColorScrollToTest(int id){
         arrange();
         return;
     }
+}
+void settingsColorMixerModeForTest(int mode){
+    colourMixerMode=std::clamp(mode,0,3);
+    if(auto combo=item(colorMixerModeId))SendMessageW(combo,CB_SETCURSEL,WPARAM(colourMixerMode),0);
+    auto colour=colourTarget();
+    const bool wantBlackWhite=colourMixerMode==3;
+    bool applied=true;
+    if(colour.blackWhite!=wantBlackWhite){colour.blackWhite=wantBlackWhite;applied=applyColour(colour,true);}
+    veyra::log::info("color-ui",std::format("mixer mode={} blackWhiteAsked={} applied={}",colourMixerMode,wantBlackWhite?1:0,applied?1:0));
+    syncColorControls();
+    arrange();
+}
+void settingsColorBandForTest(int band){
+    colourMixerBand=std::clamp(band,0,engine::kColorMixerBands-1);
+    if(auto bands=item(colorBandsId))InvalidateRect(bands,nullptr,FALSE);
+    arrange();
 }
 int colourParamEditId(const wchar_t* label){
     if(!label)return -1;

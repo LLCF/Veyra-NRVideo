@@ -1,5 +1,26 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-17 色彩页 UI：混色器专业布局（校正下拉 + 8 色点条，专业型第三批）
+
+24 条混色器滑块（8 色系 × 色相/饱和度/明亮度）改成 Lightroom 的做法：**一次只显示选中色系的滑块**。
+
+- 顶部“**校正**”下拉（id 830）：色相 / 饱和度 / 明亮度 / **黑白**。选“黑白”**本身就是黑白混色器开关**
+  （`ColorSettings::blackWhite` 跟着下拉走），所以原来的复选框（820）删掉了，语义与 LR 的 B&W 面板一致；
+- 下方 **8 色点条**（自绘控件 `VeyraColorBands`，id 831）：红/橙/黄/绿/浅绿/蓝/紫/洋红八个色点，
+  选中的色点带白色描边；点一下就切换下面显示的 3 条滑块；
+- 布局：混色器组里，24 行仍在参数表里（索引/标签/预设 schema 都没动），但只有
+  `(校正方式, 选中色系)` 匹配的那一行会被摆放并显示，其余行 `hidden`；
+- 测试钩子：`settingsColorMixerModeForTest` / `settingsColorBandForTest` / `colourBandsControlId`，
+  烟测走的就是 UI 同一条代码路径。
+
+**验证**：`--smoke-color` **exit 0**，日志：
+`mixer mode=3 blackWhiteAsked=1 applied=1` → `T4 the black and white mixer switch reached the engine` →
+`T4 the black and white band row reached the engine` → 色轮三步依旧全过。
+真机截图：`logs/color/ui-preview-mixer.png`（校正=黑白、绿色系被选中）。
+
+**下一批**：真曲线编辑器（网格 + 可拖控制点 + RGB/R/G/B 通道）、分组眼睛 bypass（schema v19）、
+分区图标与间距抛光。
+
 ## 2026-09-17 色彩页 UI：颜色分级四色轮（专业型第二批）
 
 把颜色分级从 12 条滑块（4 区 × 色相/饱和度/明亮度）换成**四个自绘色轮**，就是专业调色面板的样子：

@@ -21,4 +21,9 @@ int colourWheelControlId(int zone);
 // Scroll the colour page so the given control is inside the viewport (used by
 // acceptance screenshots and by the smoke before it drives a control).
 void settingsColorScrollToTest(int id);
+// Mixer correction mode (0 hue / 1 saturation / 2 luminance / 3 black & white)
+// and the selected colour range, driven through the same code path the UI uses.
+void settingsColorMixerModeForTest(int mode);
+void settingsColorBandForTest(int band);
+int colourBandsControlId();
 }
