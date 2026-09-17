@@ -1,5 +1,34 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-17 色彩页 P1：T6 收尾——三入口一致性 + 全量回归 + 交付报告
+
+**三入口一致性验收抓到一个功能缺口并修掉**
+
+新脚本 `scripts/acceptance/color-three-entry-consistency.ps1`（静态图案，截图关/开 + 导出关/开四轮）：
+
+- 修复前：截图（预览链路）开了调色 Y=99.25，导出帧还是 Y=75.50 → **导出完全没有应用调色**
+  （screenshot vs export 只有 19.50 dB）。根因：`VideoExportJob` 与 `EngineControllerImage`
+  构造 `EnhanceGraphDesc` 时漏了 `gd.color=options.settings.color`，只有主引擎设了。
+  已给两条导出链路补上，并给 HDR+调色导出加一条“MaxCLL/MaxFALL 未重算”的显式警告。
+- 修复后：截图 vs 导出帧 **49.29 dB**（开调色）/ **50.30 dB**（关调色），调色前后差异两条链路都
+  18–20 dB（肉眼可见），全部通过。结果：`logs/color/three-entry/ec292b53eb8048648f8887911f50a52d/result.json`。
+
+**全量回归**
+
+- `scripts/gates/delivery.ps1` → **DELIVERY SHORT GATE PASS**
+  （`logs/delivery/fd83775cedd04e7c9716ead6f1127d33/result.json`）；
+- 52 个测试程序逐个单跑（带各自所需参数）：**45 个 exit 0**；未执行 7 个，全部是硬件/素材/放置策略
+  原因：`capture_tests`（需采集卡）、`live_presentation_tests`、`ps5_quality_tests`、
+  `ps5_hw_image_tests`、`hw_import_image_tests`（需 PS5 素材）、`nr_ampere_tests`
+  （`nr-adapter` 按策略拒绝非 staging/experimental 路径的运行库）、`wasapi_input_tests`
+  真实端点（其 `--offline` 分支已通过）。没有用“跳过”冒充通过。
+
+**交付报告**：`docs/COLOR_TAB_P1_DELIVERY_2026-09-17.md`（含每个里程碑的证据、量测数据、
+本轮修掉的 6 个真实缺陷、未完成项与人工验收步骤）。
+
+未完成项照实写进报告：导出 MaxCLL/MaxFALL 重算、分组眼睛 bypass、点曲线编辑器、黑白开关、
+`.vpcolor` 不带 LUT 文件本体。分支仍未合并 main。
+
 ## 2026-09-17 色彩页 P1：修 .cube 载入崩溃 + 量到调色真实 GPU 成本（T2b 计时项收口）
 
 **修掉一个会让用户直接崩程序的 bug（GPU 合同测试抓出来的，不是测试问题）**
