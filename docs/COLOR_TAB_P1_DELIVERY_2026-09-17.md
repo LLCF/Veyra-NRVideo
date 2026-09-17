@@ -80,11 +80,22 @@
 - **LUT 输入空间不匹配必须拒绝**：HDR 内容选 sRGB、SDR 内容选 PQ 都会被拒（`colorLutNotice()` 非空、
   像素与无 LUT 逐字节一致），并且通过 `colorStatus` 在状态面板可见，不只写日志。
 
+**HDR 导出的静态元数据（部分完成，按方案 §5.3 的兜底条款实现）**
+
+已做：HDR 导出会把源文件的 **MaxCLL / MaxFALL 原样写进 MP4 的 `clli` box**（走
+`videoStream->codecpar->coded_side_data`，由 FFmpeg movenc 落盘），调色开启时额外写一条
+`[color-export] … carried over from the source and NOT recomputed … (marked as not updated)` 警告。
+证据（本机真跑，命令与结果在 WORKLOG）：
+
+- 源（x265 写的 SEI）：`maxCLL=1000 maxFALL=400`；
+- 导出：`side_data_type="Content light level metadata", max_content=1000, max_average=400`，
+  同时保留 PQ/BT.2020/HEVC Main10；
+- 带调色导出：同一条元数据 + 警告，且画面确实被调色（与不调色导出的同一帧 PSNR 5.39 dB）。
+
 **未完成（如实列出，不冒充通过）**
 
-1. **导出时重算 MaxCLL / MaxFALL**：需要“写 header 前先跑一遍全片直方图”的两遍流程，外加把结果
-   通过 NVENC SEI / MP4 `clli` 写进码流，本轮没实现。当前行为：HDR + 调色开启时明确写一条
-   `[color-export] … not recomputed … (marked as not updated)` 警告，**不静默**写与实际不符的元数据。
+1. **导出时“重算” MaxCLL / MaxFALL**：需要“写 header 前先跑一遍全片直方图”的两遍流程
+   （再加 mastering-display `mdcv` box），本轮只做了“原样带上 + 明确标注未更新”的兜底，没有重算。
 2. 分组眼睛（每组 bypass）、点曲线编辑器、黑白混色器开关：模型里已留字段，UI 未做（方案 §9 的
    P1 清单里属于 T3/T4 的“眼睛/曲线”子项，本轮用“整组折叠 + 一键还原”替代，未做独立 bypass 位）。
 3. 预设导出 `.vpcolor` 只带参数与 LUT **文件名**，不带 LUT 文件本体（换机导入需自行拷 `.cube`）。
@@ -92,8 +103,8 @@
 
 ## 6. 回归与闸门
 
-- `scripts/gates/delivery.ps1` → **DELIVERY SHORT GATE PASS**
-  （`logs/delivery/fd83775cedd04e7c9716ead6f1127d33/result.json`，含 `color-page`、`player-sync`、
+- `scripts/gates/delivery.ps1`（最终代码上重跑）→ **DELIVERY SHORT GATE PASS**
+  （`logs/delivery/fbb42f3f08e8482a96c817d3883569e0/result.json`，含 `color-page`、`player-sync`、
   `controls` 等用例）；
 - 52 个测试程序逐个单跑：**45 个 exit 0**；7 个未执行，原因是需要真实硬件/素材或运行库放置策略
   （`capture_tests` 采集卡、`live_presentation_tests`/`ps5_*`/`hw_import_image` PS5 素材、

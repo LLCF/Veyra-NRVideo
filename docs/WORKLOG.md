@@ -1,5 +1,23 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-17 色彩页 P1：HDR 导出的 MaxCLL/MaxFALL 兜底（原样带上 + 标注未更新）
+
+方案 §5.3 要求“能测就测；不能测时保留原值并标注未更新，不允许静默写入与实际不符的静态元数据”。
+本轮实现前半段的兜底：`VideoExportJob` 在建立 HEVC Main10 输出流时，把源的 `MaxCLL/MaxFALL`
+写进 `videoStream->codecpar->coded_side_data`（`AV_PKT_DATA_CONTENT_LIGHT_LEVEL`），
+FFmpeg 的 movenc 会据此写 MP4 `clli` box；调色开启时额外写
+`[color-export] … carried over from the source and NOT recomputed … (marked as not updated)` 警告。
+
+实测（`%TEMP%\veyra-hdr\hdr-sample.mp4`，x265 写入 `max-cll=1000,400` 的 HDR10 素材）：
+
+- 源侧日志：`[hdr-metadata] … contentSource=frame maxCLL=1000 maxFALL=400`；
+- `veyra.exe hdr-sample.mp4 --export-out hdr-export.mp4 --hevc --max-frames 6` → exit 0，
+  ffprobe：`side_data_type=Content light level metadata, max_content=1000, max_average=400`，
+  输出仍为 `smpte2084 / bt2020 / HEVC Main10`；
+- 加 `--color-grade=1.0`：警告出现、元数据同样带上、画面确实被调色（与不调色导出同帧 PSNR 5.39 dB）。
+
+**仍未做**：真正“重算” MaxCLL/MaxFALL（写 header 前的全片直方图两遍流程）与 mastering display `mdcv` 写入。
+
 ## 2026-09-17 色彩页 P1：T6 收尾——三入口一致性 + 全量回归 + 交付报告
 
 **三入口一致性验收抓到一个功能缺口并修掉**
@@ -15,8 +33,8 @@
 
 **全量回归**
 
-- `scripts/gates/delivery.ps1` → **DELIVERY SHORT GATE PASS**
-  （`logs/delivery/fd83775cedd04e7c9716ead6f1127d33/result.json`）；
+- `scripts/gates/delivery.ps1`（最终代码上重跑）→ **DELIVERY SHORT GATE PASS**
+  （`logs/delivery/fbb42f3f08e8482a96c817d3883569e0/result.json`）；
 - 52 个测试程序逐个单跑（带各自所需参数）：**45 个 exit 0**；未执行 7 个，全部是硬件/素材/放置策略
   原因：`capture_tests`（需采集卡）、`live_presentation_tests`、`ps5_quality_tests`、
   `ps5_hw_image_tests`、`hw_import_image_tests`（需 PS5 素材）、`nr_ampere_tests`
