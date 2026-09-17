@@ -35,6 +35,46 @@ int bitstreamPreferenceOrder(BitstreamKind kind);
 // be unwrapped before the codec parser sees them.
 bool bitstreamIsIec61937(uint32_t subtypeData1);
 
+// IEC 61937 burst header: sync 0xF8724E1F, then a 16-bit data-type word and a
+// 16-bit payload length in bits. Mapping a data-type to a codec family is how a
+// compressed stream is recognised when the endpoint labels it as plain PCM:
+// the AVerMedia capture cards forward the Dolby stream on a 2-channel carrier
+// whose media type does not change (see AverMediaAudioSwitch.h).
+BitstreamKind classifyIec61937DataType(uint16_t dataType);
+
+// Read-only carrier probe.
+//
+// Some capture cards deliver an IEC 61937 compressed stream *inside* a media
+// type that still claims linear PCM. Guessing from the device's declared
+// format is not safe - the same card also downmixes Dolby to real 2.0 PCM when
+// passthrough is not armed - so the only reliable discriminator is the bytes
+// themselves. This probe scans for valid bursts, requires at least two of the
+// same data-type, and then stops; it never changes what is played.
+//
+// Bounded by design: scanning stops after kMaxScanBytes or on a verdict, and
+// only an 8-byte tail is retained between calls.
+class Iec61937Probe {
+public:
+    static constexpr size_t kMaxScanBytes = 1u << 20;
+
+    // Feed carrier bytes in arrival order. Thread-affine: call from the one
+    // thread that delivers samples. Logs its verdict exactly once.
+    void feed(const uint8_t* data, size_t bytes);
+
+    bool concluded() const;
+    bool detected() const;
+    uint16_t dataType() const;
+    size_t scannedBytes() const;
+    unsigned burstCount() const;
+
+private:
+    std::vector<uint8_t> tail_;
+    size_t scanned_ = 0;
+    uint16_t type_ = 0;
+    unsigned bursts_ = 0;
+    int verdict_ = 0;  // 0 = undecided, 1 = IEC 61937, -1 = not IEC 61937
+};
+
 class BitstreamDecoder {
 public:
     BitstreamDecoder();

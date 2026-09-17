@@ -51,6 +51,29 @@ if (!formatOk) { state=Failed; detail="card not reached: getAudioFormat ret=..."
 芯片返回 **20 (0x14)** 表示 HDMI 源正在发非 PCM（Dolby）；其他值表示 PCM。
 注意这是**源的当前格式**，不是"有没有武装成功"——用户在菜单里时它一样是 PCM。
 
+### 1.4 只读载体探针：`sink::Iec61937Probe`
+
+**为什么必须要它**：`chipFormat=20` 只说明"源在发 Dolby"，它无法区分下面两种完全不同的现状——
+
+- 切换**没生效**：卡照旧把 Dolby 解成 2.0 PCM 送出来（今天用户听到的正常声音）；
+- 切换**生效了**：卡把位流原样塞进一个**仍然自称 PCM** 的媒体类型（厂商插件正是靠"每次回调问一次
+  `IsAudioFormatNonPcm()`"来判断的，说明媒体类型本身不带这个信息）。
+
+这两种情况下 `device bitstream types` 都可能是 0，用耳朵也分不出来（后者是噪音，前者是正常游戏声）。
+唯一可靠的区别是**字节本身**：IEC 61937 的突发头是自同步的。
+
+所以新增一个小探针，挂在现有 PCM 回调上，**只读、不改路**：
+
+- 扫 `F8 72 4E 1F` → 读 data-type 与 payload 长度 → 要求**至少两个同类突发**才判定；
+- 上限 1 MiB，判定即停；跨回调只保留 8 字节尾巴（处理头被切断的情况）；
+- 判定一次就写一行日志，之后不再参与任何逻辑。
+
+顺带把 data-type 映射做成可测的纯函数 `classifyIec61937DataType()`（0x01 AC-3 / 0x15 E-AC-3 /
+0x0B–0x0D DTS / 0x11 DTS-HD / 0x16 TrueHD），下一步真正接线时直接复用。
+
+**这一步刻意不做的事**：不把位流改道去解码。那条音频路径刚经过 20 ms 储备、10 ms 协商、
+欠载/漂移修复，没有真卡的情况下盲改，等于把现场问题换成新问题。先把事实拿到手。
+
 ---
 
 ## 2. 实测证据（全部来自本机，可复核）
@@ -132,6 +155,26 @@ DELIVERY SHORT GATE PASS   (exit 0)
 logs\delivery\084be258e4834f7d958efa997a0b40c1\result.json
 ```
 
+### 2.6 载体探针单测
+
+`tests/unit/Iec61937ProbeTests.cpp` → `veyra_iec61937_probe_tests.exe`（21 项全过）：
+
+```
+ok   data type 0x01/0x15/0x0B/0x0C/0x0D/0x11/0x16 映射正确
+ok   an unknown data type is rejected / data type 0 is rejected
+[capture-audio-carrier] IEC 61937 detected on the PCM-labelled carrier: dataType=0x15 (E-AC-3/DD+) bursts=2
+ok   two E-AC-3 bursts conclude the probe / are reported as IEC 61937
+ok   a partial header alone does not conclude the probe
+ok   bursts split across two feeds are still detected          ← 头被切断的情况
+ok   unknown data types are never accepted as a bitstream
+ok   the probe reaches a verdict within its scan budget
+ok   a single burst followed by PCM is rejected                ← 反例：偶然命中 sync 不算证据
+ok   64 KB of PCM does not conclude the probe
+PASS (0 failures)
+```
+
+探针改动后重跑交付短测仍为 PASS：`logs\delivery\427e950eeb6f4db5b0b2273d9be87139\result.json`。
+
 ---
 
 ## 3. 用户侧怎么验收（这是唯一还没走完的一步）
@@ -145,13 +188,18 @@ logs\delivery\084be258e4834f7d958efa997a0b40c1\result.json
    - `chipFormat=<其它>` → 组件在跑但源不是 Dolby；
    - `card not reached: getAudioFormat ret=5` → 没插卡/被别的软件占着；
    - `not installed` → 组件没找到（可用环境变量指路）。
-5. 紧接着看 `[capture-audio-bitstream] device bitstream types=?`：
-   - **非 0** → 卡切换后真的换了媒体类型，现有"位流优先"链路直接吃下，5.1 应当立刻可用；
-   - **仍然是 0** → 说明切换只改载荷不改媒体类型（调研报告 2.4 的推断成立），下一步要做的是
-     在 PCM 标签流上嗅探 IEC 61937 同步字 `F8 72 4E 1F` 并按 data-type 选解码器；**在那之前，
-     这种情况下的声音会是位流被当 PCM 播出来的噪音，不是正常的 2.0**。
+5. 看 `[capture-audio-bitstream] device bitstream types=?`：
+   - **非 0** → 卡切换后真的换了媒体类型，现有"位流优先"链路直接吃下，5.1 立刻可用，收工；
+   - **仍然是 0** → 看下一行。
+6. 看 `[capture-audio-carrier]`：
+   - `IEC 61937 detected ... dataType=0x15 (E-AC-3/DD+)` → 切换生效，载荷确实是位流，
+     而媒体类型没变。此时声音会是"位流当 PCM 播"的噪音；下一步就是把这条已验证的字节流
+     接到现有 `BitstreamDecoder`（代码位置、判定条件都已经明确，改动小且可测）。
+   - `no IEC 61937 burst in the first N bytes ... treating it as linear PCM` → 切换没有改变载荷，
+     听到的仍然是正常的 2.0，说明卡在这个固件/设置下没被切换过去。
 
-第 5 步是这次唯一无法在本机回答的问题——本机没有卡，也没有 5.1 源。
+这三行日志就是这次唯一无法在本机回答的问题的答案——本机没有卡，也没有 5.1 源。
+无论落在哪一支，都不需要再靠"听起来对不对"来判断。
 
 ---
 
@@ -159,6 +207,8 @@ logs\delivery\084be258e4834f7d958efa997a0b40c1\result.json
 
 - **真卡未验收**：本机没有 GC553G2，`SwitchDeviceThenDetectAudioFormat` 走到"找不到设备"就结束了；
   真正把卡切到 non-PCM、以及切换后端点媒体类型是否变化，都还没有观测。
+- **载体探针只给结论，不改路**：它不会把位流送去解码。在"切换生效但媒体类型不变"这一支，
+  用户会听到噪音——这是已知且刻意保留的状态，目的是先用一行日志把事实钉死。
 - **只验证到组件加载与调用**：`initialize` 后的真实设备交互、`StartChecking` 线程在长时运行下的行为未验证。
 - **退出不还原模式**：`stop()` 只 `StopChecking` + `closePort/uninitialize`，不调 `setNonPcmOnOff(0)`
   ——这与厂商插件行为一致（它也不还原）。副作用是：之后若用**没有**装插件的软件采集同一端点，

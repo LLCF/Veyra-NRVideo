@@ -230,6 +230,11 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
     std::shared_ptr<sink::BitstreamAudioSink> audioPassthrough;
     bool audioSessionDeferred=false;
     std::wstring audioBitstreamKind;
+    // Read-only IEC 61937 probe on the PCM carrier. AVerMedia cards can deliver
+    // the Dolby stream inside a media type that still says PCM, and the same
+    // card downmixes to real 2.0 when passthrough is not armed - only the bytes
+    // tell the two apart. Observational: it never changes what is played.
+    std::shared_ptr<sink::Iec61937Probe> carrierProbe;
     // AVerMedia GC553G2 / GC553PRO / GC575 only forward compressed HDMI audio
     // after the installed vendor component arms non-PCM passthrough. The
     // component is loaded from the user's own OBS installation (never
@@ -783,9 +788,11 @@ if(audioTypes.empty()&&(!allowBitstream||bitstreamTypes.empty())){log::warn("cap
         sink::WavePcmFormat parsed{};
         if(type->formattype==FORMAT_WaveFormatEx&&type->pbFormat&&type->cbFormat>=sizeof(WAVEFORMATEX)&&sink::parseWavePcm(type->pbFormat,type->cbFormat,parsed)&&session->configure(parsed)){
             auto* target=session.get();
-            hr=createNativeAudioSink(*type,[target](IMediaSample* sample){
+            auto probe=std::make_shared<sink::Iec61937Probe>();
+            hr=createNativeAudioSink(*type,[target,probe](IMediaSample* sample){
                 BYTE* bytes=nullptr;REFERENCE_TIME begin=0,end=0;
                 if(FAILED(sample->GetPointer(&bytes))||FAILED(sample->GetTime(&begin,&end)))return VFW_E_SAMPLE_TIME_NOT_SET;
+                probe->feed(bytes,size_t(sample->GetActualDataLength()));
                 return target->push(bytes,size_t(sample->GetActualDataLength()),double(begin)/10000,sample->IsDiscontinuity()==S_OK)?S_OK:E_FAIL;
             },candidate,terminal);
             if(SUCCEEDED(hr))hr=p.graph->AddFilter(candidate.Get(),L"Veyra audio PCM");
@@ -794,7 +801,7 @@ if(audioTypes.empty()&&(!allowBitstream||bitstreamTypes.empty())){log::warn("cap
             // Some devices reject this advisory API, so do not fail capture.
             if(SUCCEEDED(hr))suggestCaptureAudioBuffering(audioPin.Get(),*reinterpret_cast<const WAVEFORMATEX*>(type->pbFormat));
             if(SUCCEEDED(hr))hr=p.graph->ConnectDirect(audioPin.Get(),terminal.Get(),type);
-            if(SUCCEEDED(hr)){p.audioSink=candidate;p.audioSession=std::move(session);connectedAudio=true;log::info("capture-audio",std::format("selected media type channels={} mask=0x{:X} rate={} containerBits={} validBits={} floating={}",parsed.layout.channels,parsed.layout.mask,parsed.wave.nSamplesPerSec,parsed.wave.wBitsPerSample,parsed.validBits,parsed.floating?1:0));}
+            if(SUCCEEDED(hr)){p.audioSink=candidate;p.audioSession=std::move(session);p.carrierProbe=probe;connectedAudio=true;log::info("capture-audio",std::format("selected media type channels={} mask=0x{:X} rate={} containerBits={} validBits={} floating={}",parsed.layout.channels,parsed.layout.mask,parsed.wave.nSamplesPerSec,parsed.wave.wBitsPerSample,parsed.validBits,parsed.floating?1:0));}
             else if(candidate)p.graph->RemoveFilter(candidate.Get());
             log::info("capture-audio",std::format("PCM ConnectDirect hr=0x{:X}",unsigned(hr)));
         }
