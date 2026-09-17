@@ -1,5 +1,70 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-17 色彩页 P1：修 .cube 载入崩溃 + 量到调色真实 GPU 成本（T2b 计时项收口）
+
+**修掉一个会让用户直接崩程序的 bug（GPU 合同测试抓出来的，不是测试问题）**
+
+现象：`veyra_color_grade_gpu_tests` 在“导入 .cube 并建立图”这一段**随机崩**（8 次里 2–3 次，
+`0xC0000409` fail-fast）。逐步插桩定位到 `EnhanceGraph::initialize` 里 LUT 载入成功后的那一条日志：
+
+```cpp
+std::format("lut loaded name={} size={}",
+    std::string(desc_.color.lutNameString().begin(), desc_.color.lutNameString().end()), lut.size)
+```
+
+`lutNameString()` 每次返回**一个新的临时 `std::wstring`**，`.begin()` 与 `.end()` 来自两个不同的
+临时对象，区间构造算出的长度是垃圾值 → 越界读（有时只是读到别处，有时直接 fail-fast）。
+也就是说：**任何用户只要在色彩页选一个 .cube，就可能闪退**，而且概率性、难复现。
+
+修法：加文件内 `utf8Of()`（`WideCharToMultiByte(CP_UTF8)`）只转换一次再进日志；并顺手修正
+`.cube` 上传的 staging 布局——原来用 `rowPitch = size*16`，除 16 整除的尺寸外都不满足 D3D12
+要求的 256 字节对齐（2/3/17/33 这些常见尺寸全中），驱动可以据此越界读写 staging buffer；
+现在按 256 对齐并逐行写入。
+
+**调色 GPU 成本（原计划要求 `gpuGradeP95Ms` + 基线对比）**
+
+色彩 pass 按 v4 方案**融合在 ingest 的同一次 dispatch 里**，shader 执行时间无法在 GPU 上单独打点，
+所以不做假数据：改用**同一素材、同一会话参数、只切换总开关**的 A/B，量 `GpuStage::Color`
+（= 转换 + 调色，融合派发）的 p95。新增诊断开关 `--color-grade=<EV>`（与 `--flow-amd` 同族的
+命令行实验口），`player-timing` 每秒一条自带窗口 p95。
+
+命令：`veyra.exe <clip> --smoke-seconds 20 [--color-grade=1.0]`，取播放稳定后的 8/7 个采样点均值：
+
+| 素材 | 关闭总开关 | 开启 +1 EV | 差值（= 调色成本） | 方案预算 |
+| --- | --- | --- | --- | --- |
+| 1920×1080 60fps | 0.034 ms | 0.175 ms | **+0.141 ms** | ≤0.15 ms ✔ |
+| 3840×2160 30fps | 0.308 ms | 0.639 ms | **+0.331 ms** | ≤0.35 ms ✔ |
+
+原始日志：`logs/color/grade-ab/{1080p,2160p}-{off,on}.log`（素材由 `%TEMP%\veyra-p1-fixture.mp4`
+经 ffmpeg 放大生成）。结论按融合链路如实写：这是**同一次 dispatch 的增量**，
+不是独立 pass 的耗时；`player-timing` 因此没有新增 `gpuGradeP95Ms` 字段（加独立时间戳就必须拆成
+第二个 dispatch，违反 v4“单一融合 pass、不新增链路”）。
+
+## 2026-09-17 色彩页 P1：T6 前半——HDR 线性域调色与 LUT 输入空间拒绝（GPU 验证）
+
+**HDR 必须在线性光里调，且必须在 tone mapping 之前**（方案 §5.1/§5.2）。在既有 `HdrColorTests`
+里加了两项真机 GPU 验证（PQ 与 HLG、有限/全范围各一轮，`hdrToneTests::luminance` 是独立的
+BT.2390 参考实现）：
+
+1. **+1 EV = 场景线性 ×2**：调色开启 +1 EV 后，HDR→SDR 输出必须等于“把参考亮度翻倍再 tone map”。
+   结果 `HDR_TONE_GRADE hlg=0 linearError=0.00120`、`hlg=1 linearError=1.04e-05`（阈值 0.014），
+   说明曝光确实作用在线性域、且在 tone mapping 之前；
+2. **输入空间不匹配必须拒绝**：HDR 内容选 sRGB 显示参考 → `colorLutNotice()` 非空、LUT 不参与
+   （像素与“无 LUT”逐字节一致）。SDR 侧的对称用例（SDR 内容选 PQ）加在
+   `veyra_color_grade_gpu_tests`：`PASS a PQ LUT on SDR content is refused with a notice instead
+   of applied silently`。
+
+拒绝结果会通过 `PlayerSnapshot::colorStatus` 追加显示（状态面板“实际颜色链路”一行可见），
+不只写在日志里。日志：`[color-grade] lut input space rejected space=… hdrContent=…`。
+
+**回归**：`veyra_color_grade_tests` 23/23、`veyra_color_grade_gpu_tests`（连续 8 次）全过、
+`veyra_color_lut_tests`、`veyra_color_look_tests`、`veyra_hdr_color_tests`、
+`veyra_ui_contract_tests`、`veyra_repair_preset_tests`、`veyra_repair_contract_tests` 191/0 全 exit 0。
+
+**T6 剩余（未做，不冒充完成）**：导出的 MaxCLL / MaxFALL 重算（导出是流式写头，静态元数据要在
+写 header 前就知道，需要额外一遍全片直方图 + NVENC SEI 接线）、预览/截图/导出三入口像素一致性
+验收、交付闸门与交付报告。
+
 ## 2026-09-17 色彩页 P1：T5-b 命名色彩预设 + `.vpcolor` + 修两个空下拉（真机烟测通过）
 
 新增 `include/veyra/engine/ColorLookStore.h` + `src/engine/ColorLookStore.cpp`：

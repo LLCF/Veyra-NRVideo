@@ -239,6 +239,10 @@ public:
     ID3D12Resource* confidenceResource() const { return confTex_.Get(); }
     // Test-only borrowed ingress output. Read after process, restore NON_PIXEL_SHADER_RESOURCE.
     ID3D12Resource* diagnosticLinearInput() const { return srcRgba_.Get(); }
+    // Non-empty when the colour stage refused the referenced LUT (input space
+    // does not match the content domain). The engine surfaces this in the
+    // status panel so the refusal is visible, not only logged.
+    const std::wstring& colorLutNotice() const { return colorLutNotice_; }
     // Isolated diagnostics only: existing constant guidance, borrowed lifetime.
     // A caller writing before the first real frame must restore COMMON state.
     ID3D12Resource* diagnosticDepthResource(bool frameGeneration) const { return frameGeneration?depthTex_.Get():nrZeroDepth_.Get(); }
@@ -333,6 +337,7 @@ private:
     ComputePass downsamplePass_,residualPass_,flowAdaptPass_;
     // --- colour grade (v4): CPU-baked tables read by the ingest shaders -----
     bool colorActive_=false;
+    std::wstring colorLutNotice_;
     bool colorDirty_=true;
     ColorGradeTables colorTables_;
     ComPtr<ID3D12Resource> colorCurveTex_,colorHueTex_,colorLumTex_,colorLutTex_;

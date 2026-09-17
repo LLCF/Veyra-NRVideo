@@ -1246,6 +1246,9 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 ++frames;{std::lock_guard lock(mutex_);snapshot_.metrics=measured;snapshot_.colorStatus=gd.hdrOutput?(graph.hdr10Output()?L"HDR → HDR10 / PQ":L"HDR → scRGB / 浮点"):gd.hdrInput?L"HDR → SDR色调映射":L"SDR → SDR";snapshot_.position=(isCapture||isImage?pts:lastFilePresentedMs)/1000;snapshot_.frames=sourceFrames;snapshot_.generated=graphStats.fgGeneratedFrames;snapshot_.lateMs=lateness;snapshot_.lateP95Ms=sorted.empty()?0:sorted[size_t((sorted.size()-1)*0.95)];
                     // Measured playback speed: media-PTS advance per wall time
                     // over ~1s windows (1.0 = normal speed), resampled on seek.
+                    // A rejected LUT input space must be visible, not only logged
+                    // (plan v5.2: never apply a mismatched LUT silently).
+                    if(!graph.colorLutNotice().empty())snapshot_.colorStatus+=L"；"+graph.colorLutNotice();
                     const auto speedNow=Clock::now();
                     if(playbackSpeedLastWall==Clock::time_point()||pts+0.5<playbackSpeedLastPts){playbackSpeedLastPts=pts;playbackSpeedLastWall=speedNow;}
                     else if(std::chrono::duration<double>(speedNow-playbackSpeedLastWall).count()>=0.9){

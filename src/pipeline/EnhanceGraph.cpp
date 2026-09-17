@@ -108,6 +108,16 @@ EnhanceGraph::~EnhanceGraph()
 // or dispatches when desc.color.enabled is false, so the "off" path costs zero.
 // ---------------------------------------------------------------------------
 namespace {
+// Settings carry the LUT name as UTF-16; log it as UTF-8 (never narrow
+// character by character, and never build a range from two temporaries).
+std::string utf8Of(const std::wstring& text){
+    if(text.empty())return {};
+    const int size=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,text.data(),int(text.size()),nullptr,0,nullptr,nullptr);
+    if(size<=0)return "<invalid>";
+    std::string out(std::size_t(size),'\0');
+    WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,text.data(),int(text.size()),out.data(),size,nullptr,nullptr);
+    return out;
+}
 ComPtr<ID3D12Resource> makeColorTable(ID3D12Device* device,uint32_t width){
     return makeTexture(device,width,1,DXGI_FORMAT_R32G32B32A32_FLOAT,false);
 }
@@ -167,25 +177,36 @@ void EnhanceGraph::uploadColorTables(ID3D12GraphicsCommandList* list){
     copyTable(colorLumTex_.Get(),upColorLum_.Get(),ColorGradeTables::kLumEntries);
     if(colorLutPending_&&!colorLutUpload_.empty()){
         const unsigned size=colorLutPending_;
-        const uint64_t bytes=uint64_t(size)*size*size*16;
+        // D3D12 requires the copy source row pitch to be 256-byte aligned. A
+        // tight size*16 pitch is invalid for every LUT size that is not a
+        // multiple of 16 (2, 3, ... 17, 33, ... - most creative LUTs included),
+        // and an invalid footprint lets the driver read/write past the staging
+        // buffer. Measured symptom: a 2-cube upload crashed the next D3D12 call
+        // with a fail-fast in the host process. Pad rows instead.
+        constexpr unsigned kRowPitchAlignment=256;
+        const unsigned rowPitch=(size*16u+kRowPitchAlignment-1)/kRowPitchAlignment*kRowPitchAlignment;
+        const uint64_t bytes=uint64_t(rowPitch)*size*size;
         auto& staging=colorLutStaging_[colorLutStagingSlot_];
         colorLutStagingSlot_=(colorLutStagingSlot_+1)%colorLutStaging_.size();
         staging=makeUploadBuffer(context_.device(),bytes);
         void* mapped=nullptr;
         if(staging&&SUCCEEDED(staging->Map(0,nullptr,&mapped))&&mapped){
-            auto* dst=static_cast<float*>(mapped);
-            for(size_t i=0;i<size_t(size)*size*size;++i){
-                dst[i*4+0]=colorLutUpload_[i*3+0];
-                dst[i*4+1]=colorLutUpload_[i*3+1];
-                dst[i*4+2]=colorLutUpload_[i*3+2];
-                dst[i*4+3]=1.0f;
+            for(unsigned z=0;z<size;++z)for(unsigned y=0;y<size;++y){
+                auto* dst=reinterpret_cast<float*>(static_cast<uint8_t*>(mapped)+std::size_t(z)*rowPitch*size+std::size_t(y)*rowPitch);
+                for(unsigned x=0;x<size;++x){
+                    const std::size_t i=(std::size_t(z)*size+y)*size+x;
+                    dst[x*4+0]=colorLutUpload_[i*3+0];
+                    dst[x*4+1]=colorLutUpload_[i*3+1];
+                    dst[x*4+2]=colorLutUpload_[i*3+2];
+                    dst[x*4+3]=1.0f;
+                }
             }
             staging->Unmap(0,nullptr);
             tracker_.transition(list,colorLutTex_.Get(),D3D12_RESOURCE_STATE_COPY_DEST);
             D3D12_TEXTURE_COPY_LOCATION d{},s{};
             d.pResource=colorLutTex_.Get();d.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;d.SubresourceIndex=0;
             s.pResource=staging.Get();s.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-            s.PlacedFootprint.Footprint={DXGI_FORMAT_R32G32B32A32_FLOAT,size,size,size,size*16};
+            s.PlacedFootprint.Footprint={DXGI_FORMAT_R32G32B32A32_FLOAT,size,size,size,rowPitch};
             list->CopyTextureRegion(&d,0,0,0,&s,nullptr);
             tracker_.transition(list,colorLutTex_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }else{
@@ -358,14 +379,35 @@ bool EnhanceGraph::createResources()
         // Load the optional .cube the settings reference; a LUT that cannot be
         // resolved disables the lookup instead of sampling a placeholder.
         if(desc_.color.hasLut()){
-            engine::ColorLutData lut;
-            const engine::ColorLutStore store(runtime::localDataDirectory());
-            if(store.resolve(desc_.color.lutNameString(),lut)&&lut.valid()&&setColorLut(lut.rgb.data(),unsigned(lut.size))){
-                veyra::log::info("color-grade",std::format("lut loaded name={} size={}",std::string(desc_.color.lutNameString().begin(),desc_.color.lutNameString().end()),lut.size));
-            }else{
+            // Plan v5.2: the declared input space must match the content domain.
+            // A display-referred (sRGB) LUT on HDR content, or a PQ LUT on SDR
+            // content, is refused here instead of being applied silently with
+            // values that mean something else than the LUT author assumed.
+            const bool hdrContent=desc_.hdrInput;
+            const int space=desc_.color.lutInputSpace;
+            const bool mismatch=hdrContent?(space==engine::ColorSettings::kLutInputSrgb):(space==engine::ColorSettings::kLutInputPq);
+            if(mismatch){
+                colorLutNotice_=hdrContent?L"LUT 已禁用：HDR 内容不能使用 sRGB 显示参考输入空间（改选 Cineon Log 或 PQ）"
+                                        :L"LUT 已禁用：SDR 内容不能使用 PQ 输入空间（改选 Cineon Log 或 sRGB 显示参考）";
                 desc_.color.lutStrength=0.0f;
                 refreshColorTables();
-                veyra::log::warn("color-grade","referenced lut unavailable; colour grade continues without it");
+                veyra::log::warn("color-grade",std::format("lut input space rejected space={} hdrContent={} name bytes={} (grade continues without the lookup)",space,hdrContent?1:0,desc_.color.lutNameString().size()));
+            }else{
+                colorLutNotice_.clear();
+                engine::ColorLutData lut;
+                const engine::ColorLutStore store(runtime::localDataDirectory());
+                if(store.resolve(desc_.color.lutNameString(),lut)&&lut.valid()&&setColorLut(lut.rgb.data(),unsigned(lut.size))){
+                    // The name must be converted once: building the log argument
+                    // from lutNameString().begin() and .end() created two
+                    // different temporaries, so the range constructor computed a
+                    // bogus distance and read past both buffers (crash in the LUT
+                    // load path, reproduced by the GPU contract test).
+                    veyra::log::info("color-grade",std::format("lut loaded name={} size={}",utf8Of(desc_.color.lutNameString()),lut.size));
+                }else{
+                    desc_.color.lutStrength=0.0f;
+                    refreshColorTables();
+                    veyra::log::warn("color-grade","referenced lut unavailable; colour grade continues without it");
+                }
             }
         }
         veyra::log::info("color-grade",std::format("stage enabled tables={}/{}/{} lutInputSpace={} lut={}",
