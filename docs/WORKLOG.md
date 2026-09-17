@@ -1,5 +1,38 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-17 采集卡 YUY2 实测：调色链路开/关各 2 分钟延迟对比
+
+命令（同一张卡、同一格式、同一信号，各 120 s，窗口内 0 丢帧）：
+
+```
+veyra.exe capture:0:0:0 --smoke-seconds 120                     # 链路关
+veyra.exe capture:0:0:0 --smoke-seconds 120 --color-grade=1.0   # 链路开（+1 EV）
+```
+
+设备事实：`capture:0:0` 的原生 subtype = `0x32595559`（**YUY2**），`SetFormat hr=0`，
+输入 1920×1080、`callbackFps=60.01`、`received≈7165 processed≈7163 dropped=0`。
+原始日志：`logs/color/capture-latency/chain-off.log` / `chain-on.log`（`[capture-timing]` 每 5 s 一条，
+取末尾各 20 个窗口平均）。
+
+| 指标（均值） | 关 | 开 | 差 |
+| --- | --- | --- | --- |
+| `gpuColorP95Ms`（YUV→线性 + 调色，融合同一 dispatch） | **0.040 ms** | **0.077 ms** | **+0.037 ms** |
+| `callbackToPresentReturnP95Ms` | 2.630 | 2.613 | −0.017（噪声内） |
+| `readAgeMs` | 0.818 | 0.805 | −0.013 |
+| `gpuReadyP95Ms` | 0.695 | 0.713 | +0.018 |
+| `processCpuP95Ms` | 0.421 | 0.433 | +0.012 |
+| `presentCpuP95Ms` | 0.347 | 0.348 | +0.001 |
+| `callbackFps` | 60.01 | 60.01 | 0 |
+
+**结论**：这张卡的 YUY2 1080p60 输入下，调色链路（无 LUT）每帧多花 **≈0.037 ms GPU 时间**，
+占该指标自身的 1.5%；**软件侧 ingress→present-return 延迟没有可测出的变化**（差 0.02 ms，
+低于该指标噪声），两轮都满 60 fps、零丢帧。
+
+**必须说清的边界**：这里量的是**进程内** `callbackToPresentReturn`（日志自己都标了
+“not HDMI-to-display latency”），**不是**玻璃到玻璃延迟；真正的端到端要拿手机 240 fps
+拍“显示器计时器 → 采集卡 → 软件 → 屏幕”的环路。另外本次只测了无 LUT 的调色，
+3D LUT 会再加每像素 4 次纹理取样，未测。
+
 ## 2026-09-17 用户验收反馈四条（曲线端点/删参数滑条/混色器改版/色轮间距）+ 混色器色彩空间
 
 1. **曲线端点拖不动**：拖动时我把索引硬夹在 `[1, count-2]`，端点永远动不了。现在端点可拖，
@@ -45,6 +78,31 @@
 **DELIVERY SHORT GATE PASS**（`logs/delivery/ca89dfb6c9b8416999307a81f5aaa752/result.json`）。
 
 ## 2026-09-17 诊断：HEVC 文件打不开 + 导出中止（未改产品代码）
+
+### 后续：HEVC 改走 D3D11VA（用户决定"一劳永逸"，同日晚）
+
+承接本条诊断。动作与结果：
+
+**改动**：`FFmpegVideoDecoder::openD3D11VA()`（同适配器私有 D3D11 设备、8 槽共享纹理环、D3D11→D3D12
+共享 fence）、`FramePacket::hardwareSurface`（`HardwareSurfaceInput`）、`EnhanceGraph::process()` 新增硬件面
+参数并让 `AV_PIX_FMT_D3D11` 与 D3D12VA 共用同一段 SRV/等待逻辑、`MediaFileSource` 里 **HEVC→D3D11VA、
+其余编码仍走 D3D12VA**、`AdapterInfo.luid`、`veyra_media` 链接 `d3d11`。
+
+**实测约束（重要）**：本机驱动**拒绝在 DXVA 解码输出纹理上开 NT 句柄共享**
+（`[AVHWFramesContext] Could not create the texture (80070057)`）；自建 NV12 纹理只加 `SHARED_NTHANDLE`
+同样被拒，必须 `D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE`。因此最终结构是
+**解码 → GPU 拷进自己的共享纹理环 → fence 交接 → D3D12 队列 Wait 后采样**（零回读、零 CPU 等待），
+解码对齐留白由图入口的绝对 texel 索引采样天然避开。
+
+**验证**（`veyra_hw_import_image_tests <file> <png-prefix>`，硬解 vs 软解全图逐像素对比）：
+
+- 1280x720 HEVC / 3840x2160 HEVC / **IMAX 3840x2024 HEVC（用户文件）** → `path=d3d11va`，
+  `FULL_IMAGE_PASS=1 worst=0`（4 帧全图 MAE=0）。
+- 1080x1920 H.264 → 仍 `path=d3d12va`，`worst=0`，无回归。
+- 测试内 `hardwareImportFixtures`（1/3 切片阵列）同样通过。
+
+**未验证**：Veyra 本体 smoke（构建目录 `veyra.exe` 被另一个运行中的实例占用，编译全过、只差最后链接）、
+10-bit P010、AMD/Intel、采集低延迟路径。**本轮未提交、未发布、未替换便携包。**
 
 用户报两件事：`IMAX.Laser.Pre.Show.New.2160P.DDP5.1.Atmos-ZhiLuan.mkv` 打不开；另一台机器上
 连续两次导出跑到一半中止（`C:\Users\123\Desktop\导出失败\`）。
