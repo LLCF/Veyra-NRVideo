@@ -22,6 +22,7 @@
 #include "veyra/gfx/CommandSlotRing.h"
 #include "veyra/gfx/D3D12DeviceContext.h"
 #include "veyra/ngx/DlssFgBackend.h"
+#include "veyra/ngx/FgCompatibilitySession.h"
 #include "veyra/ngx/AdaMfgUnlock.h"
 #include "veyra/ngx/AmpereMfgUnlock.h"
 #include "veyra/ngx/NvapiArchSpoof.h"
@@ -252,6 +253,14 @@ bool EnhanceGraph::initialize(const EnhanceGraphDesc& desc)
 {
     failedBackend_=engine::FailedBackend::Infrastructure;
     if(!desc.protection.validate().empty())return false;
+    if(desc.compatibilityPreflight&&!desc.compatibilityPreflight(desc,context_)){
+        failedBackend_=engine::FailedBackend::Fg;
+        veyra::log::error("graph","FG compatibility preflight failed; see fg-probe log");return false;
+    }
+    if(desc.fgMotionProbe){
+        const auto d=desc.fgMotionProbe->GetDesc();ComPtr<ID3D12Device> device;
+        if(!desc.enableFg||desc.noFeatures||desc.noNgx||d.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE2D||d.Width!=desc.workWidth||d.Height!=desc.workHeight||d.Format!=DXGI_FORMAT_R16G16_FLOAT||d.DepthOrArraySize!=1||d.MipLevels!=1||d.SampleDesc.Count!=1||(d.Flags&D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE)||FAILED(desc.fgMotionProbe->GetDevice(IID_PPV_ARGS(&device)))||device.Get()!=context_.device())return false;
+    }
     if(desc.srMotionProbe){
         const auto d=desc.srMotionProbe->GetDesc();ComPtr<ID3D12Device> device;
         if(!desc.enableSr||desc.noFeatures||desc.noNgx||d.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE2D||d.Width!=desc.workWidth||d.Height!=desc.workHeight||d.Format!=DXGI_FORMAT_R16G16_FLOAT||d.DepthOrArraySize!=1||d.MipLevels!=1||d.SampleDesc.Count!=1||(d.Flags&D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE)||FAILED(desc.srMotionProbe->GetDevice(IID_PPV_ARGS(&device)))||device.Get()!=context_.device()){
@@ -642,11 +651,7 @@ void EnhanceGraph::applyAdaMfgUnlock()
         return;
     }
     const auto modulePath = std::filesystem::path(desc_.runtimeAbsPath) / L"nvngx_dlssg.dll";
-    HMODULE module = GetModuleHandleW(L"nvngx_dlssg.dll");
-    if (module == nullptr) {
-        module = LoadLibraryExW(modulePath.c_str(), nullptr,
-                                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
-    }
+HMODULE module = fgCompatibility_ ? fgCompatibility_->provider() : nullptr;
     if (module == nullptr) {
         veyra::log::warn("ada-mfg", std::format("DLSS-G runtime could not be opened for the unlock (path={} win32={})",
                                                 modulePath.string(), GetLastError()));
@@ -693,22 +698,16 @@ void EnhanceGraph::prepareAmpereFgSpoof()
     }
 
     const auto modulePath = std::filesystem::path(desc_.runtimeAbsPath) / L"nvngx_dlssg.dll";
-    HMODULE module = GetModuleHandleW(L"nvngx_dlssg.dll");
-    if (module == nullptr) {
-        module = LoadLibraryExW(modulePath.c_str(), nullptr,
-                                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
-    }
+HMODULE module = fgCompatibility_ ? fgCompatibility_->provider() : nullptr;
     if (module == nullptr) {
         veyra::log::warn("ampere-mfg", std::format("DLSS-G runtime could not be preloaded for the architecture spoof (path={} win32={})",
                                                    modulePath.string(), GetLastError()));
         return;
     }
-    // Ampere default: tell the provider it runs on Blackwell (0x1B0). That is
-    // what makes its frame-generation availability gate pass; the sm_86 kernel
-    // rewrite is what makes the programs actually run. Ada/Blackwell never reach
-    // this function. VEYRA_TEST_NVAPI_SPOOF_ARCH overrides the reported id (e.g.
-    // 0x190 for Ada, 0x170 to disable the trick), 0 refuses the spoof entirely.
-    uint32_t spoofArchitecture = ngx::NvapiArchSpoof::kArchBlackwell;
+    // Preserve real architecture for DL4RT's hardware-specific network choice.
+    // Upstream changes capability policy independently of the NVAPI query.
+    // Architecture substitution remains available only for diagnostic tests.
+    uint32_t spoofArchitecture = 0;
     {
         wchar_t overrideText[16]{};
         if (GetEnvironmentVariableW(L"VEYRA_TEST_NVAPI_SPOOF_ARCH", overrideText, 16) > 0) {
@@ -716,6 +715,7 @@ void EnhanceGraph::prepareAmpereFgSpoof()
         }
     }
     if (spoofArchitecture == 0) {
+        veyra::log::info("ampere-mfg", "preserving real NVAPI architecture; applying scoped compatibility policy only");
         return;
     }
     ampereSpoofed_ = ngx::NvapiArchSpoof::install(module, spoofArchitecture);
@@ -732,8 +732,7 @@ void EnhanceGraph::applyAmpereMfgUnlock()
     // Hard architecture gate: only RTX 30 (Ampere GA10x) takes this path. Ada
     // keeps its own unlock and Blackwell keeps its native multi-frame path.
     // VEYRA_TEST_FORCE_AMPERE_UNLOCK exists so the patch itself can be checked
-    // on a non-Ampere host (does rewriting all 69 fatbins leave the runtime
-    // functional?); it never run in a product session.
+    // on a non-Ampere host; it is not enabled in a product session.
     wchar_t forced[2]{};
     const bool forceOnAnyAdapter=GetEnvironmentVariableW(L"VEYRA_TEST_FORCE_AMPERE_UNLOCK",forced,2)>0;
     if (!forceOnAnyAdapter&&!ngx::AmpereMfgUnlock::adapterIsAmpere(adapter.vendorId, adapter.deviceId)) {
@@ -745,11 +744,7 @@ void EnhanceGraph::applyAmpereMfgUnlock()
         return;
     }
     const auto modulePath = std::filesystem::path(desc_.runtimeAbsPath) / L"nvngx_dlssg.dll";
-    HMODULE module = GetModuleHandleW(L"nvngx_dlssg.dll");
-    if (module == nullptr) {
-        module = LoadLibraryExW(modulePath.c_str(), nullptr,
-                                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
-    }
+HMODULE module = fgCompatibility_ ? fgCompatibility_->provider() : nullptr;
     if (module == nullptr) {
         veyra::log::warn("ampere-mfg", std::format("DLSS-G runtime could not be opened for the RTX 30 unlock (path={} win32={})",
                                                    modulePath.string(), GetLastError()));
@@ -777,8 +772,8 @@ void EnhanceGraph::applyAmpereMfgUnlock()
     // the kernel rewrite runs here. Without the spoof the old retarget is kept.
     const auto spoofState = ngx::NvapiArchSpoof::snapshot();
     const bool spoofed = ampereSpoofed_ && spoofState.installed;
-    const auto state = ngx::AmpereMfgUnlock::apply(module, !spoofed);
-    veyra::log::info("ampere-mfg", std::format("adapter deviceId=0x{:04X} unlock applied={} spoofed={} reportedArch=0x{:X} runs={} slots={} fatbins={} lea={} gates={} ({})",
+    const auto state = ngx::AmpereMfgUnlock::apply(module, !spoofed, adapter.luid);
+    veyra::log::info("ampere-mfg", std::format("adapter deviceId=0x{:04X} unlock applied={} spoofed={} reportedArch=0x{:X} runs={} slots={} inventoryFatbins={} inventoryLea={} gates={} ({})",
                                                adapter.deviceId, state.applied ? 1 : 0,
                                                spoofed ? 1 : 0, spoofState.reportedArchitecture, state.slotRuns,
                                                state.slotPointers,
@@ -856,14 +851,36 @@ bool EnhanceGraph::initNgxFeatures()
         return false;
     }
 
-    // RTX 30 needs the NVAPI architecture spoof in place before the provider is
-    // initialized below. No-op on Ada/Blackwell and when FG is off.
-    prepareAmpereFgSpoof();
+    // Publish the programs before Init: the provider can register/cache CUDA
+    // programs and capabilities during Init, before GetCapabilityParameters.
+    if(!ngx::FgCompatibilitySession::processHealthy()){
+        failedBackend_=engine::FailedBackend::NgxCore;
+        log::error("graph","compatibility rollback was not verified; restart required before NGX initialization");
+        return false;
+    }
+    if (fgEnabled_ && desc_.frameGenerationBackend==engine::FrameGenerationBackend::Dlss &&
+        ngx::FgCompatibilitySession::requested(context_.adapter().vendorId,context_.adapter().deviceId)) {
+        failedBackend_=engine::FailedBackend::Fg;
+        fgCompatibility_=std::make_unique<ngx::FgCompatibilitySession>();
+        if(!fgCompatibility_->open(context_.device(),context_.adapter().vendorId,context_.adapter().deviceId,desc_.runtimeAbsPath))return false;
+        prepareAmpereFgSpoof();
+        applyAdaMfgUnlock();
+        applyAmpereMfgUnlock();
+        if(!fgCompatibility_->prepareDriver(desc_.runtimeAbsPath,projectId.c_str(),engineVersion.c_str()))return false;
+        std::array<ID3D12Resource*,2> real={videoFrame_[0].Get(),videoFrame_[1].Get()};
+        std::array<ID3D12Resource*,kGeneratedPoolSlots> generated{};
+        for(size_t i=0;i<generated.size();++i)generated[i]=genFrame_[i].Get();
+        if(!fgCompatibility_->bindResources(real,generated))return false;
+    }
 
+    failedBackend_=engine::FailedBackend::NgxCore;
     coreHost_ = std::make_unique<ngx::NgxCoreHost>();
     Status st = Status::Ok;
-    if (!coreHost_->initialize(context_.device(), desc_.runtimeAbsPath.c_str(),
-            projectId.c_str(), engineVersion.c_str(), st)) {
+    if(fgCompatibility_&&!fgCompatibility_->beginInitialization())return false;
+    const bool initialized=coreHost_->initialize(context_.device(), desc_.runtimeAbsPath.c_str(),
+            projectId.c_str(), engineVersion.c_str(), st);
+    const bool initRestored=!fgCompatibility_||fgCompatibility_->endInitialization(initialized);
+    if (!initialized || !initRestored) {
         return false;
     }
 
@@ -871,42 +888,20 @@ bool EnhanceGraph::initNgxFeatures()
     fgMultiFrameMax_ = 0;
     if (fgEnabled_ && desc_.frameGenerationBackend==engine::FrameGenerationBackend::Dlss) {
     failedBackend_=engine::FailedBackend::Fg;
-    // RTX 40 series would report only 2X here; open the arch gate in the mapped
-    // DLSS-G runtime first so the capability query below sees multi-frame. On
-    // every other architecture this is a no-op.
-    applyAdaMfgUnlock();
-    // RTX 30 has no sm_86 program in the provider at all; the Ampere unlock
-    // rebuilds every fatbin and re-targets the arch gates before the query.
-    applyAmpereMfgUnlock();
     fgBackend_ = std::make_unique<ngx::DlssFgBackend>();
+    fgBackend_->setCompatibility(fgCompatibility_.get());
     ngx::DlssFgBackend::Capability fgCaps{};
     const bool fgAvailable = fgBackend_->queryCapability(*coreHost_, fgCaps, st);
     if (!fgAvailable) {
-        if (ngx::AmpereMfgUnlock::applied()) {
-            // The unlock rewrites the provider's programs, but the runtime's own
-            // availability gate still refuses sm_86. A real RTX 3060 (field log
-            // 2026-09-17) showed that forcing the capability here only moves the
-            // failure to CreateFeature (0xBAD0000B UnableToInitializeFeature)
-            // and then tears the whole frame-generation stage down with a
-            // generic error. Fail closed with the actual reason instead. If a
-            // 30-series configuration is ever shown to work, the controlled
-            // retry belongs behind an explicit, verified capability path - not
-            // behind an assumption.
-            veyra::log::error("ampere-mfg", std::format(
-                "runtime reported FG unavailable (MultiFrameCountMax={}); the sm_86 unlock is applied but this driver/runtime combination does not enable frame generation - failing closed instead of forcing CreateFeature",
-                fgCaps.multiFrameCountMax));
-            return false;
-        } else {
-            veyra::log::error("graph", "FG unavailable; fail closed");
-            return false;
-        }
+        veyra::log::error("graph", "FG capability startup failed; see native results and compatibility stage above");
+        return false;
     }
         // Publish the capability before validating the request so a rejected
         // multiplier still teaches the caller what this GPU supports.
         fgCapsAvailable_ = fgCaps.available;
         fgMultiFrameMax_ = fgCaps.multiFrameCountMax;
         if (ngx::AdaMfgUnlock::applied() && fgMultiFrameMax_ <= 1) {
-            veyra::log::warn("ada-mfg", std::format("unlock is installed but the runtime still reports maxGeneratedFrames={}; the active DLSS-G is not the audited local build", fgMultiFrameMax_));
+            veyra::log::warn("ada-mfg", std::format("provider patch installed, but startup maximum remains {}; inspect provider generation and capability query", fgMultiFrameMax_));
         }
         // Test-only capability override: lets the Ada (40-series) ceiling and the
         // capability-driven UI/recovery paths be exercised on a 50-series host
@@ -1051,7 +1046,7 @@ bool EnhanceGraph::initNgxFeatures()
         bool warmOk = true;
         for(uint32_t sub=1;sub<=fe.multiFrameCount;++sub){
             fe.multiFrameIndex=sub;
-            warmOk=fgBackend_->evaluate(wlist,ngxParams_,fe,st)&&warmOk;
+            if (!fgBackend_->evaluate(wlist,ngxParams_,fe,st)) { warmOk=false; break; }
             D3D12_RESOURCE_BARRIER u{};u.Type=D3D12_RESOURCE_BARRIER_TYPE_UAV;u.UAV.pResource=fe.outputInterpolated;wlist->ResourceBarrier(1,&u);
         }
         if(!warmOk){failedBackend_=engine::FailedBackend::Fg;return false;}
@@ -1306,6 +1301,12 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
     }
     uint32_t slot = 0;
     if (uploadFences_[parity] && !context_.waitForFenceValue(uploadFences_[parity])) return false;
+    // Presentation returns the shared output to COMMON before this parity
+    // can be written again. Direct graph callers also need the GPU dependency.
+    if(presentationFences_[parity]){
+        const HRESULT hr=context_.directQueue()->Wait(presentationFences_[parity].Get(),presentationValues_[parity]);
+        if(FAILED(hr)){veyra::log::error("graph",std::format("presentation handoff wait hr=0x{:X}",unsigned(hr)));return false;}
+    }
     hardwareInputFrames_[parity].reset();
     if(frame->format==AV_PIX_FMT_D3D12||frame->format==AV_PIX_FMT_D3D11){
         auto* retained=av_frame_clone(frame);
@@ -1831,9 +1832,9 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
       for(uint32_t sub=1;sub<desc_.fgMultiplier;++sub){
         const uint32_t generatedSlot=parity+(sub-1)*2;
         auto* flist=ring_.acquireNext(slot,st); if(!flist)return false;
-        auto* motion=haveFlow?baseFlow_.Get():nrZeroMotion_.Get();
+        auto* motion=desc_.fgMotionProbe?desc_.fgMotionProbe:(haveFlow?baseFlow_.Get():nrZeroMotion_.Get());
         tracker_.transition(flist,videoFrame_[parity].Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        tracker_.transition(flist,motion,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        if(!desc_.fgMotionProbe)tracker_.transition(flist,motion,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         tracker_.transition(flist,depthTex_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         tracker_.transition(flist,genFrame_[generatedSlot].Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         // One status resource for the whole input-frame pair, just like the
@@ -1850,8 +1851,8 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
         fe.multiFrameCount=desc_.fgMultiplier-1;fe.multiFrameIndex=sub;
         fe.frameId=realFrameIndex_+1;
         // FG consumer adapter: current->previous pixel flow -> normalized reverse flow.
-        fe.mvecScaleX=haveFlow?-1.0f/static_cast<float>(workW_):1.0f;
-        fe.mvecScaleY=haveFlow?-1.0f/static_cast<float>(workH_):1.0f;
+        fe.mvecScaleX=(haveFlow||desc_.fgMotionProbe)?-1.0f/static_cast<float>(workW_):1.0f;
+        fe.mvecScaleY=(haveFlow||desc_.fgMotionProbe)?-1.0f/static_cast<float>(workH_):1.0f;
         if(sub==1)gpuTimer_.mark(flist,GpuStage::FgBatch);
         const auto timingStage=static_cast<GpuStage>(unsigned(GpuStage::Fg1)+sub-1);gpuTimer_.mark(flist,timingStage);
         if(!fgBackend_->evaluate(flist,ngxParams_,fe,st)){failedBackend_=engine::FailedBackend::Fg;return false;}
@@ -1998,7 +1999,12 @@ ID3D12Resource* EnhanceGraph::generatedFrameResource(uint32_t slot) const
 void EnhanceGraph::shutdown()
 {
     if (!initialized_ && !nrAdapter_ && !nvof_ && !srcRgba_) return;
+    for(unsigned i=0;i<2;++i)if(presentationFences_[i]){
+        const HRESULT hr=context_.directQueue()->Wait(presentationFences_[i].Get(),presentationValues_[i]);
+        if(FAILED(hr))veyra::log::error("graph",std::format("presentation teardown wait hr=0x{:X}",unsigned(hr)));
+    }
     (void)ring_.drainQueue();(void)ring_.discardRecording();
+    presentationFences_={};presentationValues_={};
     for(auto& input:hardwareInputFrames_)input.reset();
     Status st = Status::Ok;
     if (nv12Ctx_ != nullptr) { sws_freeContext(nv12Ctx_); nv12Ctx_ = nullptr; }
@@ -2046,9 +2052,8 @@ void EnhanceGraph::shutdown()
     if (coreHost_) coreHost_->shutdown();
     // Restore the DLSS-G runtime image only after the NGX core released the
     // feature (the unlock is process memory only; the file on disk is untouched).
-    ngx::AdaMfgUnlock::release();
-    ngx::AmpereMfgUnlock::release();
-    ngx::NvapiArchSpoof::release();
+    fgCompatibility_.reset();
+    ampereSpoofed_=false;
 
     // Staged explicit release (scope-end destructors then have nothing left).
     decPass_ = ComputePass{};

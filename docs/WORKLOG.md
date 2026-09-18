@@ -1,5 +1,176 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-18 RTX3060 开启 DLSS 补帧卡死，r4 候选
+
+依据用户 `Desktop/logs/`：Create 成功、正式 Evaluate `0xBAD00002 / 0xC0000005` 后子进程停在 stage3。修正全局 Blackwell 架构伪装及全部69个 fatbin 改写，按固定上游只重建25个注册程序和精确匹配的字体程序，保留真实架构；补齐描述符长度、CUDA 函数预检和 D3D12 LUID 匹配。失败探测子进程直接退出，绕过异常运行库的清理挂死，保留错误和播放器恢复。
+
+实际修改、命令、失败记录和证据见 `docs/RTX3060_FG_FREEZE_2026-09-18.md`。构建 exit0；本机5070上强制Ampere/Ada生命周期2X至6X、播放设置切换、6X内容检查通过；真实异常探测后3107ms恢复播放。最终 delivery `logs/delivery/dc4993094fea4a4a8f6bdd15b3ab78e5/result.json` PASS，61.41s。EXE SHA256 `4DB42A6D9D74065FA5708FA9A7755FF6751323A44488F6D0BB710AF0724D5428`。
+
+最初字体写入因Windows写时复制页的实际保护值变化被拒绝，已按上游工作集检查修正并重测；原失败日志保留。RTX3060实卡未执行，架构选择是待目标机器验证的根因假设，不能把恢复播放算成6X支持。保持隔离分支，无合并、推送或发布，无SDK/运行时入Git。下一步为r4目标3060的真实2X/6X复测。
+
+r4完整包位于 `C:/veyra-test-packages/post140-20260918-r4/`，ZIP SHA256 `6F4DF97C899FF8EDB028AC6769A78932199C99233F53170615DE7014662B9460`，113文件清单/哈希/排除项审计通过。解压包以最小PATH运行本机强制Ampere/Ada的NR+6X均通过，分别85/295、116/450源帧/生成帧，截图非黑屏、正常退出，DLL来自包内。完整命令见上述修复文档。
+
+## 2026-09-18 按用户要求取消导出门禁与整片复检
+
+新日志 `export-worker-17508(1).log` 实际已经编码 51248 帧成功，收尾后 CPU 单线程重解码校验从 19:37:28.765 持续到 19:48:43.861，约额外 11 分 15 秒，校验也是 PASS。日志没有最终界面报错，不能归因于驱动。按本次明确要求，取消产品的 120 帧 CFR 资格扫描、逐源帧 CFR 拒绝、独立 FG 预探测、音频 codec-query/corrupt-flag 拦截，以及全部输出重开/逐帧解码复检；编码、封装和文件关闭成功后直接保存。
+
+不能删检查后让 VFR 音画跑偏：编码器仍使用递增帧号，封装通过在途时间戳队列保留真实源时间间隔，FG 均分对应源帧间隔；每张已解码源帧均保留。缺失/倒退 PTS 自动补齐并记录，损坏源的原始节奏无法还原。NVENC 版本/能力查询只诊断，实际调用决定是否可用，失败保留系统编码器回退。HDR 选择 H.264 时自动改用 HEVC Main10 并说明。UI 导出不再等待预览成功出帧/应用完效果，独立 worker 冻结当前有效请求设置。实际硬件/编码/封装/写盘失败、内存边界和已有文件保护仍保留，不把失败冒充成功。
+
+修改：`VideoExportJob.cpp`、`NvencD3D12Encoder.cpp`、`ExportJobManager.cpp`、`AppShell.cpp`；补充 `ExportTimingTests.ps1` 与 worker 探测拒绝不阻断的回归。`cmd.exe /c out\build\scheduling-audit-build.cmd` exit0；帧率中途从 30 改为 15 的视频分别通过 NVENC H264、DLSS 6X HEVC、系统编码器及 NVENC 失败自动回退，输出 60/360/60/60 帧，源 PTS 误差实测 0，音轨保留，独立测试解码通过。DLSSG Create `0x1`，NVENC 编码/取码流 status0。取消 1/3/5 帧和后续正常导出、HDR 自动 HEVC Main10、真实编码失败报告、英语音轨 880Hz 检查均 PASS。测试脚本初次误用 PowerShell 保留变量和命令数组参数，修正后重跑通过，失败记录保留。
+
+完整短测 `scripts/gates/delivery.ps1 -Root . -BuildDirectory out/build/scheduling-audit-20260918` 26 checks PASS / 60.406 秒，证据 `logs/delivery/35f686779486445f9b4e0e51e9cbe49c/result.json`。EXE SHA256 `38E7A3ED8B5156A4962FF227391698D6CD71BFCBED4DA98807B03A6F6E5E7599`。独立解压包在 TEMP/仅系统 PATH 下真实 HEVC 6X 导出 60 源 + 295 生成 + 5 重复 = 360 帧，包内依赖与输出解码均 PASS；产品没有后置解码。具体命令、日志与局限见 `docs/EXPORT_GATE_REMOVAL_2026-09-18.md`。
+
+完整 r3：`C:/veyra-test-packages/post140-20260918-r3/Veyra-1.4.0-test-20260918-r3-win64-portable.zip`，SHA256 `BEC301B6BF19419246E04FD8D0849A461FC73EEFE168532E500161C635898215`；113 文件逐项 manifest 审核通过，附对应工作区源码和未变的 patched FFmpeg/RemotePlay 对应源码。本机 RTX5070 实测，不宣称 RTX30/40 实卡通过；r2 不覆盖，不合并/推送/发布。下一项验收：用户原导出任务在 r3 上复测，原 GUI 失败原因因日志缺失仍未确认。
+
+## 2026-09-18 RTX30 初始化与采集音频误重启追加修复
+
+用户确认 RTX40 解锁成功，但 RTX3060 的 2X/6X 均在 Evaluate 前失败：FeatureInitResult/Create 为 `0xBAD0000B`，不要求更新驱动。核对固定 MIT 上游后，补齐 `FgCompatibilitySession` 对 NGX Init 的 Ampere metadata 作用域与还原，禁止未成功 Init 就进入能力查询。`NgxCoreHost` 增加仅测试使用的 Init 失败注入，验证失败退出后可正常重建。没有降低请求倍率，没有改磁盘运行库；RTX50 原生路径不打补丁。3060 仍需用户实卡验证，不能拿 5070 强制路径通过冒充 30 系成功。
+
+采集侧确认并复现：输出端点错误时 `CaptureAudioSession::push` 停止统计仍然到达的输入，3 秒后 `AudioInputRecovery` 会误停整个 DirectShow 音视频图。现在区分可恢复输出错误与致命工作线程错误，输出恢复期间继续记录输入存活、不积压旧音频。4 秒输出故障注入由修复前 2 次误重启判定/247 个被统计输入块，变为 0 次/650 个；真正输入断流仍触发恢复。真实 USB3 卡 7 秒故障注入通过：421 视频帧、703 音频块、最大读帧间隔 16.833ms，无采集图重启。截图缺少对应日志，不能断言这就是用户卡顿的唯一原因。
+
+构建 `cmd.exe /c out\build\scheduling-audit-build.cmd` 通过；一次并行构建因本轮测试占用 exe 发生 LNK1104，测试正常结束后重建通过。强制 Ampere/Ada 与原生 RTX50 的 2–6X 生命周期、Init 失败还原、6X 55/55 生成帧内容检查、双声道与 5.1 音频抖动检查均通过。这批测试使用的 EXE SHA256 为 `0E03B9946997347DAAB4E029183A95B1EAB8BB36C7FC33BF4BBE1369F0FD149F`，随后另修复启动 seek 死锁并重做最终交付检查，见下文。具体文件、命令、日志与限制见 `docs/RTX30_CAPTURE_FOLLOWUP_2026-09-18.md`。
+
+打包测试发现并重复复现 community NR 启动期间 seek 后零呈现：第一次音频预读被打断，seek 已成功锚定 PCM，却没有清除 `endpointRecovering_`，音视频互等。`WasapiAudioSink.cpp` 现在在成功 seek 锚定后清除状态；健康端点 seek 到音轨结束也清除。新增真实静音 WASAPI 启动 seek 回归，修复前 3/3 恢复标志断言失败，修复后 3/3 通过，完整音频时钟/断连/暂停回归也通过。保留 `rtx30-startup-seek-before`、`rtx30-startup-seek-fixed`、`rtx30-audio-timeline-final` 日志。最终构建日志 `out/logs/rtx30-startup-fix-build.log` exit0。
+
+最终 EXE SHA256 `656E671F62F005C95F4883AD232482917B2936BD50B2550F80E4461AC6FFEBF8`。`scripts/gates/delivery.ps1 -Root . -BuildDirectory out/build/scheduling-audit-20260918` PASS，26 checks/62.7948212 秒，`logs/delivery/b7425358ff0342339bca643c7483a5a8/result.json`。独立解压、仅系统 PATH 下，MKV 七组和有声彩色运动测试片七组均通过；每组检查实际出帧、所选 NR/FG 与依赖加载位置。MKV 开头增强截图为黑图，未用它证明内容通过；另用运动片七组均通过非黑/非纯色像素检查，并目视两张输出。详见 `out/logs/rtx30-package-smoke-final.log`、`rtx30-package-motion-smoke.log`。这些是 RTX5070 本机证据，RTX30 实卡仍未执行。
+
+完整 r2 包：`C:/veyra-test-packages/post140-20260918-r2/Veyra-1.4.0-test-20260918-r2-win64-portable.zip`，SHA256 `BE603292C5D776D88D5FE33E02C3B97E95A4306C57D491B845E708CEE9BE8E1B`，113 文件清单逐项校验通过。同目录提供 `TESTING.md`（包内）、应用对应源码快照与未变的 patched FFmpeg/RemotePlay 对应源码及 SHA256 文件。打包中缺失依赖的失败和修复前包留在命名子目录，r1 未覆盖。包含前一节调度审计三处修复；不合并、不推送或公开发布。唯一下一项验收：RTX3060 2X/6X 与原采集配置长时间运行，失败时保留主日志及对应 fg-probe 日志。
+
+## 2026-09-18 全链路调度审计与三处追加修复
+
+用户测试 r1 包期间，审计文件播放、采集、PS5、光流/NR/SR/调色/FG、呈现、音频及导出调度。继续使用 `codex/post140-field-repair-20260917`，保留既有修改；没有合并、推送、发布、替换运行组件或改动 r1 包。详细范围、命令、证据与限制见 `docs/SCHEDULING_CHAIN_AUDIT_2026-09-18.md`。
+
+修复三处：`EngineController.cpp` 无声文件每帧重设墙钟起点导致欠速被掩盖，改为仅在明确等待首帧时重设；`VideoPresenter.h` 提供实际呈现环等待统计，调度成本扣除改用私有呈现环，避免错用生产者环；`VideoExportJob.cpp` 的释放保护原先在编码器打开前捕获空指针，改为引用 owner 并在回调捕获变量失效前 reset。新增 `SchedulingChainTests.cpp`、扩展 `FgPresentationTests.cpp` 并接入 CMake。没有复现修复前的导出崩溃或运行 sanitizer，生命周期缺陷由代码证明，实际取消回归另行验证。
+
+60fps 无声片注入 60ms 处理延迟，修复前 3.009 秒现实时间仅前进 0.750 秒媒体时间（0.249x，无跳帧）；修复后 3.010 秒前进 2.850 秒（0.947x，129 次过期机会跳过），恢复、暂停、暂停 seek 与继续播放通过。日志 `out/logs/scheduling-{before,fixed}-playback.stdout.log`。XeSS 过载抑制后降到 10ms 处理负载，5 秒观察内恢复，新增 233 张生成帧，速度 1.033x，`out/logs/scheduling-xess-before2.stdout.log` PASS。
+
+真实 NVENC 在提交 1/3/5 张源帧后取消（取消前分别仅输出 0/0/1 帧），保留 partial、不报告成功，之后正常导出 12 帧并完整解码验证；无声片及用户带音轨 MKV 均通过，见 `out/logs/scheduling-fixed-export{,-audio}.stdout.log`。私有呈现环测试：生产者等待 54.8609ms、呈现环 0ms；4X/6X/4X 实际生成 114/190/114 帧，呈现纹理最大像素误差 0，D3D12 errors=0，见 `out/logs/scheduling-private-presentation.stdout.log`。
+
+本机 RTX5070 / driver 616.56，NR+DLSS 4X/6X 各 30 秒模拟 live 回放，15–17 秒注入卡顿，均恢复（exit0），`out/logs/scheduling-dlss{4,6}.stdout.log`。恢复后平均提交 142.75/203.375 次每秒；此回放实际处理节奏高于 MKV 标称 24fps，恢复后仍有过期生成帧，不能用此数字证明正确媒体节奏、所有生成帧均呈现、屏幕扫描帧率或真实采集满速。6X 日志 NR Create、DLSSG Create、FG warm-up Evaluate 均 `0x1`，实际 cap=5。音频 51/60 欠速测试现实 4008.89ms/音频 3988.90ms，额外停音与 underrun 均 0，见 `out/logs/scheduling-audio-underrate.stdout.log`。呈现 worker、实时预览和 repair contract 单测通过，后者 205 checks/0 failures。
+
+实际执行 `cmd.exe /c out\build\scheduling-audit-build.cmd`，完整隔离构建 561 步通过，日志 `out/logs/scheduling-isolated-build.log`，最终测试增量构建 `scheduling-isolated-build-final.log` 通过。先前原目录构建因用户正在运行 EXE 而 LNK1104，保留进程后换独立构建目录；新目录首次 XeSS 测试因缺少依赖 DLL 启动失败（-1073741515，未进入 main），补齐测试 PATH 指向旧构建依赖后通过。早期新增测试使用错误 ExportCounts 字段名导致编译失败，改为 source/encoded 后通过，原始日志保留。
+
+实际执行 `scripts/gates/delivery.ps1 -Root . -BuildDirectory out/build/scheduling-audit-20260918`，26 checks PASS，62.4984434 秒，`logs/delivery/62df9939d564489fb42ca7b24292fd08/result.json`。涵盖实际 NR/NVOF、4K 正确性、播放、调色、图片、4K H.264/HEVC 带音轨导出、取消导出和文件驱动的采集解码软硬一致性（非 SKIP）。EXE SHA256 `BD9C8B275560E4DDBD0BDB20DCE868818311E6FED54678BFF1550B4D178A2249`。`git diff --check` 通过，无 proprietary runtime/SDK/media 新增到源码跟踪。
+
+未修性能隐患：文件读取/解码仍同步占用 GPU owner（慢盘阻塞尚未实测）；MF 的 AMD/Intel 导出仍逐帧 GPU→CPU 回读及等待，违反既定无回读性能合同，需独立实现 D3D11/DXGI 表面交接并实卡验证。导出逐批等待 generation resolve、播放优先的 50ms 主动让步、最终完整解码验证也会影响吞吐，未据此宣称持续限帧缺陷。此次未执行 RTX30/40/5090、物理采集卡、真实 PS5 或 AMD/Intel 导出；既有 4K 全增强吞吐及插值位置问题仍未解决。下一项唯一验收任务：收集用户 r1 包的 RTX30/40 完整日志，按相同配置复现剩余受限；本节三处修复尚未进入 r1 包。
+
+## 2026-09-18 RTX30/40 本地测试包交付
+
+用户授权打包到 RTX30/40 实机测试。继续使用隔离分支，无新增产品代码改动，无合并、推送或正式发布。输出目录 `C:/veyra-test-packages/post140-20260918-r1`，便携包 `Veyra-1.4.0-test-20260918-r1-win64-portable.zip`，464932607 bytes，SHA256 `8A7EA089C6B2287495FFD388BF410AEBA5EAE3AA31604426043BA5F8A5039232`。界面版本仍为 1.4.0；EXE SHA256 `9F63750E652C8FBE2CE6185D3D21CFBD7E7CAA19BB7A66E2DDFB297D875B7251`。
+
+实际执行 `scripts/package-portable.ps1 -Root . -Version 1.4.0 -Label '-test-20260918-r1' -OutputDirectory C:/veyra-test-packages/post140-20260918-r1 -BuildDirectory out/build/post140-hdr-preflight-20260918`，随后 `out/tmp/finalize-post140-package.ps1` 核对 ZIP 全部 113 文件的大小/哈希并独立解压。沿用已批准的 11 个增强运行组件，携带组件清单、许可证和 TESTING.md；无 SDK、个人配置、测试媒体、日志、PDB/LIB 混入便携包。证据 `out/logs/package-post140-test-20260918-r1.log`、`out/logs/package-post140-finalize-20260918-r1.log` 及输出目录 `package-audit.json`。
+
+执行 `out/tmp/smoke-post140-package.ps1`，独立解压目录运行，PATH 限定 Windows 系统目录，工作目录为 TEMP；检查 FFmpeg/CRT/NR/DLSSG 模块从包内加载。本机 RTX5070 / driver 616.56，四个 8 秒检查全部 exit0 并保存 JPEG：普通播放 188 源帧；original/community/Ampere NR + DLSS6X 分别 71/225、100/370、90/320 源帧/生成帧。证据 `out/logs/package-post140-smoke-20260918-r2.log` 与同名目录 `result.json`。首轮脚本遗漏触发截图所需的 `--smoke-controls`，仅截图断言失败，普通播放 185 帧 exit0；修正脚本后重跑，保留 r1 原始日志。以上不代表 RTX30/40 硬件路径已验收。
+
+另附源码快照 `Veyra-1.4.0-test-20260918-r1-source.zip`（735 文件，12136817 bytes，SHA256 `6401644D4B4700B8C18581928C73D27E0A001C07D53F77DF3A042C88CC5AD94B`），包含构建时当前产品源码，不含本条后补交付记录。实际执行 `python scripts/package-ffmpeg-source.py --prefix C:/veyra-deps/ffmpeg-ps5-dav1d-installed --vcpkg C:/veyra-deps/vcpkg --source C:/veyra-deps/ffmpeg-ps5-slices-source --dav1d-source C:/veyra-deps/vcpkg/buildtrees/dav1d/src/1.5.4-179377b46e.clean --output C:/veyra-test-packages/post140-20260918-r1/Veyra-1.4.0-test-20260918-r1-FFmpeg-source.zip --version 1.4.0` exit0，10809 文件，25277828 bytes，SHA256 `A83293849960802E9AFD0E685E7E094B986E5FED19FA8371410E7E2E6F0DAAF7`，日志 `out/logs/package-post140-ffmpeg-source-20260918-r1.log`。RemotePlay 依赖未变，复用并校验 `Veyra-1.4.0-RemotePlay-source.zip`，SHA256 `1D69DDA5BB1AFA3B78E917569BF396338A338BF2184D4458C2F1E1D88CE881DF`；其中旧版应用源码 tag 指引由本次独立应用源码快照取代。
+
+RTX30/40 实卡未执行，4K 全增强吞吐与其他未解问题继续按下节记录，不标全部修复。下一项唯一任务：用户在目标显卡按 TESTING.md 测试，4X/6X 至少各 3 分钟并覆盖原复现时长，反馈完整 logs 目录和效果配置。
+
+## 2026-09-18 持续运行后 DLSS 4X/6X 受限追加修复
+
+继续使用 `codex/post140-field-repair-20260917`，保留此前播放器与兼容修复。详细调查、失败实验、命令和验收边界见 `docs/DLSS_SUSTAINED_REPAIR_2026-09-18.md`。没有合并、推送或发布。
+
+已修正 6X 的 Fg4/Fg5 时间戳覆盖 FgBatch/Blit、Present 共用增强分配器导致等待和预算重复收费、采集截止时间遗漏 B 帧基础处理、CPU 延时抵扣尚未提交的 FG、固定 250ms 冷却丢弃正常恢复机会。DLSS 呈现使用独立三槽 DIRECT queue/fence，增强保持六槽，输出按 parity 做生产者/消费者 GPU 同步，复用及退出均覆盖在途读取；采集在读取最新 mailbox 前等待上一增强批完成并继续服务呈现。
+
+`cmd.exe /c out\build\veyra-build-x64-release.cmd` 第 11 次构建 exit0（`out/logs/fg-sustained-build11-20260918.log`）。调度单测 PASS，repair contracts 205 checks/0 failures。真实 USB3 1080p60、NR+4X 连续 180 秒，注入 55ms CPU 卡顿两秒后平均 239.981 次提交/秒，95% 目标断言通过，恢复后无新增过期帧；日志 `out/logs/fg-final-nr4-result-20260918.log`。这不是显示器扫描帧率。
+
+新增呈现测试三轮 4X/6X/4X，各 40 源帧，实际生成 114/190/114 帧；含 reset、异步呈现、窗口 resize、消费者 fence 阻止复用及 producer 先退出。呈现与对应 DLSS 纹理逐像素最大误差 0，D3D12 errors=0。命令 `scripts/run-short-test.ps1 -Exe out/build/post140-hdr-preflight-20260918/veyra_fg_presentation_tests.exe -Arguments @('out/logs/fg-presentation-verified-20260918') -TimeoutSeconds 60 -LogPrefix out/logs/fg-presentation-verified-20260918` exit0。初版测试重复保存同名 PNG 失败已留档，不能解释为产品画面错误；此测试也不能证明插值位置/画质正确。
+
+NR+6X 连续 180 秒通过：同样注入卡顿，恢复后平均 359.943 次提交/秒，158 个恢复采样无受限，expired 保持 7，实际生成 53410 帧；NGX Create/Release 均为 `0x1`。日志 `out/logs/fg-final-nr6-result-20260918.log`。4K 全增强 4X/6X 各 45 秒对照仍 FAIL（exit1）：生命周期恢复，但平均 177.609/191.130 次提交每秒，低于 240/360 目标；测得每源帧约 17.3/20.8ms，超过 60Hz 时限。保留 `out/logs/fg-final-full{4,6}-result-20260918.log`，不能因总 GPU 未满载就宣称该串行链路已满速。
+
+所附 MKV 设置回归 `scripts/run-short-test.ps1` 运行 `veyra_fg_settings_tests.exe` exit0，1→2→6→1→6、暂停 seek/resume 和关闭通过，117 源帧/172 生成帧，日志 `out/logs/fg-final-settings-20260918.stdout.log`。最终 `scripts/gates/delivery.ps1 -Root . -BuildDirectory out/build/post140-hdr-preflight-20260918` PASS，26 checks，62.5811217 秒，证据 `logs/delivery/4a5b5a11d376481184994f93e376659f/result.json`。最终 EXE SHA256 `9F63750E652C8FBE2CE6185D3D21CFBD7E7CAA19BB7A66E2DDFB297D875B7251`。NR+4X 使用 build10，其后 build11 产品改动仅测试读回等待及非 live consumer-fence 日志值；其余最终检查使用 build11。
+
+RTX30/40/5090 实卡未执行，缺失用户 export-worker 首错、5090 NR→XeSS device removal 和既有合成运动位置偏差仍未解决。另纠正此前文档错误：PresentSink 已有 DRED 失败后查询，不是尚未实现；强制采集启用和受影响机器有效证据仍未确认。下一项唯一验收任务：受影响用户按原配置运行本次构建，保留首次受限前后的完整日志。目标不标全部完成，没有合并、推送或发布。
+
+## 2026-09-18 播放器字幕、音轨、打开拖动、设置记忆与防休眠
+
+继续在 `codex/post140-field-repair-20260917` 施工。实现范围、实际命令、测试日志、原始失败和未验证边界见 `docs/PLAYER_TRACKS_SETTINGS_REPAIR_2026-09-18.md`。
+
+- 字幕改为主/副字幕独立选择，选中即启用；单次后台扫描渐进发布正文。真实窗口可选第 32 条字幕（stream 49），所附 MKV 共 32 条可用字幕、15720 cues。增加 17 路内嵌音轨选择，保留播放位置、暂停和音量；所选音轨传到 worker 与旧导出入口，解码 PCM 验证不是只改标签。
+- 修复音频 seek 依赖稀疏音轨索引导致的大量回读，改用视频索引后按真实 PCM PTS 裁切；去除拖动结束重复 seek。所附 4.27GB MKV 本机热缓存首帧 367.05ms，跳到 30/1200/90 秒为 31.35/30.82/30.63ms，不是其他机器或冷缓存保证。
+- WM_CLOSE 原来没有保存设置，现实际保存 NR/SR/运行时选择以及总开关关闭时的草稿，移除跨会话陈旧成功缓存。4060 Ti 用户日志 community NR Create `0x1`，重启后 original NR `0xFFFFFFFFBAD00001`，与运行时选择丢失吻合；不据此宣布 RTX40 全功能真机验收。
+- 新增播放期间 Windows display/system execution request，暂停、停止、失败和关闭释放，并处理屏保消息。正式 GUI 自动化验证重启持久化、字幕/音轨菜单和全屏防休眠生命周期，使用独立配置沙箱，未覆盖用户设置。
+- 呈现改为一次取得代理 swapchain buffer index，资源屏障/RTV/last buffer 使用同一索引。5090 NR→XeSS 日志 `Present 0x887A0005 / removedReason 0x887A002B` 尚未本机复现；此一致性修正不能冒充已确证根因。RTX5070 上按 4K50、AMD 光流和 1155x741 窗口，两种启用顺序各两轮通过（501 帧，NR Create `0x1`、XeSS init `0`，每个联合阶段有 26–36 实际生成帧），不是受影响实卡/真实采集链路证据。
+
+构建命令 `cmd.exe /c out\build\veyra-build-x64-release.cmd` exit0，日志 `out/logs/player-tracks-build3-20260918.log`。`veyra_player_tracks_tests`、`veyra_audio_track_output_tests`、`veyra_subtitle_loading_tests`、`veyra_popup_selector_tests`、`veyra_ui_contract_tests` 与 `tests/integration/PlayerShellTests.ps1` 均通过；音频测试同时验证两路频率、时间戳和两种导出入口。正常窗口证据 `out/tests/player-shell-d033d14c6d80468c95313d82508df4a6`。
+
+最新 `scripts/gates/delivery.ps1 -Root . -BuildDirectory out/build/post140-hdr-preflight-20260918` PASS，61.575757 秒，`logs/delivery/81a8d951f689467a868456f023550dbd/result.json`。EXE SHA256 `5B35FDAD4291168A03A1EA0E9D911B952123DFD800C57237A08CB07F6DB1529D`。早先 gate/hash 仅代表此前代码。没有合并、提交、推送、发布或新增 proprietary runtime/SDK/media 到 Git。
+
+未执行 RTX30/40/5090 实卡、实际长时间休眠等待，未取得用户导出 worker 首错；既有 6X 合成图案位置误差仍保留，目标不标全部完成。下一项唯一任务是受影响显卡运行此构建并保留 application/probe/worker 首错证据。
+
+## 2026-09-18 追加修复播放中切换的能力同步
+
+RTX5070 强制 Ampere/Ada 的所附 MKV 6X 播放各 exit0：170/196 源帧、840/970 生成帧，未降档；Ada Present 提交 144fps，不代表屏幕实测。日志 `out/logs/post140-{ampere,ada}6-mkv-preview.stdout.log`。
+
+新增 `tests/integration/FgSettingsTests.cpp` 和 CMake 目标，用真实播放器覆盖 1→2→6→1→6、暂停/seek/resume、停止排空。首轮 `post140-ampere-settings` FAIL：底层已生成 1558 帧，但 snapshot 能力仍为 0。`EngineController.cpp` 原来仅首次打开发布 capability；改为重建、回滚和运行错误恢复后同步实际能力。保留失败日志。
+
+实际执行 `cmd.exe /c out\build\veyra-build-x64-release.cmd`，日志 `out/logs/post140-build-settings-repaired.log`、`post140-build-settings-final.log` exit0。通过 `scripts/run-short-test.ps1` 运行新测试（timeout240s、所附 MKV，完整命令见修复方案），`post140-native-settings-final`、`post140-ada-settings-final`、`post140-ampere-settings-final` 全部 exit0；每次切换要求新增源帧/生成帧，6X requested=applied，cap=5。兼容变量仅在独立 shell 设置并 finally 清理。新 EXE：`out/build/post140-hdr-preflight-20260918/veyra.exe`，SHA256 `231ECD897E19B7A45295EA3AE4694BD5717BA03113F33DD4E81E69CEBC84909A`。
+
+最终执行 `scripts/gates/delivery.ps1 -Root . -BuildDirectory out/build/post140-hdr-preflight-20260918`，`logs/delivery/f0de8f4ef17a46418be3ce8733ebca54/result.json` PASS，61.7707815 秒，EXE hash 一致。已跟踪/新增文件空白检查、源码/二进制隔离审计通过。一次审计命令误将 no-index 的差异退出码 1 当成格式错误，核对输出并重新检查通过，未因此改内容。
+
+这批测试验证设置与生命周期，未消除既有合成图案位置偏差，未执行 RTX30/40/5090 实卡，未获得用户原始导出 worker 日志；没有合并、提交、推送或发布。后续需要目标卡运行与完整 worker/probe 日志，现有本机成功证据不支持“全部修好”。
+
+## 2026-09-18 追加修复 HDR 6X 兼容预检
+
+在当前隔离分支实际运行强制 Ampere HDR 导出，`post140-ampere6-hdr-final` exit1：预检 PID35616/stage2/generated0，日志明确 `HDR output requires an explicit HDR input contract`。原因是预检 descriptor 只设置 `hdrOutput`，测试帧仍为 SDR RGB；这会阻止目标兼容路径进入真正的 FG。修改 `src/engine/FgCompatibilityProbe.cpp`：HDR 同时声明 HDR 输入，使用 limited P010/PQ/BT.2020-NCL/BT.2020 测试帧，SDR 路径保持 RGBA。
+
+旧构建的 EXE 正被 PID9468 运行，`post140-build-probe-hdr.log` 记录 LNK1104；保留该进程，使用 `scripts/build.ps1` 另建 `out/build/post140-hdr-preflight-20260918`，保持 patched FFmpeg/RemotePlay/固定 NVENC13.0 依赖。完整命令在修复方案“ HDR 预检追加构建”节；`post140-build-probe-hdr-isolated.log` exit0。新 EXE SHA256 `880A3D585C3C01E574F5840C86AFF53F5B4D4F271D8264656057EF2BABED47CC`，旧 EXE 不包含此修正。
+
+`post140-ampere6-hdr-repaired`、`post140-ada6-hdr-repaired` 均 PASS：各自通过真实子进程预检（PID37608/34920，stage4/generated10），随后 `source=12 generated=55 hold=5 output=72 multiplier=6`，兼容补丁成功恢复。两项 `ffprobe -count_frames` 解码结果均为 HEVC Main10/yuv420p10le/PQ/BT2020/1920×1080/180fps/72帧/.4s，AAC 5.1/.405333s。环境变量只在独立测试 shell 生效并 finally 清理。测试硬件为 RTX5070，不是 30/40 实卡；此前合成位置失败仍保留。
+
+新目录执行 `scripts/gates/delivery.ps1 -Root . -BuildDirectory out/build/post140-hdr-preflight-20260918`，`logs/delivery/ff9bea6b541d4934a52d0f6c0826f5bc/result.json` PASS，57.483224 秒，报告 EXE hash 与上述一致。已跟踪/新增文件空白检查、二进制与依赖目录隔离审计 PASS；再次核对 DLSSG/NR 原件 SHA256 不变。没有提交、合并或发布。下一项仍是内容相关位置偏差定位与目标实卡验收；没有把目标标为全部完成。
+
+## 2026-09-18 1.4.0 隔离修复实施与验收记录（未全部通过）
+
+用户授权新分支施工与目标模式。分支 `codex/post140-field-repair-20260917`，基线 `bd7cc0fc8eaf80e0913f2aafa95584c741f1ffdf`，存档 `checkpoint/pre-post140-repair-20260917`。本机 RTX5070 / 616.56；未合并 main、未推送、未发布。完整文件范围、原始调查、上游固定提交、命令和逐项证据见 `docs/POST_1_4_0_FIELD_FAILURE_REPAIR_PLAN_2026-09-17.md`。
+
+已实施：6X 完成数组与编码描述符容量统一；soft reset 后完成统计继续接纳同窗口帧、Present 成本按单次归一且 1 秒过期；MKV 全轨字幕改可取消的单次异步 demux，保留双轨/偏移/手动字幕；NVENC 固定 13.0 完整 ABI，删除仅改 apiVersion 的回退，传递实际 NVENC/MF 错误及 worker 路径；导出不再静默把 6X 改 2X/关闭。RTX30/40 兼容接入 early-provider/startup/Create、资源生命周期与有界子进程真实 Evaluate 预检，失败回滚检查完整；RTX50 普通路径不安装补丁。来源及改动记录已更新 `THIRD_PARTY_NOTICES.md`。
+
+实际构建命令 `cmd.exe /c out\build\veyra-build-x64-release.cmd`，最终构建日志 `out/logs/post140-build-direct-planar.log`，exit 0。执行 `scripts/gates/delivery.ps1 -Root . -BuildDirectory out/build/post140-field-repair-20260917`，`logs/delivery/2c9372ba16774e3d9f7529825f623fa3/result.json` 为 PASS，62.0575379 秒，Veyra.exe SHA256 `DD117A0F3D484E8DAF6101B3E877A04B4884F1CE733E26A0D32415993330FACB`。该 gate 覆盖 NR/NVOF 1080p/native 4K、播放 FG 同步/控制/调色、图片和 4K 2X H264/HEVC 导出计数/音轨/取消等，不包含下面失败的 6X 内容位置验收，也不证明未连接设备通过。
+
+针对性测试均通过 `scripts/run-short-test.ps1` 执行，单次不超过 300 秒，日志在 `out/logs/`：
+
+- `post140-contract`、`post140-scheduler` PASS：容量、soft reset 统计与 Present 样本过期。
+- `post140-subtitle-dual-final`、`post140-subtitle-cancel-final` PASS：所附大 MKV 32 轨 / 15720 cues / 单次扫描；425 播放帧，双轨 3/5 与 700ms 偏移保留。热缓存扫描 2576.748ms，较早冷缓存 9.4–10.3s；首次有效画面另次测量 120ms，不能混为同次测试或承诺固定耗时。
+- `post140-pool-{h264,hevc,mf-h264,mf-hevc}` PASS：12 个不同灰度输入槽实际编码、解码比对。`post140-nvenc-invalid-version`、`post140-nvenc-unsupported` 验证错误分流与 SDR MF 回退。
+- `post140-native-lifecycle`、`post140-ada-publication-lifecycle`、`post140-ampere-publication-lifecycle` PASS：6,2,5,3,4,6 倍率、尺寸变化、reset、释放。`post140-rollback-publication-final` PASS：故障注入后拒绝重新初始化并保留必要资源。强制兼容只是在 5070 测试，不是 30/40 验收。
+- `post140-ampere6-cow`、`post140-ada6-final-hevc` PASS：实际 12 source + 55 generated + 5 明示 CFR holds = 72 encoded，H264/HEVC 输出解码各 72 帧，保留音轨。`post140-hdr6-hevc` PASS：Main10/PQ/BT2020、72 解码帧、AAC 5.1。这些计数检查不覆盖 6X 内容位置精度。
+- `post140-worker6`、`post140-worker-cancel-final` PASS：720 帧导出、暂停/恢复/取消、前台继续播放。`post140-probe-timeout`、`post140-worker-probe-reject`、`post140-worker-probe-cancel` PASS：挂起/拒绝/取消隔离。
+- `post140-worker-error-tagged` PASS：真实消息链包含 `OpenD3D12Session status=15` 与 MF 拒绝 HDR 10bit 的原因，零源帧/零编码帧、没有输出文件，worker PID40072 的路径可定位。较早 `post140-worker-error-final` FAIL 是测试素材未标记 HDR，MF 正常成功；保留失败记录，不冒充产品修复证明。
+
+**尚未通过：6X 合成位置精度。** `post140-native6-camera-planar`、`post140-native6-direct-planar` 均 FAIL：55 张不同生成帧，33 张满足原定 ±1px 门槛。精确 16px 平移时目标 `[2.667,5.333,8,10.667,13.333]`，测得 `[2.25,7.75,8,11.25,12.25]`。直接 NGX 测试绕开图调度/帧池/颜色转换/NVOF，Create/Evaluate/Release/Shutdown 均成功；仍不能把根因确定为 NVIDIA 模型。零向量 invalid 哨兵和相机基/投影修正未解除偏差，没有放宽阈值。追加命令 `scripts/run-short-test.ps1 -Exe out/build/post140-field-repair-20260917/veyra_repair_fg_tests.exe -Arguments @('mfg2-exact-rgb-planar') -TimeoutSeconds 90 -LogPrefix out/logs/post140-native2-planar-control` PASS，11/11；4X 原始对照 22/33，仅中点通过不能替代多帧验收。
+
+运行时原件未修改：DLSSG SHA256 `135EAF0733C1E37381A8C28ABCF7A862404A54132B81787C04E35D09EFC5E36F`，NR SHA256 `E16BCF15E16E13F527491CDF7845B2FE6521A738D8F7C9C721866A8496E1FC8E`。构建 SDK/运行时/测试媒体留在忽略目录；`git -c core.safecrlf=false diff --check` 通过。新增文件是源代码、测试、许可证和文档。
+
+追加对照：`RepairFgTests.cpp` 增加 `-planar-detail` 非周期双线性格点纹理，仍为 16px 平移及 ±1px 门槛，原始正弦测试保留。`post140-build-detail-fixture.log` 构建 exit 0，仅测试程序更新。`post140-native6-planar-detail`、`post140-ada6-planar-detail`、`post140-ampere6-planar-detail`、`post140-native6-planar-detail-nvof` **全部 PASS，各 55/55**，后三者分别核实兼容补丁实际安装/回滚、产品 NVOF executes=11。实际命令沿用上面的短测工具，模式 `mfg6-exact-rgb-planar-detail`；NVOF 模式移除 `-exact`，强制兼容使用对应 `VEYRA_TEST_FORCE_*_UNLOCK` 环境变量并在 finally 清理。这证明本机存在位置/PTS/内容检查通过的真实 6X，不能将正弦失败推广为所有 6X 错误；也没有消除低频纹理/方块已有失败。变化依赖内容，具体机理尚未确认。变更/新增文件二进制与忽略依赖目录审计、已跟踪/未跟踪文件空白检查均 PASS。
+
+限制：RTX30/40/5090 真机均未执行；用户原始导出 worker 日志缺失，不能倒推其首错或声称该机器已修好。子进程通过不保证父进程永不挂死。没有新增字幕烧录导出或 DRED，不将其记为完成。下一项唯一任务为继续定位内容相关的多帧位置偏差，并以目标实卡验证兼容执行/速度/稳定性；目标尚未标记完成。
+
+## 2026-09-17 导出截图追加调查（未改产品）
+
+用户截图显示 NVENC/MF 初始化失败并要求更新驱动，反馈驱动已最新。定位 `VideoEncoderFactory.cpp:47`：这是两个 `open()` 失败后的通用提示，没有驱动版本判定。HDR 下 MF 会主动拒绝，提示仍相同；截图对应正式编码前失败，不能归于 CFR 尾帧。
+
+追加发现 `NvencD3D12Encoder.cpp` 的回退按主版本去重，编译 API 13.1 时真实失败会跳过 13.0；强制测试开关却绕过这一条件。PowerShell 枚举分支证实真实候选 `12.0/11.0`，测试候选 `13.0/13.0/12.0/11.0`，未调用 NVENC。只降低 session apiVersion 而不处理函数表/结构体 ABI，且未查询 max-supported，不能视为完整兼容实现。
+
+更新方案第 7 节，补齐证据与初始化修复要求。实际执行 `rg`、源码/本地 SDK 头文件读取和分支枚举；本地 CMakeCache 预期路径不存在，未据此推断用户包编译版本。未执行构建/GPU/导出，具体用户首错仍缺 worker 日志。仅文档修改，执行 `git diff --check` 无空白错误。
+
+## 2026-09-17 1.4.0 用户日志调查与 RTX30/40 6X 方案（仅调查，未修产品）
+
+用户提供五份故障日志和 Money Heist MKV，要求排查并核对 GitHub，目标含 RTX30/40 最高 6X，不能用关闭功能或退 2X 代替完成。
+
+调查基线 `main` / `bd7cc0fc8eaf80e0913f2aafa95584c741f1ffdf`，开始时干净。完整证据、输入 SHA256、固定上游版本、源码位置、修复顺序和验收见 `docs/POST_1_4_0_FIELD_FAILURE_REPAIR_PLAN_2026-09-17.md`。
+
+- 确认 6X 内存越界：批次容量 6，`CompletionWatch::frameReadyObserved` 仍为 4；发布版 `890d200` 也存在。不能据此认定附件中的全部 device lost 原因。
+- 5090：revision 12 的 22290 个 FG 候选有 22287 个在 Evaluate 前被拒，最终 generatedPresented=0。源码发现 soft reset 推进图 epoch 后，旧统计 identity 拒收新完成事件，Present 预算又不过期；是与日志吻合的故障链，待修复前后实机对照。
+- 大 MKV：UI 在 engine.open 前逐字幕轨扫描全文件；日志首末字幕完成相隔约 85/64 秒。所附样本 32 字幕、17 EAC3 音轨；系统 FFmpeg 8.1.1 前 5 秒视频解码 exit 0 / 0.974s，首字幕整文件单次 demux exit 0 / 1.998s。未验证随包 FFmpeg 或 Veyra 播放。
+- RTX40：补丁 identityVerified=1 后仍报 maxGeneratedFrames=1；NGX 先初始化后补丁是待验证的生命周期问题，不能武断归因 DLL 不对。RTX30：FeatureInitResult 低 32 位为 BAD0000B，能力阶段失败；上游 requirements/启动 capability/provider 生命周期处理没有完整对应到 Veyra。
+- GitHub：RTX40MFG-Unlock `b77e6e5` / MIT，30 系仍标早期实验；dlssg_for_sm86 `126d0f7` 声称 310.9 6X，但当前树缺实现源码/许可证正文，不能沿用旧 MIT 判断或直接作为可移植源码。RenoDx 来源 `a8aa0d9` 未变。
+- 导出：主日志缺 worker 终态；对应 PID 为 43964/44892/44228/46492/38640，所需 `export-worker-<PID>.log` 尚未取得。确认 device lost，不虚构 NVENC/CFR 首错。
+
+实际命令：`git status --short`、`git rev-parse HEAD`、`git show 890d200:src/engine/EngineController.cpp`、`rg`、`Get-FileHash`、`gh api` 仓库/commit/tree/compare/issue/README 查询；FFmpeg/ffprobe 完整参数见方案附录。输出保留于本轮工具记录，无独立本机 GPU 测试日志。`git diff --check` 与新增方案的 `git diff --no-index --check -- NUL <plan>` 均通过。
+
+只修改本 WORKLOG 和新增方案；未改产品、未构建、未执行 NGX Create/Evaluate 或 delivery gate、未提交/推送/发布、未新增二进制。下一项唯一产品任务：P0 统一 6X 容量与越界修复；30/40 实卡与导出 worker 首错证据仍待补齐。
+
 ## 2026-09-17 1.4.0 正式发布到 GitHub（用户授权，已完成）
 
 **发布地址**：https://github.com/Likely7/Veyra-NRVideo/releases/tag/v1.4.0 （非草稿、非预发布）

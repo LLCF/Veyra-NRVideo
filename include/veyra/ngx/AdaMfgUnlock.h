@@ -117,7 +117,7 @@ public:
 
     // Restores every patched byte and frees the rebuilt fatbin. Safe to call
     // repeatedly and when nothing was applied.
-    static void release();
+    static bool release();
 
     static State snapshot();
     static bool applied();

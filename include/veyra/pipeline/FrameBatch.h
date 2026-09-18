@@ -29,21 +29,22 @@ struct BatchFrame {
     std::shared_ptr<FrameLease> lease;
 };
 struct FrameBatch {
+    static constexpr uint32_t Capacity=6;
     uint64_t batchId=0;
     FrameIdentity identity;
     int64_t a100ns=0,b100ns=0;
     // 6X multi-frame generation needs one real frame plus up to five generated
     // frames in a single batch.
-    std::array<BatchFrame,6> frames{};
+    std::array<BatchFrame,Capacity> frames{};
     uint32_t count=0;
     static int64_t interpolate(int64_t a,int64_t b,uint32_t j,uint32_t n) {
         // The application accepts at most one second between continuous endpoints.
-        if(n<2||n>6||j==0||j>=n||b<=a||a>INT64_MAX-10000000||b>a+10000000)
+        if(n<2||n>Capacity||j==0||j>=n||b<=a||a>INT64_MAX-10000000||b>a+10000000)
             throw std::invalid_argument("invalid interpolation interval");
         const int64_t d=b-a;return a+(d/n)*j+((d%n)*j+n/2)/n;
     }
     void append(BatchFrame frame) {
-        if(count==frames.size()||frame.identity!=identity||(count&&frame.pts100ns<=frames[count-1].pts100ns))
+        if(count>=frames.size()||frame.identity!=identity||(count&&frame.pts100ns<=frames[count-1].pts100ns))
             throw std::invalid_argument("cross-revision or unordered frame batch");
         frames[count++]=std::move(frame);
     }

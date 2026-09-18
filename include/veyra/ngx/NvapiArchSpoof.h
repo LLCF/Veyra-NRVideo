@@ -7,20 +7,12 @@
 
 namespace veyra::ngx {
 
-// Makes the DLSS-G provider see a different GPU architecture than the physical
-// card reports. The audited 310.7 build has exactly one place that turns the
-// driver's NV_GPU_ARCH_INFO into the value the provider stores and compares
-// (DLSSGInstanceManager::SetGPUArch, "mov eax,[rsp+294h]" at RVA 0x20DCA). That
-// seven-byte load is replaced with "mov eax,<architecture>" so the provider
-// sees the requested id while everything else - including the real
-// implementation/revision fields it later reads - stays intact. Process memory
-// only, fully reverted on release.
-//
-// Used on RTX 30 (sm_86): the provider's frame-generation availability gate
-// reads the architecture and refuses Ampere outright. Reporting Blackwell makes
-// every architecture-based check pass; the kernel rewrite (AmpereMfgUnlock) is
-// still required so the programs can actually run on sm_86. Nothing here runs
-// on Ada or Blackwell - those keep their untouched native paths.
+// Diagnostic-only architecture substitution, enabled explicitly through
+// VEYRA_TEST_NVAPI_SPOOF_ARCH. Hooks the audited provider's GetArchInfo wrapper
+// using a relocated trampoline, modifying the returned architecture for all
+// provider callers. This affects network selection as well as capabilities:
+// normal Ampere operation must preserve the real architecture. Process memory
+// only, restored on release. Ada/Blackwell product paths never install it.
 class NvapiArchSpoof {
 public:
     static constexpr uint32_t kNvapiGetArchInfoId = 0xD8265D24u;   // nvapi_QueryInterface id
@@ -32,7 +24,7 @@ public:
     // `module` is the loaded nvngx_dlssg.dll. `reportedArchitecture` is an
     // NV_GPU_ARCHITECTURE_ID; 0 refuses.
     static bool install(HMODULE module, uint32_t reportedArchitecture);
-    static void release();
+    static bool release();
     static bool installed();
 
     struct State {

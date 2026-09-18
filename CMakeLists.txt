@@ -129,10 +129,13 @@ add_library(veyra_ngx STATIC
   src/ngx/DlssSrBackend.cpp
   src/ngx/VideoSrBackend.cpp
   src/ngx/DlssFgBackend.cpp
+  src/ngx/FgCompatibilitySession.cpp
+  src/ngx/compat/hde/hde64.c
   src/ngx/AdaMfgUnlock.cpp
   src/ngx/AmpereMfgUnlock.cpp
   src/ngx/NvapiArchSpoof.cpp
 )
+  set_source_files_properties(src/ngx/compat/hde/hde64.c PROPERTIES LANGUAGE CXX)
   veyra_apply_warnings(veyra_ngx)
   target_compile_features(veyra_ngx PUBLIC cxx_std_20)
   target_link_libraries(veyra_ngx PUBLIC veyra_base veyra_gfx d3d11)
@@ -465,7 +468,11 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_include_directories(veyra_sinks PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_include_directories(veyra_sinks PRIVATE ${FFMPEG_INCLUDE_DIRS})
-  target_include_directories(veyra_sinks PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party_local/nvidia/nv-codec-headers/include")
+  set(VEYRA_NVENC_HEADERS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party_local/nvidia/nv-codec-headers-13.0" CACHE PATH "NVENC 13.0 ABI headers (nv-codec-headers n13.0.19.0)")
+  if(NOT EXISTS "${VEYRA_NVENC_HEADERS_ROOT}/include/ffnvcodec/nvEncodeAPI.h")
+    message(FATAL_ERROR "Stage nv-codec-headers n13.0.19.0 at VEYRA_NVENC_HEADERS_ROOT; see THIRD_PARTY_NOTICES.md")
+  endif()
+  target_include_directories(veyra_sinks PRIVATE "${VEYRA_NVENC_HEADERS_ROOT}/include")
   target_compile_definitions(veyra_sinks PRIVATE VEYRA_SHADER_DIR="${CMAKE_BINARY_DIR}/shaders")
   add_dependencies(veyra_sinks veyra_shader_rgb_nv12)
   target_link_libraries(veyra_sinks PUBLIC veyra_base veyra_gfx ole32 windowscodecs mmdevapi avrt mfplat mfuuid mf)
@@ -533,6 +540,9 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
   target_include_directories(veyra_live_timing_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
   add_executable(veyra_repair_contract_tests tests/unit/RepairContractTests.cpp)
+  add_executable(veyra_subtitle_loading_tests tests/integration/SubtitleLoadingTests.cpp)
+  target_link_libraries(veyra_subtitle_loading_tests PRIVATE veyra_engine)
+  target_compile_features(veyra_subtitle_loading_tests PRIVATE cxx_std_20)
   # veyra_engine is linked for the subtitle engine (SRT/ASS/VTT parsing +
   # indexed cue lookup); FFmpeg import libraries come from its public surface.
   target_link_libraries(veyra_repair_contract_tests PRIVATE veyra_base veyra_engine ${FFMPEG_LIBRARIES})
@@ -640,6 +650,36 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
   target_compile_definitions(veyra_repair_parameter_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN VEYRA_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
   target_link_libraries(veyra_repair_parameter_tests PRIVATE veyra_pipeline veyra_sinks veyra_nvof)
   add_executable(veyra_repair_fg_tests tests/integration/RepairFgTests.cpp)
+  add_executable(veyra_export_frame_pool_tests tests/integration/ExportFramePoolTests.cpp)
+  add_executable(veyra_export_worker_failure_tests tests/integration/ExportWorkerFailureTests.cpp)
+  target_compile_features(veyra_export_worker_failure_tests PRIVATE cxx_std_20)
+  target_link_libraries(veyra_export_worker_failure_tests PRIVATE veyra_engine)
+  add_executable(veyra_fg_lifecycle_tests tests/integration/FgLifecycleTests.cpp)
+  add_executable(veyra_fg_settings_tests tests/integration/FgSettingsTests.cpp)
+  add_executable(veyra_fg_sustained_tests tests/integration/FgSustainedTests.cpp)
+  target_compile_features(veyra_fg_sustained_tests PRIVATE cxx_std_20)
+  target_link_libraries(veyra_fg_sustained_tests PRIVATE veyra_engine)
+  add_executable(veyra_fg_presentation_tests tests/integration/FgPresentationTests.cpp)
+  target_compile_features(veyra_fg_presentation_tests PRIVATE cxx_std_20)
+  target_compile_definitions(veyra_fg_presentation_tests PRIVATE VEYRA_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+  target_link_libraries(veyra_fg_presentation_tests PRIVATE veyra_engine)
+  add_executable(veyra_player_tracks_tests tests/integration/PlayerTracksTests.cpp)
+  add_executable(veyra_scheduling_chain_tests tests/integration/SchedulingChainTests.cpp)
+  target_compile_features(veyra_scheduling_chain_tests PRIVATE cxx_std_20)
+  target_link_libraries(veyra_scheduling_chain_tests PRIVATE veyra_engine)
+  target_compile_features(veyra_player_tracks_tests PRIVATE cxx_std_20)
+  target_link_libraries(veyra_player_tracks_tests PRIVATE veyra_engine)
+  add_executable(veyra_audio_track_output_tests tests/integration/AudioTrackOutputTests.cpp)
+  target_compile_features(veyra_audio_track_output_tests PRIVATE cxx_std_20)
+  target_link_libraries(veyra_audio_track_output_tests PRIVATE veyra_engine)
+  target_compile_features(veyra_fg_settings_tests PRIVATE cxx_std_20)
+  target_link_libraries(veyra_fg_settings_tests PRIVATE veyra_engine)
+  target_compile_features(veyra_fg_lifecycle_tests PRIVATE cxx_std_20)
+  target_compile_definitions(veyra_fg_lifecycle_tests PRIVATE VEYRA_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+  target_link_libraries(veyra_fg_lifecycle_tests PRIVATE veyra_engine)
+  target_compile_features(veyra_export_frame_pool_tests PRIVATE cxx_std_20)
+  target_compile_definitions(veyra_export_frame_pool_tests PRIVATE VEYRA_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+  target_link_libraries(veyra_export_frame_pool_tests PRIVATE veyra_engine)
   add_executable(veyra_motion_validation_tests tests/integration/MotionValidationTests.cpp)
   add_executable(veyra_depth_response_tests tests/integration/DepthResponseTests.cpp)
   add_executable(veyra_srfg_depth_tests tests/integration/SrFgDepthResponseTests.cpp)
@@ -673,7 +713,7 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
   target_link_libraries(veyra_repair_fg_tests PRIVATE veyra_pipeline veyra_sinks veyra_nvof)
 
   # Headless quality-core runner (Playbook R3.3): the phase5 gate's quality
-  add_library(veyra_engine STATIC src/engine/EngineController.cpp src/engine/EngineControllerImage.cpp src/engine/TiledImageProcessor.cpp src/engine/PresetStore.cpp src/engine/VideoPresenter.cpp src/engine/VideoExportJob.cpp src/engine/ExportJobManager.cpp src/engine/Subtitles.cpp)
+  add_library(veyra_engine STATIC src/engine/EngineController.cpp src/engine/EngineControllerImage.cpp src/engine/TiledImageProcessor.cpp src/engine/PresetStore.cpp src/engine/VideoPresenter.cpp src/engine/VideoExportJob.cpp src/engine/ExportJobManager.cpp src/engine/Subtitles.cpp src/engine/FgCompatibilityProbe.cpp)
   target_sources(veyra_pipeline PRIVATE src/guidance/AmdOpticalFlow.cpp
     src/guidance/GpuDisOpticalFlow.cpp third_party/gpu-dis/src/gpu/native_strict_dis_provider.cpp)
   target_include_directories(veyra_pipeline PRIVATE third_party/gpu-dis/src/gpu)

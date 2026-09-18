@@ -1,6 +1,8 @@
 #include "veyra/ngx/AdaMfgUnlock.h"
 
 #include "veyra/Log.h"
+#include "veyra/FileIdentity.h"
+#include "compat/RestoreMemory.h"
 
 #include <bcrypt.h>
 
@@ -442,7 +444,7 @@ bool findMfgGateSite(uint8_t* base, const IMAGE_NT_HEADERS64* nt, MfgGateSite& s
     return true;
 }
 
-void patchGateSites(uint8_t* base, const IMAGE_NT_HEADERS64* nt,
+bool patchGateSites(uint8_t* base, const IMAGE_NT_HEADERS64* nt,
                     std::vector<std::pair<unsigned char*, unsigned char>>& sites) {
     const auto* section = IMAGE_FIRST_SECTION(nt);
     const size_t imageSize = nt->OptionalHeader.SizeOfImage;
@@ -463,18 +465,15 @@ void patchGateSites(uint8_t* base, const IMAGE_NT_HEADERS64* nt,
                 target = start + off + 2;
             }
             if (target == nullptr) continue;
-            DWORD oldProtect = 0;
-            if (VirtualProtect(target, 1, PAGE_EXECUTE_READWRITE, &oldProtect) == 0) continue;
             sites.push_back({target, *target});
-            *target = 0x90;  // 0x1b0 -> 0x190 (Blackwell gate -> Ada passes it)
-            DWORD ignored = 0;
-            VirtualProtect(target, 1, oldProtect, &ignored);
+            const uint8_t replacement=0x90; // Blackwell gate -> Ada
+            if(!compat::restoreMemory(target,&replacement,1))return false;
             if (target + 1 - start <= LONG(size)) {
                 off += 5;  // the compare we just rewrote cannot start inside itself
             }
         }
     }
-    FlushInstructionCache(GetCurrentProcess(), base, size_t(nt->OptionalHeader.SizeOfImage));
+    return true;
 }
 
 } // namespace
@@ -577,30 +576,22 @@ AdaMfgUnlock::State AdaMfgUnlock::apply(HMODULE module, bool includeKernelFix) {
                              nt->FileHeader.TimeDateStamp == kKnownTimeDateStamp;
 
     auto rollbackGates = [&]() {
+        bool restored = true;
         for (const auto& site : g.gateSites) {
-            DWORD oldProtect = 0;
-            if (VirtualProtect(site.first, 1, PAGE_EXECUTE_READWRITE, &oldProtect) == 0) continue;
-            *site.first = site.second;
-            DWORD ignored = 0;
-            VirtualProtect(site.first, 1, oldProtect, &ignored);
+            restored = compat::restoreMemory(site.first, &site.second, 1) && restored;
         }
-        g.gateSites.clear();
         for (const auto& write : g.mfgGateWrites) {
-            DWORD oldProtect = 0;
-            if (VirtualProtect(write.jump, 2, PAGE_EXECUTE_READWRITE, &oldProtect) == 0) continue;
-            std::memcpy(write.jump, write.original.data(), 2);
-            FlushInstructionCache(GetCurrentProcess(), write.jump, 2);
-            DWORD ignored = 0;
-            VirtualProtect(write.jump, 2, oldProtect, &ignored);
+            restored = compat::restoreMemory(write.jump, write.original.data(), 2) && restored;
         }
-        g.mfgGateWrites.clear();
+        if (restored) { g.gateSites.clear(); g.mfgGateWrites.clear(); }
+        else log::error("ada-mfg", "gate rollback incomplete; retaining restoration records");
     };
 
     // Architecture gates first: without both of them the runtime advertises
     // multi-frame and then renders black.
-    patchGateSites(base, nt, g.gateSites);
+    const bool gatesWritten=patchGateSites(base, nt, g.gateSites);
     state.archGateSites = g.gateSites.size();
-    state.archGatesPatched = state.archGateSites >= kMinArchGateSites &&
+    state.archGatesPatched = gatesWritten && state.archGateSites >= kMinArchGateSites &&
                              state.archGateSites <= kMaxArchGateSites;
     if (!state.archGatesPatched) {
         rollbackGates();
@@ -633,21 +624,16 @@ AdaMfgUnlock::State AdaMfgUnlock::apply(HMODULE module, bool includeKernelFix) {
         g.state = state;
         return state;
     }
+    g.mfgGateWrites.push_back({mfgGate.jump, mfgGateOriginal});
     {
-        DWORD oldProtect = 0;
-        if (VirtualProtect(mfgGate.jump, 2, PAGE_EXECUTE_READWRITE, &oldProtect) == 0) {
+        if (!compat::restoreMemory(mfgGate.jump,kMfgGateReplacement,2)) {
             rollbackGates();
             state.archGatesPatched = false;
             state.detail = L"count/index validator page is not writable; runtime left untouched";
             g.state = state;
             return state;
         }
-        std::memcpy(mfgGate.jump, kMfgGateReplacement, 2);
-        FlushInstructionCache(GetCurrentProcess(), mfgGate.jump, 2);
-        DWORD ignored = 0;
-        VirtualProtect(mfgGate.jump, 2, oldProtect, &ignored);
     }
-    g.mfgGateWrites.push_back({mfgGate.jump, mfgGateOriginal});
     state.mfgGatePatched = true;
 
     if (includeKernelFix) {
@@ -674,16 +660,19 @@ AdaMfgUnlock::State AdaMfgUnlock::apply(HMODULE module, bool includeKernelFix) {
             return state;
         }
         std::memcpy(mem, rebuilt.data(), rebuilt.size());
+        g.kernelAllocation = mem;
         for (const auto& hit : hits) {
-            DWORD oldProtect = 0;
-            if (VirtualProtect(hit.slot, 8, PAGE_READWRITE, &oldProtect) == 0) continue;
             g.descriptorSlots.push_back({hit.slot, *hit.slot});
-            *hit.slot = reinterpret_cast<uint64_t>(mem);
-            DWORD ignored = 0;
-            VirtualProtect(hit.slot, 8, oldProtect, &ignored);
+            const uint64_t replacement=reinterpret_cast<uint64_t>(mem);
+            if(!compat::restoreMemory(hit.slot,&replacement,8)){
+                // Keep all records and storage for the owning session's rollback.
+                state.detail=L"descriptor publication failed; session rollback required";
+                g.state=state;return state;
+            }
         }
         if (g.descriptorSlots.empty()) {
             VirtualFree(mem, 0, MEM_RELEASE);
+            g.kernelAllocation=nullptr;
             rollbackGates();
             state.archGatesPatched = false;
             state.mfgGatePatched = false;
@@ -709,44 +698,31 @@ AdaMfgUnlock::State AdaMfgUnlock::apply(HMODULE module, bool includeKernelFix) {
     return state;
 }
 
-void AdaMfgUnlock::release() {
+bool AdaMfgUnlock::release() {
     auto& g = global();
     std::lock_guard lock(g.mutex);
     if (!g.installed && g.gateSites.empty() && g.descriptorSlots.empty() && g.mfgGateWrites.empty()) {
-        return;
+        return true;
     }
+    bool restored = true;
     for (const auto& slot : g.descriptorSlots) {
-        DWORD oldProtect = 0;
-        if (VirtualProtect(slot.first, 8, PAGE_READWRITE, &oldProtect) == 0) continue;
-        *slot.first = slot.second;
-        DWORD ignored = 0;
-        VirtualProtect(slot.first, 8, oldProtect, &ignored);
-    }
-    g.descriptorSlots.clear();
-    if (g.kernelAllocation != nullptr) {
-        VirtualFree(g.kernelAllocation, 0, MEM_RELEASE);
-        g.kernelAllocation = nullptr;
+        restored = compat::restoreMemory(slot.first, &slot.second, 8) && restored;
     }
     for (const auto& site : g.gateSites) {
-        DWORD oldProtect = 0;
-        if (VirtualProtect(site.first, 1, PAGE_EXECUTE_READWRITE, &oldProtect) == 0) continue;
-        *site.first = site.second;
-        DWORD ignored = 0;
-        VirtualProtect(site.first, 1, oldProtect, &ignored);
+        restored = compat::restoreMemory(site.first, &site.second, 1) && restored;
     }
-    g.gateSites.clear();
     for (const auto& write : g.mfgGateWrites) {
-        DWORD oldProtect = 0;
-        if (VirtualProtect(write.jump, 2, PAGE_EXECUTE_READWRITE, &oldProtect) == 0) continue;
-        std::memcpy(write.jump, write.original.data(), 2);
-        FlushInstructionCache(GetCurrentProcess(), write.jump, 2);
-        DWORD ignored = 0;
-        VirtualProtect(write.jump, 2, oldProtect, &ignored);
+        restored = compat::restoreMemory(write.jump, write.original.data(), 2) && restored;
     }
+    if (!restored) { log::error("ada-mfg", "rollback incomplete; retaining kernel storage and records"); return false; }
+    g.descriptorSlots.clear();
+    g.gateSites.clear();
     g.mfgGateWrites.clear();
+    if (g.kernelAllocation != nullptr) { VirtualFree(g.kernelAllocation, 0, MEM_RELEASE); g.kernelAllocation = nullptr; }
     g.installed = false;
     g.state = State{};
     veyra::log::info("ada-mfg", "Ada multi-frame unlock rolled back (runtime image restored)");
+    return true;
 }
 
 AdaMfgUnlock::State AdaMfgUnlock::snapshot() {
@@ -762,12 +738,9 @@ bool AdaMfgUnlock::applied() {
 }
 
 bool AdaMfgUnlock::moduleIsAudited(const std::wstring& path) {
-    std::error_code ec;
-    const auto size = std::filesystem::file_size(path, ec);
-    if (ec || size != kKnownModuleSize) return false;
-    // Full hash verification happens in the probe and before any write; the UI
-    // hint only needs the cheap size check plus the PE identity.
-    return true;
+    FileIdentity identity;IdentityError error;
+    computeFileIdentity(path,identity,error);
+    return identity.sizeBytes==kKnownModuleSize&&identity.sha256Upper==kKnownModuleSha256;
 }
 
 } // namespace veyra::ngx

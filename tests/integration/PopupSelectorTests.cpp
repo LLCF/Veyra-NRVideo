@@ -36,11 +36,11 @@ try{
         next=CreateWindowExW(0,L"BUTTON",L"next",WS_CHILD|WS_VISIBLE|WS_TABSTOP,20,100,100,32,owner,HMENU(11),wc.hInstance,nullptr);
         // First ShowWindow consumes the runner's STARTUPINFO SW_HIDE.
         ShowWindow(owner,SW_HIDE);ShowWindow(owner,SW_SHOW);SetForegroundWindow(owner);SetActiveWindow(owner);
-        for(int i=0;i<24;++i){auto label=L"Option "+std::to_wstring(i);SendMessageW(combo,CB_ADDSTRING,0,LPARAM(label.c_str()));}SendMessageW(combo,CB_SETCURSEL,4,0);SetFocus(combo);notifications.clear();steps=0;SetTimer(owner,1,20,nullptr);
+        for(int i=0;i<33;++i){auto label=L"Option "+std::to_wstring(i);SendMessageW(combo,CB_ADDSTRING,0,LPARAM(label.c_str()));}SendMessageW(combo,CB_SETCURSEL,4,0);SetFocus(combo);notifications.clear();steps=0;SetTimer(owner,1,20,nullptr);
         SendMessageW(combo,CB_SHOWDROPDOWN,TRUE,0);if(IsWindow(owner))KillTimer(owner,1);require(action==8||action==12?steps==0:steps>0&&steps<=10,"bounded popup closed including synchronous cancellation");require(!veyra::ui::popupSelectorOpen()&&!veyra::ui::activeSelector,"popup releases all active state");
         if(action>=9&&action<=12){require(!IsWindow(combo),"destroyed combo stays destroyed");if(action==10||action==12)require(!IsWindow(owner),"destroyed owner stays destroyed");if(IsWindow(owner))DestroyWindow(owner);std::cout<<"PASS popup case "<<action<<"\n";continue;}
         require(!SendMessageW(combo,CB_GETDROPPEDSTATE,0,0),"collapse reports closed");require(notified(CBN_DROPDOWN)&&notified(CBN_CLOSEUP),"native dropdown lifecycle notifications");
-        if(action==0||action==5){require(SendMessageW(combo,CB_GETCURSEL,0,0)==(action==0?5:23),"arrow/end commits selected option including scrolled items");require(notified(CBN_SELCHANGE)&&notified(CBN_SELENDOK),"commit notifies owning panel");}
+        if(action==0||action==5){require(SendMessageW(combo,CB_GETCURSEL,0,0)==(action==0?5:32),"arrow/end commits selected option including scrolled items");require(notified(CBN_SELCHANGE)&&notified(CBN_SELENDOK),"commit notifies owning panel");}
         else{require(notified(CBN_SELENDCANCEL)&&!notified(CBN_SELCHANGE),"cancel never submits a setting");if(action!=4)require(SendMessageW(combo,CB_GETCURSEL,0,0)==4,"cancel keeps original selection");}
         if(action==3)require(GetFocus()==next,"Tab advances to next control");
         if(action==13)require(GetFocus()==previous,"Shift+Tab returns to previous control");

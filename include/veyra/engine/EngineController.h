@@ -11,6 +11,7 @@
 #include "veyra/engine/PreviewView.h"
 #include "veyra/sink/CaptureAudioSession.h"
 #include "veyra/remoteplay/SessionInbox.h"
+#include "veyra/media/AudioTrack.h"
 namespace veyra::source { struct RemotePlayConnectDesc; class RemotePlaySessionSource; }
 namespace veyra::remoteplay { struct ControllerState;struct ControllerFeedback; }
 namespace veyra::sink { struct RgbaImage; }
@@ -18,6 +19,7 @@ namespace veyra::gfx { class D3D12DeviceContext; class CommandSlotRing; }
 namespace veyra::engine {
 class FrameFlowWindow;
 struct PlayerOptions { bool nr=false,sr=false,fg=false,realtime=true; uint32_t fgMultiplier=2; EnhancementSettings settings;
+    int audioStreamIndex=-1; // export selection; -1 selects the container default
     bool captureReplayForTest=false; // file-backed live scheduler test; never enabled by UI
     bool captureReplayDisableFgAdmissionForTest=false; // controlled scheduler A/B only
     bool captureCpuUnpack=false; // N1 diagnostic: legacy per-pixel CPU unpack
@@ -36,6 +38,8 @@ struct PlayerSnapshot {
     std::wstring colorStatus;
     sink::CaptureAudioState captureAudio;
     unsigned audioInputChannels=0,audioOutputChannels=0;
+    std::vector<media::AudioTrack> audioTracks;
+    int selectedAudioTrack=-1;
     bool audioRebuffering=false;
     uint64_t audioVideoWaits=0;
     bool audioEndpointRecovering=false;HRESULT audioEndpointError=S_OK;uint64_t audioEndpointRecoveries=0;
@@ -100,6 +104,7 @@ public:
     void previewView(PreviewView view){if(!std::isfinite(view.zoom)||!std::isfinite(view.centerX)||!std::isfinite(view.centerY))return;std::lock_guard lock(mutex_);view.zoom=std::clamp(view.zoom,.05f,64.0f);previewView_=view;}
     PreviewView previewView()const{std::lock_guard lock(mutex_);return previewView_;}
     void setVolume(float gain,bool mute);
+    bool selectAudioTrack(uint64_t sessionId,int streamIndex);
     void seek(double seconds){if(!std::isfinite(seconds)||seconds<0)return;std::lock_guard lock(mutex_);snapshot_.seekTarget=seconds;++snapshot_.seekRequested;seekSeconds_.store(seconds);}
     void saveFrame(const std::wstring& path);
     void startExport(const std::wstring& input,const std::wstring& output,PlayerOptions,bool hevc);
@@ -122,6 +127,7 @@ private:
     std::atomic<bool> stop_{false},paused_{false},muted_{false};
     std::atomic<float> volume_{1};uint64_t sessionId_=0;
     std::atomic<double> seekSeconds_{-1};
+    int pendingAudioTrack_=-1;uint64_t pendingAudioSession_=0; // mutex_
     std::atomic<int> comparisonMode_{0};std::atomic<bool> comparisonBase_{false};std::atomic<float> comparisonSplit_{.5f};
     // Guarded by mutex_: DLSSG MultiFrameCountMax of the active session.
     int fgMultiFrameMaxCap_=0;

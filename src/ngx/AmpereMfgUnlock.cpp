@@ -1,8 +1,10 @@
 #include "veyra/ngx/AmpereMfgUnlock.h"
 
 #include "veyra/Log.h"
+#include "compat/RestoreMemory.h"
 
 #include <bcrypt.h>
+#include <psapi.h>
 
 #include <algorithm>
 #include <array>
@@ -296,12 +298,15 @@ bool buildSm86Fatbin(const FatbinInfo& info, std::vector<uint8_t>& out, std::str
     uint8_t* entry = out.data() + kOuterHeader;
     std::memcpy(entry, info.address + info.entryOffset, info.entryHeaderBytes);
     const uint64_t padded64 = padded;
-    const uint32_t zero32 = 0;
+    // Match upstream BuildAmpereSm86Fatbin: compressed entries use the padded
+    // length after expansion; originally raw entries retain an explicit size.
+    const uint32_t actualPayloadBytes = (info.flags & kCompressedFlag) != 0
+        ? 0u : static_cast<uint32_t>(ptx.size());
     const uint64_t zero64 = 0;
     const uint32_t sm86 = kSm86;
     const uint64_t uncompressed = info.flags & ~kCompressedFlag;
     std::memcpy(entry + 8, &padded64, 8);
-    std::memcpy(entry + 16, &zero32, 4);
+    std::memcpy(entry + 16, &actualPayloadBytes, 4);
     std::memcpy(entry + 28, &sm86, 4);
     std::memcpy(entry + 40, &uncompressed, 8);
     std::memcpy(entry + 56, &zero64, 8);
@@ -334,6 +339,7 @@ struct SlotHit {
     uint8_t* slot = nullptr;         // address of the fatbin pointer field
     const uint8_t* fatbin = nullptr;
     size_t fatbinSize = 0;
+    std::string entryName;
 };
 
 // Find every registration-table slot: an 8-byte field inside a read-only,
@@ -356,12 +362,12 @@ std::vector<SlotHit> findSlotHits(const ImageLayout& image) {
             if (value < imageStart || value >= imageStart + imageSize) continue;
             const auto* candidate = reinterpret_cast<const uint8_t*>(value);
             if (readU32(candidate) != kFatbinMagic) continue;
-            uint64_t entryName = 0, descName = 0;
-            std::memcpy(&entryName, sec + off + kEntryNameOffset, 8);
+            uint64_t entryNamePointer = 0, descName = 0;
+            std::memcpy(&entryNamePointer, sec + off + kEntryNameOffset, 8);
             // The record's own name field sits 8 bytes before the slot; the
             // following record's first field would read past a run's end.
             std::memcpy(&descName, sec + off - 8, 8);
-            if (!pointsToCString(image.base, imageSize, entryName, kEntryName)) continue;
+            if (!pointsToCString(image.base, imageSize, entryNamePointer, kEntryName)) continue;
             if (!pointsToCString(image.base, imageSize, descName, kDescriptorName)) continue;
             const size_t total = size_t(readU64(candidate + 8)) + kOuterHeader;
             if (total < 1024 || total > kMaximumFatbinBytes) continue;
@@ -369,7 +375,17 @@ std::vector<SlotHit> findSlotHits(const ImageLayout& image) {
             if (value < imageStart) continue;
             FatbinInfo info{};
             if (!parseFatbin(candidate, total, info)) continue;
-            hits.push_back({sec + off, candidate, total});
+            uint64_t entryNameAddress = 0;
+            std::memcpy(&entryNameAddress, sec + off + kEntryNameOffset, 8);
+            std::string entryName;
+            if (entryNameAddress >= imageStart &&
+                entryNameAddress < imageStart + imageSize) {
+                const char* text = reinterpret_cast<const char*>(entryNameAddress);
+                const size_t maxLength = imageStart + imageSize - entryNameAddress;
+                const size_t length = strnlen_s(text, maxLength);
+                if (length > 0 && length < 96) entryName.assign(text, length);
+            }
+            hits.push_back({sec + off, candidate, total, std::move(entryName)});
         }
     }
     return hits;
@@ -464,13 +480,50 @@ struct LeaWrite {
     int32_t original = 0;
 };
 
+struct FontWrite {
+    uint8_t* address = nullptr;
+    std::vector<uint8_t> original;
+    DWORD protection = 0;
+};
+
+// Adapted from upstream FontPageProtectionMatches/RestoreFontPage/WriteFont.
+// Windows may report a privatized WRITECOPY image page as READWRITE. Accept
+// that transition only after the working set proves the page is private.
+bool writeFontPage(const FontWrite& page, const uint8_t* bytes) {
+    if (GetEnvironmentVariableW(L"VEYRA_TEST_PATCH_RESTORE_FAIL", nullptr, 0)) return false;
+    DWORD ignored = 0;
+    const bool writable = VirtualProtect(page.address, page.original.size(), PAGE_WRITECOPY, &ignored) != FALSE;
+    if (writable) std::memcpy(page.address, bytes, page.original.size());
+    bool restored = false;
+    for (unsigned retry = 0; retry != 2 && !restored; ++retry) {
+        VirtualProtect(page.address, page.original.size(), page.protection, &ignored);
+        MEMORY_BASIC_INFORMATION memory{};
+        if (VirtualQuery(page.address, &memory, sizeof(memory)) != sizeof(memory) ||
+            memory.State != MEM_COMMIT || memory.Type != MEM_IMAGE) continue;
+        restored = memory.Protect == page.protection;
+        if (!restored && page.protection == PAGE_WRITECOPY && memory.Protect == PAGE_READWRITE) {
+            PSAPI_WORKING_SET_EX_INFORMATION working{};
+            working.VirtualAddress = page.address;
+            restored = K32QueryWorkingSetEx(GetCurrentProcess(), &working, sizeof(working)) &&
+                working.VirtualAttributes.Valid && !working.VirtualAttributes.Shared;
+        }
+    }
+    if (!restored) compat::memoryProtectionUncertain = true;
+    const bool ok = writable && restored && std::memcmp(page.address, bytes, page.original.size()) == 0;
+    if (!ok) log::error("ampere-mfg", std::format("font page write failed writable={} restored={} win32={}",
+        writable, restored, GetLastError()));
+    return ok;
+}
+
 struct GlobalState {
     std::mutex mutex;
     AmpereMfgUnlock::State state{};
     bool installed = false;
     std::vector<std::pair<uint8_t*, uint8_t>> archGateWrites;
     std::vector<std::pair<uint64_t*, uint64_t>> slotWrites;
+    std::vector<std::pair<uint8_t*, uint32_t>> sizeWrites;
     std::vector<LeaWrite> leaWrites;
+    std::vector<FontWrite> fontWrites;
     void* allocation = nullptr;
 };
 
@@ -481,7 +534,7 @@ GlobalState& global() {
 
 // Patch the 0x1b0 architecture compares to 0x170 (Ampere) so 30/40/50 series
 // all pass; the gate only decides the reported multi-frame ceiling.
-void patchArchGates(uint8_t* base, const IMAGE_NT_HEADERS64* nt,
+bool patchArchGates(uint8_t* base, const IMAGE_NT_HEADERS64* nt,
                     std::vector<std::pair<uint8_t*, uint8_t>>& sites) {
     const auto* section = IMAGE_FIRST_SECTION(nt);
     for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++section) {
@@ -501,18 +554,15 @@ void patchArchGates(uint8_t* base, const IMAGE_NT_HEADERS64* nt,
                 target = start + off + 2;
             }
             if (target == nullptr) continue;
-            DWORD oldProtect = 0;
-            if (VirtualProtect(target, 1, PAGE_EXECUTE_READWRITE, &oldProtect) == 0) continue;
             sites.push_back({target, *target});
-            *target = 0x70;  // 0x1b0 -> 0x170 (Ampere passes)
-            DWORD ignored = 0;
-            VirtualProtect(target, 1, oldProtect, &ignored);
+            const uint8_t replacement=0x70;
+            if(!compat::restoreMemory(target,&replacement,1))return false;
             if (target + 1 - start <= LONG(size)) {
                 off += 5;
             }
         }
     }
-    FlushInstructionCache(GetCurrentProcess(), base, size_t(nt->OptionalHeader.SizeOfImage));
+    return true;
 }
 
 // Allocate the rebuilt set inside an address window that every RIP-relative
@@ -557,7 +607,8 @@ void* allocateReachable(size_t bytes, const uint8_t* moduleBase) {
 // compiles the sm_86 programs on the real Ampere device; on other hosts it at
 // least proves the PTX/JIT path is legal.
 bool preflightPrograms(const std::vector<std::pair<const uint8_t*, size_t>>& programs,
-                       std::string& why, size_t& loaded) {
+                       const std::vector<std::string>& entryNames,
+                       uint64_t adapterLuid, std::string& why, size_t& loaded) {
     loaded = 0;
     HMODULE cuda = LoadLibraryExW(L"nvcuda.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (cuda == nullptr) {
@@ -570,16 +621,31 @@ bool preflightPrograms(const std::vector<std::pair<const uint8_t*, size_t>>& pro
         reinterpret_cast<void*>(GetProcAddress(cuda, "cuInit")));
     const auto deviceGet = reinterpret_cast<int (*)(int*, int)>(
         reinterpret_cast<void*>(GetProcAddress(cuda, "cuDeviceGet")));
+    const auto deviceGetCount = reinterpret_cast<int (*)(int*)>(
+        reinterpret_cast<void*>(GetProcAddress(cuda, "cuDeviceGetCount")));
+    const auto deviceGetLuid = reinterpret_cast<int (*)(char*, unsigned*, int)>(
+        reinterpret_cast<void*>(GetProcAddress(cuda, "cuDeviceGetLuid")));
     const auto ctxCreate = reinterpret_cast<int (*)(void**, unsigned, int)>(
         reinterpret_cast<void*>(GetProcAddress(cuda, "cuCtxCreate_v2")));
     const auto ctxDestroy = reinterpret_cast<int (*)(void*)>(
         reinterpret_cast<void*>(GetProcAddress(cuda, "cuCtxDestroy_v2")));
-    const auto moduleLoad = reinterpret_cast<int (*)(void**, const void*, unsigned, void*, void*)>(
-        reinterpret_cast<void*>(GetProcAddress(cuda, "cuModuleLoadDataEx")));
+    const auto ctxGetCurrent = reinterpret_cast<int (*)(void**)>(
+        reinterpret_cast<void*>(GetProcAddress(cuda, "cuCtxGetCurrent")));
+    const auto ctxPopCurrent = reinterpret_cast<int (*)(void**)>(
+        reinterpret_cast<void*>(GetProcAddress(cuda, "cuCtxPopCurrent_v2")));
+    const auto moduleLoad = reinterpret_cast<int (*)(void**, const void*)>(
+        reinterpret_cast<void*>(GetProcAddress(cuda, "cuModuleLoadData")));
+    const auto moduleGetFunction = reinterpret_cast<int (*)(void**, void*, const char*)>(
+        reinterpret_cast<void*>(GetProcAddress(cuda, "cuModuleGetFunction")));
+    const auto functionLoad = reinterpret_cast<int (*)(void*)>(
+        reinterpret_cast<void*>(GetProcAddress(cuda, "cuFuncLoad")));
     const auto moduleUnload = reinterpret_cast<int (*)(void*)>(
         reinterpret_cast<void*>(GetProcAddress(cuda, "cuModuleUnload")));
-    if (init == nullptr || deviceGet == nullptr || ctxCreate == nullptr ||
-        ctxDestroy == nullptr || moduleLoad == nullptr || moduleUnload == nullptr) {
+    if (init == nullptr || deviceGet == nullptr || deviceGetCount == nullptr ||
+        deviceGetLuid == nullptr || ctxCreate == nullptr ||
+        ctxDestroy == nullptr || ctxGetCurrent == nullptr || ctxPopCurrent == nullptr ||
+        moduleLoad == nullptr || moduleGetFunction == nullptr || moduleUnload == nullptr ||
+        programs.size() != entryNames.size()) {
         why = "nvcuda.dll does not export the required driver API";
         return false;
     }
@@ -587,9 +653,37 @@ bool preflightPrograms(const std::vector<std::pair<const uint8_t*, size_t>>& pro
         why = "cuInit failed";
         return false;
     }
-    int device = 0;
-    if (deviceGet(&device, 0) != 0) {
-        why = "cuDeviceGet failed";
+    int device = -1, deviceCount = 0;
+    const int countResult = deviceGetCount(&deviceCount);
+    if (countResult != 0) {
+        why = std::format("cuDeviceGetCount failed result={}", countResult);
+        return false;
+    }
+    unsigned matches = 0;
+    for (int ordinal = 0; ordinal < deviceCount; ++ordinal) {
+        int candidate = -1;
+        const int getResult = deviceGet(&candidate, ordinal);
+        if (getResult != 0) {
+            why = std::format("cuDeviceGet failed ordinal={} result={}", ordinal, getResult);
+            return false;
+        }
+        uint64_t luid = 0;
+        unsigned nodeMask = 0;
+        const int luidResult = deviceGetLuid(reinterpret_cast<char*>(&luid), &nodeMask, candidate);
+        if ((adapterLuid == 0 && ordinal == 0) ||
+            (adapterLuid != 0 && luidResult == 0 && luid == adapterLuid && nodeMask != 0)) {
+            device = candidate;
+            ++matches;
+        }
+    }
+    if (matches != 1) {
+        why = std::format("CUDA adapter match failed D3D12 LUID=0x{:X} matches={}", adapterLuid, matches);
+        return false;
+    }
+    log::info("ampere-mfg", std::format("CUDA preflight adapter={} D3D12 LUID=0x{:X}", device, adapterLuid));
+    void* previousContext = nullptr;
+    if (ctxGetCurrent(&previousContext) != 0) {
+        why = "cuCtxGetCurrent failed";
         return false;
     }
     void* context = nullptr;
@@ -600,17 +694,42 @@ bool preflightPrograms(const std::vector<std::pair<const uint8_t*, size_t>>& pro
     bool ok = true;
     for (size_t index = 0; index < programs.size(); ++index) {
         void* module = nullptr;
-        const int result = moduleLoad(&module, programs[index].first, 0, nullptr, nullptr);
+        const int result = moduleLoad(&module, programs[index].first);
         if (result != 0) {
-            why = std::format("the CUDA driver rejected rebuilt program {} (cuModuleLoadDataEx={})",
+            why = std::format("the CUDA driver rejected rebuilt program {} (cuModuleLoadData={})",
                               index, result);
             ok = false;
             break;
         }
-        if (module != nullptr) moduleUnload(module);
+        void* function = nullptr;
+        const char* entry = entryNames[index].empty() ? "main_kernel" : entryNames[index].c_str();
+        const int functionResult = module != nullptr
+            ? moduleGetFunction(&function, module, entry) : 200;
+        const int loadResult = functionResult == 0 && functionLoad != nullptr && function != nullptr
+            ? functionLoad(function) : functionResult == 0 && functionLoad == nullptr ? 0 : 200;
+        const int unloadResult = module != nullptr ? moduleUnload(module) : 200;
+        if (functionResult != 0 || loadResult != 0 || unloadResult != 0 || function == nullptr) {
+            why = std::format("CUDA function preflight failed for program {} entry={} module={} function={} cuModuleGetFunction={} cuFuncLoad={} cuModuleUnload={}",
+                              index, entry, module != nullptr ? 1 : 0, function != nullptr ? 1 : 0,
+                              functionResult, loadResult, unloadResult);
+            ok = false;
+            break;
+        }
         ++loaded;
     }
-    ctxDestroy(context);
+    void* current = nullptr;
+    const int currentResult = ctxGetCurrent(&current);
+    void* popped = nullptr;
+    const int popResult = currentResult == 0 && current == context ? ctxPopCurrent(&popped) : 201;
+    const int destroyResult = popResult == 0 && popped == context ? ctxDestroy(context) : 201;
+    void* restoredContext = nullptr;
+    const int restoredResult = ctxGetCurrent(&restoredContext);
+    if (popResult != 0 || popped != context || destroyResult != 0 ||
+        restoredResult != 0 || restoredContext != previousContext) {
+        why = std::format("CUDA private context cleanup failed pop={} destroy={} restored={}",
+                          popResult, destroyResult, restoredResult == 0 && restoredContext == previousContext ? 1 : 0);
+        ok = false;
+    }
     return ok;
 }
 
@@ -774,7 +893,7 @@ bool AmpereMfgUnlock::adapterIsAmpere(uint32_t vendorId, uint32_t deviceId) {
     return deviceId >= 0x2200 && deviceId < 0x2680;
 }
 
-AmpereMfgUnlock::State AmpereMfgUnlock::apply(HMODULE module, bool retargetArchGates) {
+AmpereMfgUnlock::State AmpereMfgUnlock::apply(HMODULE module, bool retargetArchGates, uint64_t adapterLuid) {
     auto& g = global();
     std::lock_guard lock(g.mutex);
     State state{};
@@ -922,15 +1041,23 @@ AmpereMfgUnlock::State AmpereMfgUnlock::apply(HMODULE module, bool retargetArchG
     state.auxFatbins = auxCount;
     state.leaSites = leaSites.size();
 
-    // Rebuild every fatbin as a single-entry sm_86 program (the temporal slot
-    // additionally gets the midpoint correction).
+    // Match upstream's 25 registered programs plus the exact auxiliary font.
+    // DL4RT network and other auxiliary programs remain provider-owned.
     struct Replacement {
         const uint8_t* original = nullptr;
         std::vector<uint8_t> data;
     };
     std::vector<Replacement> replacements;
-    replacements.reserve(fatbins.size());
-    for (const auto& fb : fatbins) {
+    replacements.reserve(programAddresses.size());
+    for (const auto* address : programAddresses) {
+        const auto fbIt = std::find_if(fatbins.begin(), fatbins.end(),
+                                       [&](const FatbinInfo& fb) { return fb.address == address; });
+        if (fbIt == fatbins.end()) {
+            state.detail = L"registered kernel fatbin disappeared from the audited inventory";
+            g.state = state;
+            return state;
+        }
+        const auto& fb = *fbIt;
         std::vector<uint8_t> data;
         std::string why;
         if (!buildSm86Fatbin(fb, data, why)) {
@@ -944,6 +1071,53 @@ AmpereMfgUnlock::State AmpereMfgUnlock::apply(HMODULE module, bool retargetArchG
         replacements.push_back({fb.address, std::move(data)});
     }
 
+    if (replacements.size() != programAddresses.size()) {
+        state.detail = L"rebuilt program count does not match registration slots";
+        g.state = state;
+        return state;
+    }
+
+    // The provider stores the CUDA kernel entry name in each registration
+    // record.  Preserve that contract for cuModuleGetFunction preflight;
+    // assuming a generic name lets malformed PTX pass the cheap load check.
+    std::vector<std::string> entryNames;
+    entryNames.reserve(programAddresses.size());
+    for (const auto* address : programAddresses) {
+        const auto hit = std::find_if(hits.begin(), hits.end(),
+                                      [&](const SlotHit& slot) { return slot.fatbin == address; });
+        if (hit == hits.end() || hit->entryName.empty()) {
+            state.detail = L"a registered kernel is missing its CUDA entry name";
+            g.state = state;
+            return state;
+        }
+        entryNames.push_back(hit->entryName);
+    }
+
+    // Ported from upstream ampere_font_program.inl PrepareFont (MIT, pinned
+    // commit in the header). Rebuild PTX from the mapped image; no embedded
+    // native payload is copied into Veyra's source or written to disk.
+    constexpr size_t fontBytes = 6752;
+    constexpr char fontHash[] = "C6CC4129606AF4A3931C98BF7F7405EB9F5469F6522DA914FE7F3E5B39A224A1";
+    const FatbinInfo* font = nullptr;
+    for (const auto& fb : fatbins) {
+        if (classify(fb.address) != 2 || fb.size != fontBytes ||
+            !sha256Equals(fb.address, fb.size, fontHash)) continue;
+        if (font) {
+            state.detail = L"auxiliary font identity is not unique";
+            g.state = state;
+            return state;
+        }
+        font = &fb;
+    }
+    std::vector<uint8_t> fontData;
+    std::string fontWhy;
+    if (!font || !buildSm86Fatbin(*font, fontData, fontWhy) || fontData.size() > fontBytes) {
+        state.detail = std::format(L"auxiliary font rebuild refused: {}",
+            std::wstring(fontWhy.begin(), fontWhy.end()));
+        g.state = state;
+        return state;
+    }
+
     // The driver must accept the whole rebuilt program set before anything is
     // published; a rejected program is a refusal, never a half-installed set.
     size_t preflightLoaded = 0;
@@ -953,8 +1127,10 @@ AmpereMfgUnlock::State AmpereMfgUnlock::apply(HMODULE module, bool retargetArchG
         for (const auto& replacement : replacements) {
             programData.push_back({replacement.data.data(), replacement.data.size()});
         }
+        programData.push_back({fontData.data(), fontData.size()});
+        entryNames.push_back("cuda_font_kernel");
         std::string preflightWhy;
-        if (!preflightPrograms(programData, preflightWhy, preflightLoaded)) {
+        if (!preflightPrograms(programData, entryNames, adapterLuid, preflightWhy, preflightLoaded)) {
             state.detail = std::format(L"CUDA preflight refused the rebuilt program set: {}",
                                        std::wstring(preflightWhy.begin(), preflightWhy.end()));
             g.state = state;
@@ -990,32 +1166,28 @@ AmpereMfgUnlock::State AmpereMfgUnlock::apply(HMODULE module, bool retargetArchG
     };
 
     auto rollbackAll = [&]() {
+        bool restored = true;
+        for (auto it = g.fontWrites.rbegin(); it != g.fontWrites.rend(); ++it) {
+            restored = writeFontPage(*it, it->original.data()) && restored;
+        }
         for (auto it = g.leaWrites.rbegin(); it != g.leaWrites.rend(); ++it) {
-            DWORD old = 0;
-            if (VirtualProtect(it->disp32, 4, PAGE_EXECUTE_READWRITE, &old) == 0) continue;
-            std::memcpy(it->disp32, &it->original, 4);
-            DWORD ignored = 0;
-            VirtualProtect(it->disp32, 4, old, &ignored);
+            restored = compat::restoreMemory(it->disp32, &it->original, 4) && restored;
         }
-        g.leaWrites.clear();
         for (auto it = g.slotWrites.rbegin(); it != g.slotWrites.rend(); ++it) {
-            DWORD old = 0;
-            if (VirtualProtect(it->first, 8, PAGE_READWRITE, &old) == 0) continue;
-            *it->first = it->second;
-            DWORD ignored = 0;
-            VirtualProtect(it->first, 8, old, &ignored);
+            restored = compat::restoreMemory(it->first, &it->second, 8) && restored;
         }
-        g.slotWrites.clear();
+        for (auto it = g.sizeWrites.rbegin(); it != g.sizeWrites.rend(); ++it) {
+            restored = compat::restoreMemory(it->first, &it->second, 4) && restored;
+        }
         for (auto it = g.archGateWrites.rbegin(); it != g.archGateWrites.rend(); ++it) {
-            DWORD old = 0;
-            if (VirtualProtect(it->first, 1, PAGE_EXECUTE_READWRITE, &old) == 0) continue;
-            *it->first = it->second;
-            DWORD ignored = 0;
-            VirtualProtect(it->first, 1, old, &ignored);
+            restored = compat::restoreMemory(it->first, &it->second, 1) && restored;
         }
+        if (!restored) { log::error("ampere-mfg", "rollback incomplete; retaining kernel storage and records"); return; }
+        g.leaWrites.clear();
+        g.fontWrites.clear();
+        g.slotWrites.clear();
+        g.sizeWrites.clear();
         g.archGateWrites.clear();
-        FlushInstructionCache(GetCurrentProcess(), image.base,
-                              size_t(image.nt->OptionalHeader.SizeOfImage));
         if (g.allocation != nullptr) {
             VirtualFree(g.allocation, 0, MEM_RELEASE);
             g.allocation = nullptr;
@@ -1026,8 +1198,8 @@ AmpereMfgUnlock::State AmpereMfgUnlock::apply(HMODULE module, bool retargetArchG
     // the provider see Blackwell through the NVAPI spoof: then the provider's
     // own compare must stay byte-identical so that the reported id matches it.
     if (retargetArchGates) {
-        patchArchGates(image.base, image.nt, g.archGateWrites);
-        if (g.archGateWrites.size() < kMinArchGateSites ||
+        const bool written=patchArchGates(image.base, image.nt, g.archGateWrites);
+        if (!written || g.archGateWrites.size() < kMinArchGateSites ||
             g.archGateWrites.size() > kMaxArchGateSites) {
             const size_t found = g.archGateWrites.size();
             rollbackAll();
@@ -1042,52 +1214,40 @@ AmpereMfgUnlock::State AmpereMfgUnlock::apply(HMODULE module, bool retargetArchG
     }
     state.archGatesPatched = true;
 
-    // 2. registration slot pointers
+    // 2. Publish pointer AND supplied byte length, as upstream PatchProvider
+    // does at descriptor offsets +8/+16. Rebuilt PTX has a different size.
+    size_t redirectedSlots = 0;
     for (const auto& hit : hits) {
         const uint8_t* target = newAddressOf(hit.fatbin);
-        if (target == nullptr) {
-            rollbackAll();
-            state.archGatesPatched = false;
-            state.detail = L"internal error: rebuilt fatbin mapping missing for a slot";
-            g.state = state;
-            return state;
-        }
-        DWORD old = 0;
-        if (VirtualProtect(hit.slot, 8, PAGE_READWRITE, &old) == 0) {
+        // Non-kernel records intentionally keep their original provider-owned
+        // network/auxiliary pointer and descriptor length.
+        if (target == nullptr) continue;
+        uint64_t original = 0;
+        std::memcpy(&original, hit.slot, 8);
+        g.slotWrites.push_back({reinterpret_cast<uint64_t*>(hit.slot), original});
+        const uint64_t replacement = reinterpret_cast<uint64_t>(target);
+        const auto size = static_cast<uint32_t>(readU64(target + 8) + kOuterHeader);
+        g.sizeWrites.push_back({hit.slot + 8, readU32(hit.slot + 8)});
+        if (!compat::restoreMemory(hit.slot,&replacement,8) ||
+            !compat::restoreMemory(hit.slot + 8, &size, 4)) {
             rollbackAll();
             state.archGatesPatched = false;
             state.detail = L"a registration slot page is not writable; runtime left untouched";
             g.state = state;
             return state;
         }
-        uint64_t original = 0;
-        std::memcpy(&original, hit.slot, 8);
-        g.slotWrites.push_back({reinterpret_cast<uint64_t*>(hit.slot), original});
-        const uint64_t replacement = reinterpret_cast<uint64_t>(target);
-        std::memcpy(hit.slot, &replacement, 8);
-        DWORD ignored = 0;
-        VirtualProtect(hit.slot, 8, old, &ignored);
+        ++redirectedSlots;
     }
 
     // 3. RIP-relative references
     for (const auto& site : leaSites) {
         const uint8_t* target = newAddressOf(site.target);
         if (target == nullptr) continue;
-        DWORD old = 0;
-        if (VirtualProtect(site.disp32, 4, PAGE_EXECUTE_READWRITE, &old) == 0) {
-            rollbackAll();
-            state.archGatesPatched = false;
-            state.detail = L"a code page carrying a fatbin reference is not writable; runtime left untouched";
-            g.state = state;
-            return state;
-        }
         int32_t original = 0;
         std::memcpy(&original, site.disp32, 4);
         const int64_t displacement = intptr_t(target) -
                                      (reinterpret_cast<intptr_t>(site.disp32) + 4);
         if (displacement < INT32_MIN || displacement > INT32_MAX) {
-            DWORD ignored0 = 0;
-            VirtualProtect(site.disp32, 4, old, &ignored0);
             rollbackAll();
             state.archGatesPatched = false;
             state.detail = L"a rebuilt fatbin is out of reach of its RIP-relative reference; runtime left untouched";
@@ -1096,59 +1256,87 @@ AmpereMfgUnlock::State AmpereMfgUnlock::apply(HMODULE module, bool retargetArchG
         }
         const int32_t replacement = static_cast<int32_t>(displacement);
         g.leaWrites.push_back({site.disp32, original});
-        std::memcpy(site.disp32, &replacement, 4);
-        DWORD ignored = 0;
-        VirtualProtect(site.disp32, 4, old, &ignored);
+        if(!compat::restoreMemory(site.disp32,&replacement,4)){
+            rollbackAll();state.archGatesPatched=false;
+            state.detail=L"fatbin code reference publication failed";
+            g.state=state;return state;
+        }
     }
-    FlushInstructionCache(GetCurrentProcess(), image.base,
-                          size_t(image.nt->OptionalHeader.SizeOfImage));
+
+    // Preserve the font's address and original supplied byte length. Record
+    // each page separately so adjacent globals retain their page protections.
+    fontData.resize(fontBytes, 0);
+    SYSTEM_INFO system{};
+    GetSystemInfo(&system);
+    for (size_t offset = 0; offset < fontBytes;) {
+        auto* address = const_cast<uint8_t*>(font->address) + offset;
+        const size_t bytes = std::min(fontBytes - offset,
+            size_t(system.dwPageSize) - reinterpret_cast<uintptr_t>(address) % system.dwPageSize);
+        DWORD protection = 0;
+        const bool queried = protected_pointer::QueryProtection(reinterpret_cast<uintptr_t>(address), protection, bytes);
+        if (queried && (protection == PAGE_READONLY || protection == PAGE_READWRITE || protection == PAGE_WRITECOPY))
+            g.fontWrites.push_back({address, std::vector<uint8_t>(address, address + bytes), protection});
+        else {
+            rollbackAll();
+            state.detail = L"auxiliary font page protection is not supported";
+            state.archGatesPatched = false;
+            g.state = state;
+            return state;
+        }
+        if (!writeFontPage(g.fontWrites.back(), fontData.data() + offset)) {
+            rollbackAll();
+            state.detail = L"auxiliary font publication failed";
+            state.archGatesPatched = false;
+            g.state = state;
+            return state;
+        }
+        offset += bytes;
+    }
 
     g.installed = true;
     state.fatbinsRedirected = true;
     state.applied = state.archGatesPatched && state.fatbinsRedirected;
     state.detail = std::format(
-        L"runs={} slots={} fatbins={} lea={} gates={} preflight={}/{} (in-memory only)",
-        slotRuns, hits.size(), replacements.size(), g.leaWrites.size(), state.archGateSites,
-        preflightLoaded, replacements.size());
+        L"runs={} slots={} fatbins={} font=1 lea={} gates={} preflight={}/{} (in-memory only)",
+        slotRuns, redirectedSlots, replacements.size(), g.leaWrites.size(), state.archGateSites,
+        preflightLoaded, replacements.size() + 1);
     g.state = state;
     veyra::log::info("ampere-mfg",
-                     std::format("RTX 30 sm_86 unlock: {} runs / {} slot pointers, {} fatbins redirected, "
-                                 "{} lea references, {} arch gates, identityVerified={}",
-                                 slotRuns, hits.size(), replacements.size(), g.leaWrites.size(),
+                     std::format("RTX 30 sm_86 unlock: {} runs / "
+                                 "{} redirected kernel slots, {} fatbins redirected, {} lea references, {} arch gates, identityVerified={}",
+                                 slotRuns, redirectedSlots, replacements.size(), g.leaWrites.size(),
                                  state.archGateSites, state.identityVerified ? 1 : 0));
     return state;
 }
 
-void AmpereMfgUnlock::release() {
+bool AmpereMfgUnlock::release() {
     auto& g = global();
     std::lock_guard lock(g.mutex);
-    if (!g.installed && g.archGateWrites.empty() && g.slotWrites.empty() &&
-        g.leaWrites.empty() && g.allocation == nullptr) {
-        return;
+    if (!g.installed && g.archGateWrites.empty() && g.slotWrites.empty() && g.sizeWrites.empty() &&
+        g.leaWrites.empty() && g.fontWrites.empty() && g.allocation == nullptr) {
+        return true;
+    }
+    bool restored = true;
+    for (auto it = g.fontWrites.rbegin(); it != g.fontWrites.rend(); ++it) {
+        restored = writeFontPage(*it, it->original.data()) && restored;
     }
     for (auto it = g.leaWrites.rbegin(); it != g.leaWrites.rend(); ++it) {
-        DWORD old = 0;
-        if (VirtualProtect(it->disp32, 4, PAGE_EXECUTE_READWRITE, &old) == 0) continue;
-        std::memcpy(it->disp32, &it->original, 4);
-        DWORD ignored = 0;
-        VirtualProtect(it->disp32, 4, old, &ignored);
+        restored = compat::restoreMemory(it->disp32, &it->original, 4) && restored;
     }
-    g.leaWrites.clear();
     for (auto it = g.slotWrites.rbegin(); it != g.slotWrites.rend(); ++it) {
-        DWORD old = 0;
-        if (VirtualProtect(it->first, 8, PAGE_READWRITE, &old) == 0) continue;
-        *it->first = it->second;
-        DWORD ignored = 0;
-        VirtualProtect(it->first, 8, old, &ignored);
+        restored = compat::restoreMemory(it->first, &it->second, 8) && restored;
     }
-    g.slotWrites.clear();
+    for (auto it = g.sizeWrites.rbegin(); it != g.sizeWrites.rend(); ++it) {
+        restored = compat::restoreMemory(it->first, &it->second, 4) && restored;
+    }
     for (auto it = g.archGateWrites.rbegin(); it != g.archGateWrites.rend(); ++it) {
-        DWORD old = 0;
-        if (VirtualProtect(it->first, 1, PAGE_EXECUTE_READWRITE, &old) == 0) continue;
-        *it->first = it->second;
-        DWORD ignored = 0;
-        VirtualProtect(it->first, 1, old, &ignored);
+        restored = compat::restoreMemory(it->first, &it->second, 1) && restored;
     }
+    if (!restored) { log::error("ampere-mfg", "rollback incomplete; retaining kernel storage and records"); return false; }
+    g.leaWrites.clear();
+    g.fontWrites.clear();
+    g.slotWrites.clear();
+    g.sizeWrites.clear();
     g.archGateWrites.clear();
     if (g.allocation != nullptr) {
         VirtualFree(g.allocation, 0, MEM_RELEASE);
@@ -1157,6 +1345,7 @@ void AmpereMfgUnlock::release() {
     g.installed = false;
     g.state = State{};
     veyra::log::info("ampere-mfg", "RTX 30 sm_86 unlock rolled back (runtime image restored)");
+    return true;
 }
 
 AmpereMfgUnlock::State AmpereMfgUnlock::snapshot() {

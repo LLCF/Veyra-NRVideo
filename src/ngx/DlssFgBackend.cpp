@@ -9,14 +9,42 @@
 #pragma warning(pop)
 
 #include <format>
+#include <filesystem>
 
 #include "veyra/Log.h"
 #include "veyra/NgxResult.h"
 #include "veyra/ngx/NgxCoreHost.h"
+#include "veyra/ngx/FgCompatibilitySession.h"
 
 namespace veyra::ngx {
 
 namespace {
+
+int LogDlssgException(EXCEPTION_POINTERS* exception)
+{
+    const auto* record = exception->ExceptionRecord;
+    MEMORY_BASIC_INFORMATION memory{};
+    VirtualQuery(record->ExceptionAddress, &memory, sizeof(memory));
+    wchar_t module[MAX_PATH]{};
+    GetModuleFileNameW(static_cast<HMODULE>(memory.AllocationBase), module, MAX_PATH);
+    log::error("ngx", std::format("DLSSG exception code=0x{:X} module={} rva=0x{:X} access={} address=0x{:X} rcx=0x{:X} rdx=0x{:X} r8=0x{:X} r9=0x{:X}",
+        record->ExceptionCode, std::filesystem::path(module).filename().string(),
+        uintptr_t(record->ExceptionAddress) - uintptr_t(memory.AllocationBase),
+        record->NumberParameters ? record->ExceptionInformation[0] : 0,
+        record->NumberParameters > 1 ? record->ExceptionInformation[1] : 0,
+        exception->ContextRecord->Rcx, exception->ContextRecord->Rdx,
+        exception->ContextRecord->R8, exception->ContextRecord->R9));
+    void* frames[24]{};
+    const auto count = CaptureStackBackTrace(0, 24, frames, nullptr);
+    for (USHORT i = 0; i < count; ++i) {
+        VirtualQuery(frames[i], &memory, sizeof(memory));
+        GetModuleFileNameW(static_cast<HMODULE>(memory.AllocationBase), module, MAX_PATH);
+        log::error("ngx", std::format("DLSSG exception stack={} module={} rva=0x{:X}",
+            i, std::filesystem::path(module).filename().string(), uintptr_t(frames[i]) - uintptr_t(memory.AllocationBase)));
+    }
+    Logger::instance().flush();
+    return EXCEPTION_EXECUTE_HANDLER;
+}
 
 // SEH-isolated calls into the proprietary runtime (Playbook discipline:
 // every NGX call site must survive a runtime access violation).
@@ -35,7 +63,7 @@ __declspec(noinline) NVSDK_NGX_Result CallCreateDlssg(
         result = NGX_D3D12_CREATE_DLSSG(cmdList, creationNodeMask,
             visibilityNodeMask, handle, params, createParams);
     }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
+    __except (LogDlssgException(GetExceptionInformation())) {
         sehCode = static_cast<uint32_t>(GetExceptionCode());
         result = NVSDK_NGX_Result_FAIL_PlatformError;
     }
@@ -55,7 +83,22 @@ __declspec(noinline) NVSDK_NGX_Result CallEvaluateDlssg(
     __try {
         result = NGX_D3D12_EVALUATE_DLSSG(cmdList, handle, params, evalParams, optEvalParams);
     }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
+    __except (LogDlssgException(GetExceptionInformation())) {
+        sehCode = static_cast<uint32_t>(GetExceptionCode());
+        result = NVSDK_NGX_Result_FAIL_PlatformError;
+    }
+    return result;
+}
+
+__declspec(noinline) NVSDK_NGX_Result CallReleaseDlssg(
+    NVSDK_NGX_Handle* handle, uint32_t& sehCode)
+{
+    sehCode = 0;
+    NVSDK_NGX_Result result = NVSDK_NGX_Result_Fail;
+    __try {
+        result = NVSDK_NGX_D3D12_ReleaseFeature(handle);
+    }
+    __except (LogDlssgException(GetExceptionInformation())) {
         sehCode = static_cast<uint32_t>(GetExceptionCode());
         result = NVSDK_NGX_Result_FAIL_PlatformError;
     }
@@ -75,12 +118,15 @@ bool DlssFgBackend::queryCapability(NgxCoreHost& coreHost, Capability& caps, Sta
     caps = Capability{};
 
     NVSDK_NGX_Parameter* capParams = nullptr;
+    if(compatibility_&&!compatibility_->beginCapabilities()){status=Status::DeviceFailure;return false;}
     const NVSDK_NGX_Result capResult = NVSDK_NGX_D3D12_GetCapabilityParameters(&capParams);
+    const bool restored=!compatibility_||compatibility_->endCapabilities();
     log::info("ngx", std::format("fg-backend: capability query result={} params={}",
         ngxResultString(static_cast<uint64_t>(capResult)), capParams != nullptr ? "non-null" : "null"));
-    if (capParams == nullptr || capResult != NVSDK_NGX_Result_Success) {
+    if (capParams == nullptr || capResult != NVSDK_NGX_Result_Success || !restored) {
         log::error("ngx",std::format("fg-backend capability failed result=0x{:X} nullParams={}",unsigned(capResult),capParams==nullptr));
         status = Status::DeviceFailure;
+        if(capParams)NVSDK_NGX_D3D12_DestroyParameters(capParams);
         return false;
     }
 
@@ -138,6 +184,12 @@ bool DlssFgBackend::queryCapability(NgxCoreHost& coreHost, Capability& caps, Sta
         caps.multiFrameCountMax, static_cast<uint64_t>(gMfU), static_cast<uint64_t>(gMfI),
         caps.hagsRegistryMode));
 
+    if(compatibility_){
+        if(!compatibility_->publishStartup(capParams)){
+            NVSDK_NGX_D3D12_DestroyParameters(capParams);status=Status::DeviceFailure;return false;
+        }
+        caps.available=true;caps.multiFrameCountMax=5;
+    }
     NVSDK_NGX_D3D12_DestroyParameters(capParams);
 
     // Capability query itself succeeded (parameters were readable). Whether FG
@@ -156,6 +208,7 @@ bool DlssFgBackend::create(NgxCoreHost& coreHost,
     if (handle_ != nullptr) {
         release();
     }
+    fatal_ = false;
     width_ = desc.width;
     height_ = desc.height;
 
@@ -185,15 +238,17 @@ bool DlssFgBackend::create(NgxCoreHost& coreHost,
     createParams.DynamicResolutionScaling = desc.dynamicResolution ? 1u : 0u;
 
     uint32_t sehCode = 0;
+    if(compatibility_&&!compatibility_->beginCreate(cmdList)){status=Status::DeviceFailure;return false;}
     const NVSDK_NGX_Result result = CallCreateDlssg(cmdList, 1, 1, &handle_,
         params, &createParams, sehCode);
+    const bool restored=!compatibility_||compatibility_->endCreate(result==NVSDK_NGX_Result_Success);
     createResult_ = static_cast<uint64_t>(result);
 
     log::info("ngx", std::format("fg-backend: Create DLSSG {}x{} (internal {}x{}) fmt={} result={} handle={} seh={}",
         desc.width, desc.height, desc.renderWidth, desc.renderHeight, desc.backbufferFormat,
         ngxResultString(createResult_), handle_ != nullptr ? "non-null" : "null", sehCode));
 
-    if (result != NVSDK_NGX_Result_Success) {
+    if (result != NVSDK_NGX_Result_Success || !restored || handle_ == nullptr) {
         log::error("ngx", std::format("fg-backend failed result=0x{:X} seh=0x{:X}", static_cast<unsigned>(result), sehCode));
         // Query FeatureInitResult for diagnostic detail (user directive).
         unsigned long long initResult = 0;
@@ -204,6 +259,8 @@ bool DlssFgBackend::create(NgxCoreHost& coreHost,
             static_cast<uint64_t>(gir), initResult,
             static_cast<uint64_t>(girI), static_cast<unsigned>(initResultI)));
         status = Status::DeviceFailure;
+        fatal_ = true;
+        release();
         return false;
     }
     return true;
@@ -212,9 +269,13 @@ bool DlssFgBackend::create(NgxCoreHost& coreHost,
 void DlssFgBackend::release()
 {
     if (handle_ != nullptr) {
-        const NVSDK_NGX_Result result = NVSDK_NGX_D3D12_ReleaseFeature(handle_);
+        uint32_t sehCode = 0;
+        const NVSDK_NGX_Result result = CallReleaseDlssg(handle_, sehCode);
         (result == NVSDK_NGX_Result_Success ? log::info : log::error)("ngx", std::format("fg-backend: ReleaseFeature result={} evaluates={} resets={}",
             ngxResultString(static_cast<uint64_t>(result)), evaluateCount_, resetCount_));
+        if (sehCode != 0) {
+            log::error("ngx", std::format("fg-backend: ReleaseFeature SEH=0x{:X}", sehCode));
+        }
         handle_ = nullptr;
     }
 }
@@ -224,6 +285,10 @@ bool DlssFgBackend::evaluate(ID3D12GraphicsCommandList* cmdList,
                              const EvalDesc& desc,
                              Status& status)
 {
+    if (fatal_) {
+        status = Status::DeviceFailure;
+        return false;
+    }
     // Up to five generated frames (6X). The graph validates the requested
     // multiplier against the runtime's MultiFrameCountMax before creating the
     // feature; this is only the absolute API-level guard.
@@ -247,11 +312,11 @@ bool DlssFgBackend::evaluate(ID3D12GraphicsCommandList* cmdList,
     // Never-provided optional resources stay null (declared at create time).
 
     NVSDK_NGX_DLSSG_Opt_Eval_Params optParams{};
-    // 2X fixed: one generated frame per real pair.
+    // Count excludes the real frame; indices are one-based.
     optParams.multiFrameCount = desc.multiFrameCount;
     optParams.multiFrameIndex = desc.multiFrameIndex;
-    // Static synthetic camera: identity matrices, all motion carried by the
-    // mvec buffer (cameraMotionIncluded = 1).
+    // A stationary synthetic camera. All temporal motion is in the mvec
+    // buffer, but projection/inverse and the camera basis must still agree.
     for (int r = 0; r < 4; ++r) {
         for (int c = 0; c < 4; ++c) {
             const float v = (r == c) ? 1.0f : 0.0f;
@@ -270,6 +335,22 @@ bool DlssFgBackend::evaluate(ID3D12GraphicsCommandList* cmdList,
     optParams.cameraFar = 1000.0f;
     optParams.cameraFOV = 1.5707963f; // pi/2
     optParams.cameraAspectRatio = static_cast<float>(width_) / static_cast<float>(height_);
+    optParams.cameraUp[1] = 1.0f;
+    optParams.cameraRight[0] = 1.0f;
+    optParams.cameraFwd[2] = 1.0f;
+    const float projectionX = 1.0f / optParams.cameraAspectRatio; // tan(FOV / 2) = 1
+    const float projectionZ = optParams.cameraFar / (optParams.cameraFar - optParams.cameraNear);
+    const float projectionW = -optParams.cameraNear * projectionZ;
+    optParams.cameraViewToClip[0][0] = projectionX;
+    optParams.cameraViewToClip[2][2] = projectionZ;
+    optParams.cameraViewToClip[2][3] = 1.0f;
+    optParams.cameraViewToClip[3][2] = projectionW;
+    optParams.cameraViewToClip[3][3] = 0.0f;
+    optParams.clipToCameraView[0][0] = 1.0f / projectionX;
+    optParams.clipToCameraView[2][2] = 0.0f;
+    optParams.clipToCameraView[2][3] = 1.0f / projectionW;
+    optParams.clipToCameraView[3][2] = 1.0f;
+    optParams.clipToCameraView[3][3] = -projectionZ / projectionW;
     optParams.colorBuffersHDR = desc.hdr ? 1u : 0u; // HDR10 / RGB10 contract
     optParams.depthInverted = 0;
     optParams.cameraMotionIncluded = 1;
@@ -278,6 +359,8 @@ bool DlssFgBackend::evaluate(ID3D12GraphicsCommandList* cmdList,
     optParams.notRenderingGameFrames = 0;
     optParams.orthoProjection = 0;
     optParams.motionVectorsDilated = 0;
+    // Zero is valid stationary motion, including either axis of a pan.
+    optParams.motionVectorsInvalidValue = 3.402823466e38f;
     optParams.menuDetectionEnabled = 0;
     optParams.backbufferSubrectSize={width_,height_};
     optParams.outputInterpSubrectSize={width_,height_};
@@ -301,6 +384,9 @@ bool DlssFgBackend::evaluate(ID3D12GraphicsCommandList* cmdList,
 
     if (result != NVSDK_NGX_Result_Success) {
         log::error("ngx", std::format("fg-backend failed result=0x{:X} seh=0x{:X}", static_cast<unsigned>(result), sehCode));
+        fatal_ = true;
+        // Keep resources alive until the graph drains already submitted GPU
+        // work. Teardown releases the handle through the protected call.
         status = Status::DeviceFailure;
         return false;
     }

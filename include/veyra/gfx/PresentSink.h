@@ -65,7 +65,7 @@ public:
 
     // Returns the current back buffer (transitioned state is the caller's
     // responsibility; the buffer is in COMMON/PRESENT state on acquire).
-    ID3D12Resource* currentBackBuffer();
+    ID3D12Resource* currentBackBuffer(uint32_t* acquiredIndex = nullptr);
 
     // Presents the current back buffer. Returns false on device-lost class
     // failures (caller must trigger recovery).

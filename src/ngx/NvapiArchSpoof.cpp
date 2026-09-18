@@ -1,6 +1,7 @@
 #include "veyra/ngx/NvapiArchSpoof.h"
 
 #include "veyra/Log.h"
+#include "compat/RestoreMemory.h"
 
 #include <format>
 #include <mutex>
@@ -58,18 +59,6 @@ struct Global {
 Global& global() {
     static Global value;
     return value;
-}
-
-bool writeCode(void* target, const uint8_t* bytes, size_t count) {
-    DWORD oldProtect = 0;
-    if (VirtualProtect(target, count, PAGE_EXECUTE_READWRITE, &oldProtect) == 0) {
-        return false;
-    }
-    std::memcpy(target, bytes, count);
-    DWORD ignored = 0;
-    VirtualProtect(target, count, oldProtect, &ignored);
-    FlushInstructionCache(GetCurrentProcess(), target, count);
-    return true;
 }
 
 int __cdecl SpoofedGetArchInfo(void* physicalGpu, NvGpuArchInfo* info) {
@@ -155,7 +144,14 @@ bool NvapiArchSpoof::install(HMODULE module, uint32_t reportedArchitecture) {
         const uint64_t back = reinterpret_cast<uint64_t>(g.entry + kRelocatedBytes);
         std::memcpy(jump + 6, &back, 8);
     }
-    FlushInstructionCache(GetCurrentProcess(), g.trampoline, kTrampolineBytes);
+    DWORD trampolineProtection = 0;
+    if (!VirtualProtect(g.trampoline, kTrampolineBytes, PAGE_EXECUTE_READ, &trampolineProtection) ||
+        !FlushInstructionCache(GetCurrentProcess(), g.trampoline, kTrampolineBytes)) {
+        VirtualFree(g.trampoline, 0, MEM_RELEASE);
+        g.trampoline = nullptr; g.entry = nullptr;
+        g.detail = L"trampoline executable publication failed";
+        return false;
+    }
 
     // Entry: "jmp [rip+0] <SpoofedGetArchInfo>" (14 bytes, no register touched).
     uint8_t patch[kJumpBytes]{};
@@ -164,11 +160,13 @@ bool NvapiArchSpoof::install(HMODULE module, uint32_t reportedArchitecture) {
     std::memcpy(patch + 2, &zero, 4);
     const uint64_t target = reinterpret_cast<uint64_t>(&SpoofedGetArchInfo);
     std::memcpy(patch + 6, &target, 8);
-    if (!writeCode(g.entry, patch, kJumpBytes)) {
-        g.detail = L"the provider GetArchInfo wrapper page is not writable";
-        VirtualFree(g.trampoline, 0, MEM_RELEASE);
-        g.trampoline = nullptr;
-        g.entry = nullptr;
+    // No provider calls can run before the owning session completes startup.
+    // This 14-byte jump is larger than the atomic gate helper supports.
+    if (!compat::restoreMemory(g.entry, patch, kJumpBytes)) {
+        g.detail = L"provider wrapper publication failed";
+        // An uncertain publication may still reference the trampoline. Session
+        // teardown must restore the entry before releasing this allocation.
+        g.installed = true;
         return false;
     }
     g.reportedArchitecture = reportedArchitecture;
@@ -179,13 +177,14 @@ bool NvapiArchSpoof::install(HMODULE module, uint32_t reportedArchitecture) {
     return true;
 }
 
-void NvapiArchSpoof::release() {
+bool NvapiArchSpoof::release() {
     auto& g = global();
     std::lock_guard lock(g.mutex);
     if (!g.installed) {
-        return;
+        return true;
     }
-    const bool restored = writeCode(g.entry, kExpectedPrologue, kRelocatedBytes);
+    const bool restored = compat::restoreMemory(g.entry, kExpectedPrologue, kRelocatedBytes);
+    if (!restored) { log::error("nvapi-spoof", "wrapper restoration failed; retaining trampoline"); return false; }
     if (g.trampoline != nullptr) {
         VirtualFree(g.trampoline, 0, MEM_RELEASE);
         g.trampoline = nullptr;
@@ -194,6 +193,7 @@ void NvapiArchSpoof::release() {
         "provider GetArchInfo wrapper restored={} (process memory only)", restored ? 1 : 0));
     g.installed = false;
     g.entry = nullptr;
+    return true;
 }
 
 bool NvapiArchSpoof::installed() {

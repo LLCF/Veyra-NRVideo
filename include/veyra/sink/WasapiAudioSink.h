@@ -24,6 +24,7 @@
 #include "veyra/sink/AudioPcmSource.h"
 #include "veyra/sink/AudioFrameTimeline.h"
 #include "veyra/sink/CaptureAudioDsp.h"
+#include "veyra/media/AudioTrack.h"
 
 struct AVFormatContext;
 struct AVCodecContext;
@@ -48,6 +49,10 @@ public:
     ~AudioPipeline();
 
     bool open(const std::wstring& path);
+    const std::vector<media::AudioTrack>& tracks() const { return tracks_; }
+    int selectedTrack() const { return streamIndex_; }
+    // Owner thread only, after stopThread(). Failure preserves the old decoder.
+    bool selectTrack(int streamIndex);
     AudioFormat pcmFormat()const override{return pcmFormat_;}
 
     double bufferedMs() const;
@@ -88,8 +93,8 @@ public:
     // Returns the PTS of the first buffered sample after seek.
     double requestSeek(double targetMs);
 
-    void runOnAudioThread(AudioRenderer* renderer, bool ownEndpoint = false);
-    void startThread(AudioRenderer* renderer, bool ownEndpoint = false);
+    void runOnAudioThread(AudioRenderer* renderer, bool ownEndpoint = false, double initialMs = -1);
+    void startThread(AudioRenderer* renderer, bool ownEndpoint = false, double initialMs = -1);
     bool endpointRecovering()const{return endpointRecovering_.load();}
     HRESULT endpointError()const{return endpointError_.load();}
     uint64_t endpointRecoveries()const{return endpointRecoveries_.load();}
@@ -111,6 +116,7 @@ private:
     friend class AudioThread;
 
     AudioFormat pcmFormat_;
+    std::vector<media::AudioTrack> tracks_;
     AVFormatContext* fmt_ = nullptr;
     AVCodecContext* codecCtx_ = nullptr;
     AVStream* stream_ = nullptr;

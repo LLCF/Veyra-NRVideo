@@ -34,23 +34,47 @@ bool AudioPipeline::open(const std::wstring& path)
     WideCharToMultiByte(CP_UTF8,0,path.data(),static_cast<int>(path.size()),narrow.data(),length,nullptr,nullptr);
     if (avformat_open_input(&fmt_, narrow.c_str(), nullptr, nullptr) != 0) return false;
     if (avformat_find_stream_info(fmt_, nullptr) < 0) return false;
+    tracks_.clear();
+    for(unsigned i=0;i<fmt_->nb_streams;++i){
+        const auto* stream=fmt_->streams[i];const auto* p=stream->codecpar;
+        if(p->codec_type!=AVMEDIA_TYPE_AUDIO)continue;
+        const auto* language=av_dict_get(stream->metadata,"language",nullptr,0);
+        const auto* title=av_dict_get(stream->metadata,"title",nullptr,0);
+        tracks_.push_back({int(i),language?language->value:"",title?title->value:"",avcodec_get_name(p->codec_id),unsigned(p->ch_layout.nb_channels)});
+    }
     const AVCodec* codec = nullptr;
     const int si = av_find_best_stream(fmt_, AVMEDIA_TYPE_AUDIO, -1, -1, &codec, 0);
     if (si < 0 || codec == nullptr) {
         veyra::log::info("audio", "no audio stream in source");
         return false;
     }
-    streamIndex_ = si;
-    codecCtx_ = avcodec_alloc_context3(codec);
-    if (avcodec_parameters_to_context(codecCtx_, fmt_->streams[si]->codecpar) < 0) return false;
-    if (avcodec_open2(codecCtx_, codec, nullptr) < 0) return false;
-    stream_ = fmt_->streams[si];
-    const auto& layout=codecCtx_->ch_layout;
-    if(layout.order==AV_CHANNEL_ORDER_NATIVE&&layout.u.mask<=UINT32_MAX)pcmFormat_={unsigned(layout.nb_channels),uint32_t(layout.u.mask)};
-    else if(layout.nb_channels==1)pcmFormat_={1,SPEAKER_FRONT_CENTER};
-    else if(layout.nb_channels==2)pcmFormat_={};
-    else {log::error("audio","Unsupported or unspecified multichannel speaker layout");return false;}
-    if(!pcmFormat_.valid())return false;
+    return selectTrack(si);
+}
+
+bool AudioPipeline::selectTrack(int si)
+{
+    if(thread_.joinable()||!fmt_||si<0||unsigned(si)>=fmt_->nb_streams)return false;
+    const auto* parameters=fmt_->streams[si]->codecpar;
+    if(parameters->codec_type!=AVMEDIA_TYPE_AUDIO)return false;
+    const auto* codec=avcodec_find_decoder(parameters->codec_id);
+    if(!codec)return false;
+    auto* candidate=avcodec_alloc_context3(codec);
+    if(!candidate)return false;
+    int result=avcodec_parameters_to_context(candidate,parameters);
+    if(result>=0)result=avcodec_open2(candidate,codec,nullptr);
+    AudioFormat format;
+    const auto& layout=candidate->ch_layout;
+    if(layout.order==AV_CHANNEL_ORDER_NATIVE&&layout.u.mask<=UINT32_MAX)format={unsigned(layout.nb_channels),uint32_t(layout.u.mask)};
+    else if(layout.nb_channels==1)format={1,SPEAKER_FRONT_CENTER};
+    else if(layout.nb_channels!=2)result=AVERROR(EINVAL);
+    if(result<0||!format.valid()){
+        log::error("audio-track",std::format("decoder rejected stream={} code={}",si,result));
+        avcodec_free_context(&candidate);return false;
+    }
+    avcodec_free_context(&codecCtx_);codecCtx_=candidate;streamIndex_=si;stream_=fmt_->streams[si];pcmFormat_=format;
+    if(swr_)swr_free(&swr_);
+    av_packet_unref(packet_);havePacket_=demuxEof_=drainSent_=false;decodedEof_=false;
+    {std::lock_guard lock(mutex_);ring_.clear();segments_.clear();ringFrames_=0;}
     log::info("audio-format",std::format("file input channels={} mask=0x{:X}; preserve to renderer",pcmFormat_.channels,pcmFormat_.mask));
     veyra::log::info("audio", std::format("audio stream idx={} codec={} rate={}",
         si, codec->name, codecCtx_->sample_rate));
@@ -586,7 +610,7 @@ void AudioRenderer::setPaused(bool value)
     if(checked(value ? client_->Stop() : client_->Start(),"Pause/resume")){pausedEndpoint_=value;liveGap_.reset();}
 }
 
-void AudioPipeline::runOnAudioThread(AudioRenderer* renderer, bool ownEndpoint)
+void AudioPipeline::runOnAudioThread(AudioRenderer* renderer, bool ownEndpoint, double initialMs)
 {
     const auto t0 = std::chrono::steady_clock::now();
     bool endpointReady = renderer && (!ownEndpoint || renderer->start(pcmFormat_));
@@ -610,14 +634,22 @@ void AudioPipeline::runOnAudioThread(AudioRenderer* renderer, bool ownEndpoint)
         log::warn("audio-recovery",std::format("endpoint unavailable hr=0x{:08X} holdPtsMs={:.3f}",unsigned(endpointError_.load()),recoveryTargetMs));
     };
     auto rewind = [&](double target) {
+        const auto seekBegin=std::chrono::steady_clock::now();
         {
             std::lock_guard lock(mutex_);
             ring_.clear();ringFrames_=0;segments_.clear();
             if(havePacket_){av_packet_unref(packet_);havePacket_=false;}
             avcodec_flush_buffers(codecCtx_);
             if(swr_)swr_free(&swr_);
-            const int64_t tbTarget=static_cast<int64_t>(target*stream_->time_base.den/1000/stream_->time_base.num);
-            const int result=avformat_seek_file(fmt_,streamIndex_,INT64_MIN,tbTarget,INT64_MAX,0);
+            // Matroska commonly indexes only video keyframes. Seeking an audio
+            // stream can use its sparse, previously observed packet index and
+            // decode minutes of audio. Seek the container's video index, then
+            // trim decoded PCM to the exact requested audio timestamp.
+            const int video=av_find_best_stream(fmt_,AVMEDIA_TYPE_VIDEO,-1,-1,nullptr,0);
+            const int seekStream=video>=0?video:streamIndex_;
+            const auto tb=fmt_->streams[seekStream]->time_base;
+            const int64_t tbTarget=av_rescale_q(int64_t(target*1000),{1,1000000},tb);
+            const int result=av_seek_frame(fmt_,seekStream,tbTarget,AVSEEK_FLAG_BACKWARD);
             if(result<0){log::error("audio",std::format("seek failed code={}",result));clockExhausted_=false;return false;}
             demuxEof_=drainSent_=false;decodedEof_=false;
             nextPtsMs_=target;discardUntilPtsMs_=target;
@@ -625,16 +657,13 @@ void AudioPipeline::runOnAudioThread(AudioRenderer* renderer, bool ownEndpoint)
         decodeBlock();
         discardUntilPtsMs_=-1;
         clockExhausted_=decodedEof_&&headPtsMs()<0;
+        log::info("audio-seek",std::format("targetMs={:.3f} firstPtsMs={:.3f} totalMs={:.3f}",target,headPtsMs(),std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-seekBegin).count()));
         return true;
     };
     if(renderer&&ownEndpoint&&!endpointReady)recovering(renderer->lastError());
     // Initial prefill (open case).
-    {
-        std::unique_lock<std::mutex> lock(mutex_);
-        seekRequested_ = false;
-        discardUntilPtsMs_ = -1.0;
-    }
-    decodeBlock();
+    if(initialMs>=0){if(!rewind(initialMs))recovering(E_FAIL);}
+    else decodeBlock();
     {
         std::unique_lock<std::mutex> lock(mutex_);
         if (segments_.empty()) {
@@ -700,7 +729,11 @@ void AudioPipeline::runOnAudioThread(AudioRenderer* renderer, bool ownEndpoint)
                 if (seekOk&&endpointReady && !clockExhausted_) {
                     pauseApplied=shouldPause();
                     if (!renderer->startAnchored(*this,pauseApplied)) recovering(renderer->lastError());
+                    // A seek can interrupt the first prefill before it clears
+                    // startup recovery. Publish the newly anchored endpoint.
+                    else endpointRecovering_=false;
                 }
+                if(seekOk&&endpointReady&&clockExhausted_)endpointRecovering_=false;
                 {
                     std::lock_guard<std::mutex> l2(mutex_);
                     discardUntilPtsMs_ = -1.0;
@@ -758,10 +791,12 @@ void AudioPipeline::runOnAudioThread(AudioRenderer* renderer, bool ownEndpoint)
     if(renderer&&ownEndpoint)renderer->shutdown();
 }
 
-void AudioPipeline::startThread(AudioRenderer* renderer, bool ownEndpoint)
+void AudioPipeline::startThread(AudioRenderer* renderer, bool ownEndpoint, double initialMs)
 {
+    if(thread_.joinable())return;
+    stopFlag_=false;seekRequested_=false;seekDone_=true;discardUntilPtsMs_=-1;
     endpointRecovering_=renderer&&ownEndpoint;endpointError_=S_OK;endpointRecoveries_=0;clockExhausted_=false;
-    thread_ = std::thread(&AudioPipeline::runOnAudioThread, this, renderer, ownEndpoint);
+    thread_ = std::thread(&AudioPipeline::runOnAudioThread, this, renderer, ownEndpoint, initialMs);
 }
 
 } // namespace veyra::sink

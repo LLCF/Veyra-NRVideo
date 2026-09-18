@@ -5,10 +5,22 @@
 #include "veyra/sink/ImageExportSink.h"
 namespace veyra::engine {
 bool VideoPresenter::open(gfx::D3D12DeviceContext& ctx,HWND window,pipeline::EnhanceGraph& graph,bool captureCompatible) {
-    gpuTimer_.initialize(ctx.device(),ctx.directQueue());window_=window;RECT rc{};GetClientRect(window,&rc);
+    close();
+    Status st=Status::Ok;
+    if(graph.fgEnabled()&&!graph.xessEnabled()&&!graph.fsrEnabled()){
+        D3D12_COMMAND_QUEUE_DESC desc{};desc.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
+        HRESULT hr=ctx.device()->CreateCommandQueue(&desc,IID_PPV_ARGS(&presentationQueue_));
+        if(SUCCEEDED(hr))hr=ctx.device()->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&presentationFence_));
+        if(FAILED(hr)){veyra::log::error("present",std::format("DLSS presentation queue/fence hr=0x{:X}",unsigned(hr)));close();return false;}
+        presentationEvent_=CreateEventW(nullptr,FALSE,FALSE,nullptr);
+        if(!presentationEvent_||!presentationRing_.initialize(ctx.device(),presentationQueue_.Get(),presentationFence_.Get(),presentationEvent_,3,st)){close();return false;}
+        veyra::log::info("present","DLSS presentation uses independent queue/fence, 3 command slots; shared textures use producer/consumer GPU fences");
+    }
+    auto* queue=presentationQueue_?presentationQueue_.Get():ctx.directQueue();
+    gpuTimer_.initialize(ctx.device(),queue);window_=window;RECT rc{};GetClientRect(window,&rc);
     gfx::PresentSink::Desc d;d.targetWindow=window;d.width=std::max(1L,rc.right);d.height=std::max(1L,rc.bottom);d.vsync=false;
     d.hdr=graph.hdrOutput();d.hdr10=graph.hdr10Output();d.xess=graph.xessEnabled();d.fsr=graph.fsrEnabled();d.renderWidth=graph.workWidth();d.renderHeight=graph.workHeight();d.captureCompatible=captureCompatible;d.fgMultiplier=graph.fgMultiplier();lastXessFrame_={};lastXessIdentity_={};xessWasEnabled_=false;lastFsrFrame_={};lastFsrIdentity_={};fsrWasEnabled_=false;
-    Status st=Status::Ok;if(!sink_.initialize(ctx.device(),ctx.directQueue(),d,st))return false;
+    if(!sink_.initialize(ctx.device(),queue,d,st))return false;
     std::vector<uint8_t> vs,ps;
     // SRV layout: 0..1 video frames, 2..11 generated frames (2 parities x 5
     // subframes, 6X), 12..15 comparison references.
@@ -21,7 +33,11 @@ bool VideoPresenter::open(gfx::D3D12DeviceContext& ctx,HWND window,pipeline::Enh
     return true;
 }
 void VideoPresenter::refresh(ID3D12Device* device){for(unsigned i=0;i<3;++i){Microsoft::WRL::ComPtr<ID3D12Resource> bb;if(SUCCEEDED(sink_.swapChain()->GetBuffer(i,IID_PPV_ARGS(&bb))))device->CreateRenderTargetView(bb.Get(),nullptr,{rtvs_->GetCPUDescriptorHandleForHeapStart().ptr+size_t(i)*inc_});}}
-bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& ring,pipeline::EnhanceGraph& graph,unsigned slot,bool generated,bool referencesValid,int comparison,bool baseReference,float split,pipeline::FrameIdentity identity,PreviewView view) {
+bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& sharedRing,pipeline::EnhanceGraph& graph,unsigned slot,bool generated,bool referencesValid,int comparison,bool baseReference,float split,pipeline::FrameIdentity identity,PreviewView view) {
+    auto& ring=presentationQueue_?presentationRing_:sharedRing;
+    auto* fence=presentationFence_?presentationFence_.Get():ctx.fence();
+    const auto presentStart=std::chrono::steady_clock::now();
+    const auto slotWaitStart=ring.cpuWaitMilliseconds();
     xessFailed_=false;fsrFailed_=false;
     RECT rc{};GetClientRect(window_,&rc);if(rc.right<1||rc.bottom<1)return true;
     const auto now=std::chrono::steady_clock::now();
@@ -34,14 +50,19 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
         refresh(ctx.device());lastResize_=now;xessWasEnabled_=false;
     }
     if(sink_.xess()&&!sink_.xess()->beginFrame()){xessFailed_=true;return false;}
+    if(presentationQueue_){
+        const HRESULT hr=presentationQueue_->Wait(ctx.fence(),graph.presentationReadyFence(slot,generated));
+        if(FAILED(hr)){veyra::log::error("present",std::format("producer handoff wait hr=0x{:X}",unsigned(hr)));return false;}
+    }
     Status st=Status::Ok;uint32_t commandSlot=0;auto* list=ring.acquireNext(commandSlot,st);if(!list)return false;
-    gpuTimer_.frame(identity.sourceFrameId?identity:pipeline::FrameIdentity{0,0,submittedCount()+1},ctx.fence());gpuTimer_.mark(list,diagnostics::GpuStage::Blit);
-    auto* source=generated?graph.generatedFrameResource(slot):graph.videoFrameResource(slot);auto* bb=sink_.currentBackBuffer();if(!bb)return false;
+    gpuTimer_.frame(identity.sourceFrameId?identity:pipeline::FrameIdentity{0,0,submittedCount()+1},fence);gpuTimer_.mark(list,diagnostics::GpuStage::Blit);
+    uint32_t backBufferIndex=0;
+    auto* source=generated?graph.generatedFrameResource(slot):graph.videoFrameResource(slot);auto* bb=sink_.currentBackBuffer(&backBufferIndex);if(!bb)return false;
     D3D12_RESOURCE_BARRIER barriers[2]{};
     for(auto& b:barriers){b.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;b.Transition.StateBefore=D3D12_RESOURCE_STATE_COMMON;b.Transition.Subresource=D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;}
     barriers[0].Transition.pResource=source;barriers[0].Transition.StateAfter=D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     barriers[1].Transition.pResource=bb;barriers[1].Transition.StateAfter=D3D12_RESOURCE_STATE_RENDER_TARGET;list->ResourceBarrier(2,barriers);
-    D3D12_CPU_DESCRIPTOR_HANDLE rtv{rtvs_->GetCPUDescriptorHandleForHeapStart().ptr+size_t(sink_.swapChain()->GetCurrentBackBufferIndex())*inc_};
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv{rtvs_->GetCPUDescriptorHandleForHeapStart().ptr+size_t(backBufferIndex)*inc_};
     const float black[4]={0,0,0,1};list->ClearRenderTargetView(rtv,black,0,nullptr);list->OMSetRenderTargets(1,&rtv,FALSE,nullptr);
     // DXGI stretches the retained buffer while the native workspace unfolds.
     // Compute contain in CURRENT client coordinates, then map back to buffer
@@ -129,17 +150,35 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
         lastFsrFrame_=now;lastFsrIdentity_=identity;fsrWasEnabled_=enabled;
     }
     gpuTimer_.mark(list,diagnostics::GpuStage::Blit,true);gpuTimer_.resolve(list);
-    if(!ring.submitAndSignal(commandSlot))return false;gpuTimer_.submitted(ring.lastSignaledValue());lastBuffer_=sink_.swapChain()->GetCurrentBackBufferIndex();hasPresented_=true;
-    const bool presented=sink_.present(st);xessFailed_=sink_.xessFailed();fsrFailed_=fsrFailed_||sink_.fsrFailed();return presented;
+    if(!ring.submitAndSignal(commandSlot))return false;gpuTimer_.submitted(ring.lastSignaledValue());lastBuffer_=backBufferIndex;hasPresented_=true;
+    if(presentationQueue_)graph.presentationSubmitted(slot,fence,ring.lastSignaledValue());
+    const auto dxgiStart=std::chrono::steady_clock::now();
+    const bool presented=sink_.present(st);
+    const auto presentEnd=std::chrono::steady_clock::now();
+    if(presentEnd>=nextCostLog_){
+        nextCostLog_=presentEnd+std::chrono::seconds(1);
+        veyra::log::info("present-cost",std::format("generated={} totalMs={:.3f} recordSubmitMs={:.3f} slotWaitMs={:.3f} dxgiMs={:.3f}",generated,
+            std::chrono::duration<double,std::milli>(presentEnd-presentStart).count(),
+            std::chrono::duration<double,std::milli>(dxgiStart-presentStart).count(),ring.cpuWaitMilliseconds()-slotWaitStart,
+            std::chrono::duration<double,std::milli>(presentEnd-dxgiStart).count()));
+    }
+    xessFailed_=sink_.xessFailed();fsrFailed_=fsrFailed_||sink_.fsrFailed();return presented;
 }
 bool VideoPresenter::readPresentedFrameForTest(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& ring,sink::RgbaImage& image){
+    if(presentationQueue_&&!presentationRing_.drainQueue())return false;
     if(!hasPresented_||!sink_.swapChain()||!ring.drainQueue())return false;
     Microsoft::WRL::ComPtr<ID3D12Resource> buffer;
     return SUCCEEDED(sink_.swapChain()->GetBuffer(lastBuffer_,IID_PPV_ARGS(&buffer)))&&sink::readRgba8(ctx,ring,buffer.Get(),image);
 }
-void VideoPresenter::close(){hasPresented_=false;gpuTimer_.close();rtvs_.Reset();pass_={};sink_.shutdown();}
-Microsoft::WRL::ComPtr<ID3D12Resource> VideoPresenter::presentedResourceForTest() const {
+void VideoPresenter::close(){
+    if(presentationRing_.initialized())presentationRing_.drainQueue();
+    hasPresented_=false;gpuTimer_.close();rtvs_.Reset();pass_={};sink_.shutdown();
+    presentationRing_.shutdown();presentationFence_.Reset();presentationQueue_.Reset();
+    if(presentationEvent_){CloseHandle(presentationEvent_);presentationEvent_=nullptr;}
+}
+Microsoft::WRL::ComPtr<ID3D12Resource> VideoPresenter::presentedResourceForTest() {
     Microsoft::WRL::ComPtr<ID3D12Resource> buffer;
+    if(presentationQueue_&&!presentationRing_.drainQueue())return buffer;
     if(hasPresented_&&sink_.swapChain())sink_.swapChain()->GetBuffer(lastBuffer_,IID_PPV_ARGS(&buffer));
     return buffer;
 }

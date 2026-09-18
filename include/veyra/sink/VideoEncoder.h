@@ -60,6 +60,7 @@ public:
     // Human-readable identity for logs and the export status line, e.g.
     // "NVIDIA NVENC H.264 (D3D12)" or "Media Foundation HEVC (NVIDIA ... MFT)".
     virtual std::wstring describe() const=0;
+    virtual std::wstring lastError() const=0;
 };
 
 // Capability-driven selection. Returns nullptr when no usable encoder exists

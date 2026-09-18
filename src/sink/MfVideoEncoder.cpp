@@ -143,6 +143,7 @@ public:
     bool finish() override;
     void close() override;
     EncoderBackend backend() const override {return EncoderBackend::MediaFoundation;}
+    std::wstring lastError() const override {return error_;}
     std::wstring describe() const override {
         return hevc_?std::format(L"系统硬件编码 HEVC（{}）",friendly_):std::format(L"系统硬件编码 H.264（{}）",friendly_);
     }
@@ -173,6 +174,8 @@ private:
     ComPtr<IMFMediaType> inputType_,outputType_;
     std::vector<uint8_t> extradata_;
     std::wstring friendly_;
+    std::wstring error_;
+    bool check(HRESULT hr,const wchar_t* stage){if(SUCCEEDED(hr))return true;error_=std::format(L"{} HRESULT=0x{:08X}",stage,unsigned(hr));log::error("mf-encoder",std::string(error_.begin(),error_.end()));return false;}
     bool hevc_=false;
     uint32_t bitrateMbps_=0;
     unsigned fpsNum_=1,fpsDen_=1;
@@ -195,20 +198,24 @@ bool MfVideoEncoder::open(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& rin
     hevc_=config.hevc;bitrateMbps_=config.bitrateMbps;
     fpsNum_=std::max(1u,config.fpsNum);fpsDen_=std::max(1u,config.fpsDen);
     width_=graph.workWidth();height_=graph.workHeight();
+    error_=L"Media Foundation startup failed; see worker log";
     if(graph.hdrOutput()){
         // The MFT path is 8-bit 4:2:0 only; producing an SDR file from an HDR
         // source without telling the user would be a silent quality lie.
         log::error("mf-encoder","HDR export requires NVENC (HEVC Main10); Media Foundation path refused");
+        error_=L"HDR 10bit 不支持此系统编码路径（仅 8bit NV12）";
         return false;
     }
     if(width_<16||height_<16||(width_&1)||(height_&1)){
         log::error("mf-encoder",std::format("unsupported extent {}x{} for NV12",width_,height_));
+        error_=std::format(L"Unsupported NV12 extent {}x{}",width_,height_);
         return false;
     }
     if(!acquireMediaFoundation())return false;
     mfAcquired_=true;
     std::vector<MftCandidate> candidates;std::wstring detail;
     if(!listHardwareMfts(hevc_,config.adapterVendorId,candidates,detail)){
+        error_=detail;
         log::error("mf-encoder",std::format("no hardware MFT: {}",std::string(detail.begin(),detail.end())));
         return false;
     }
@@ -219,7 +226,7 @@ bool MfVideoEncoder::open(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& rin
         events_.Reset();codecApi_.Reset();inputType_.Reset();outputType_.Reset();extradata_.clear();
         async_=false;needInput_=false;haveOutput_=false;marker_=false;drainingDone_=false;draining_=false;sampleSent_=false;
         ComPtr<IMFTransform> transform;
-        if(FAILED(candidate.activate->ActivateObject(IID_PPV_ARGS(&transform)))||!transform){
+        if(!check(candidate.activate->ActivateObject(IID_PPV_ARGS(&transform)),L"ActivateObject")||!transform){
             log::warn("mf-encoder",std::format("activate failed for {}",std::string(candidate.name.begin(),candidate.name.end())));
             continue;
         }
@@ -237,6 +244,7 @@ bool MfVideoEncoder::open(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& rin
         if(FAILED(transform_->QueryInterface(IID_PPV_ARGS(&codecApi_)))){
             log::warn("mf-encoder","no ICodecAPI on this MFT; bitrate settings are unavailable");
         }
+        error_=L"MFT type/header negotiation failed";
         if(applyRateControl()&&setupTypes()&&readExtradata()){
             // ~2 s GOP: the first sample and every GOP boundary are forced,
             // which is what makes vendor MFTs emit their first output
@@ -254,18 +262,20 @@ bool MfVideoEncoder::open(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& rin
         log::error("mf-encoder",std::format("no hardware MFT accepted the contract ({} candidates)",candidates.size()));
         return false;
     }
-    if(FAILED(transform_->GetOutputStreamInfo(outputId_,&outputInfo_)))return false;
+    if(!check(transform_->GetOutputStreamInfo(outputId_,&outputInfo_),L"GetOutputStreamInfo"))return false;
     outputProvidesSamples_=(outputInfo_.dwFlags&(MFT_OUTPUT_STREAM_PROVIDES_SAMPLES|MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES))!=0;
     // Same NV12 conversion the NVENC path uses; the result is read back because
     // MFTs take system-memory NV12 (no shared D3D12 texture contract).
     std::vector<uint8_t> shader;
-    if(!convert_.loadShader("RgbToNv12.dxil",shader)||!convert_.create(ctx.device(),shader,10,1,2))return false;
-    for(unsigned i=0;i<8;++i)makeSrv(ctx.device(),i<2?graph.videoFrameResource(i):graph.generatedFrameResource(i-2),graph.outputFormat(),cpuHandleOf(convert_,i));
+    error_=L"RgbToNv12 shader load/create failed";
+    if(!convert_.loadShader("RgbToNv12.dxil",shader)||!convert_.create(ctx.device(),shader,kOutputPoolSlots+2,1,2))return false;
+    for(unsigned i=0;i<kOutputPoolSlots;++i)makeSrv(ctx.device(),i<2?graph.videoFrameResource(i):graph.generatedFrameResource(i-2),graph.outputFormat(),cpuHandleOf(convert_,i));
+    error_=L"NV12 conversion/readback allocation failed";
     y_=makeTexture(ctx.device(),width_,height_,DXGI_FORMAT_R8_UNORM,true);
     uv_=makeTexture(ctx.device(),width_/2,height_/2,DXGI_FORMAT_R8G8_UNORM,true);
     if(!y_||!uv_)return false;
-    makeUav(ctx.device(),y_.Get(),DXGI_FORMAT_R8_UNORM,cpuHandleOf(convert_,8));
-    makeUav(ctx.device(),uv_.Get(),DXGI_FORMAT_R8G8_UNORM,cpuHandleOf(convert_,9));
+    makeUav(ctx.device(),y_.Get(),DXGI_FORMAT_R8_UNORM,cpuHandleOf(convert_,kOutputPoolSlots));
+    makeUav(ctx.device(),uv_.Get(),DXGI_FORMAT_R8G8_UNORM,cpuHandleOf(convert_,kOutputPoolSlots+1));
     auto makeReadback=[&](uint32_t rows,uint32_t rowBytes,ComPtr<ID3D12Resource>& out,UINT& pitch){
         pitch=alignUp(rowBytes,256);
         D3D12_HEAP_PROPERTIES hp{};hp.Type=D3D12_HEAP_TYPE_READBACK;
@@ -276,10 +286,11 @@ bool MfVideoEncoder::open(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& rin
     if(!makeReadback(height_,width_,yRead_,yPitch_)||!makeReadback(height_/2,width_,uvRead_,uvPitch_))return false;
     packed_.resize(size_t(width_)*height_+size_t(width_)*(height_/2));
     fenceEvent_=CreateEventW(nullptr,FALSE,FALSE,nullptr);
-    if(!fenceEvent_)return false;
-    if(FAILED(transform_->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH,0)))return false;
-    transform_->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,0);
-    transform_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM,0);
+    if(!fenceEvent_){error_=std::format(L"CreateEvent win32={}",GetLastError());return false;}
+    if(!check(transform_->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH,0),L"Flush"))return false;
+    if(!check(transform_->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,0),L"BeginStreaming"))return false;
+    if(!check(transform_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM,0),L"StartOfStream"))return false;
+    error_.clear();
     return true;
 }
 
@@ -521,6 +532,7 @@ bool MfVideoEncoder::drainOutputs(bool waitForOutput){
 }
 
 bool MfVideoEncoder::convertToNv12(unsigned frameSlot,bool generated){
+    if(frameSlot>=(generated?kGeneratedPoolSlots:2)){error_=L"Encoder frame slot out of range";return false;}
     Status status=Status::Ok;
     uint32_t slot=0;
     auto* list=ring_->acquireNext(slot,status);
@@ -533,7 +545,7 @@ bool MfVideoEncoder::convertToNv12(unsigned frameSlot,bool generated){
     // Foundation encoder must dither a graded frame exactly like the NVENC path
     // so preview/export stay consistent.
     const float dims[8]={std::bit_cast<float>(width_),std::bit_cast<float>(height_),0,std::bit_cast<float>(graph_?graph_->outputDitherStep():0.0f),0,0,0,0};
-    convert_.bind(list,dims,gpuHandleOf(convert_,frameSlot+(generated?2:0)).ptr,gpuHandleOf(convert_,8).ptr);
+    convert_.bind(list,dims,gpuHandleOf(convert_,frameSlot+(generated?2:0)).ptr,gpuHandleOf(convert_,kOutputPoolSlots).ptr);
     list->Dispatch((width_+15)/16,(height_+15)/16,1);
     states_.uavBarrier(list,y_.Get());
     states_.uavBarrier(list,uv_.Get());

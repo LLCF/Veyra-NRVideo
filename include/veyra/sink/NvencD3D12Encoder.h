@@ -19,6 +19,7 @@ public:
     std::vector<uint8_t> headers() const override;
     EncoderBackend backend() const override {return EncoderBackend::Nvenc;}
     std::wstring describe() const override;
+    std::wstring lastError() const override;
 private:
     struct Impl;std::unique_ptr<Impl> p_;
 };

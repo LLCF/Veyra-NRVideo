@@ -8,6 +8,9 @@
 #include <format>
 #include <algorithm>
 namespace veyra::sink {
+// Use a complete, pinned ABI. Lowering only open.apiVersion does not make
+// newer structure layouts compatible with an older driver.
+static_assert(NVENCAPI_MAJOR_VERSION==13&&NVENCAPI_MINOR_VERSION==0,"NVENC requires the audited 13.0 ABI headers");
 using namespace veyra::pipeline;
 struct NvencD3D12Encoder::Impl {
     HMODULE dll=nullptr;void* encoder=nullptr;NV_ENCODE_API_FUNCTION_LIST api{};
@@ -15,12 +18,14 @@ struct NvencD3D12Encoder::Impl {
     bool hdr=false;bool hevc=false;NV_ENC_BUFFER_FORMAT inputFormat=NV_ENC_BUFFER_FORMAT_NV12;
     unsigned w=0,h=0;uint64_t submitted=0,completed=0;
     uint32_t bitrateMbps=0;
+    std::wstring error;
+    bool fail(std::wstring message){error=std::move(message);veyra::log::error("nvenc",std::string(error.begin(),error.end()));return false;}
     ComPtr<ID3D12Fence> fence;HANDLE event=nullptr;
     ComputePass convert;StateTracker states;ComPtr<ID3D12Resource> y,uv;
     PacketWriter writer;std::vector<uint8_t> sequence;
     struct Slot {ComPtr<ID3D12Resource> input,output;NV_ENC_REGISTERED_PTR registeredIn=nullptr,registeredOut=nullptr;NV_ENC_INPUT_PTR mappedIn=nullptr,mappedOut=nullptr;NV_ENC_INPUT_RESOURCE_D3D12 in{};NV_ENC_OUTPUT_RESOURCE_D3D12 out{};uint64_t value=0;bool pending=false;};
     std::array<Slot,4> slots;
-    bool check(NVENCSTATUS code,const char* op){veyra::log::info("nvenc",std::format("{} status={} detail={}",op,int(code),code!=NV_ENC_SUCCESS&&encoder&&api.nvEncGetLastErrorString?api.nvEncGetLastErrorString(encoder):""));return code==NV_ENC_SUCCESS;}
+    bool check(NVENCSTATUS code,const char* op){const char* detail=code!=NV_ENC_SUCCESS&&encoder&&api.nvEncGetLastErrorString?api.nvEncGetLastErrorString(encoder):"";if(!detail)detail="";veyra::log::info("nvenc",std::format("{} status={} detail={}",op,int(code),detail));if(code!=NV_ENC_SUCCESS){const auto text=std::format("{} status={} {}",op,int(code),detail);error.assign(text.begin(),text.end());}return code==NV_ENC_SUCCESS;}
     bool drain(Slot& s){
         if(!s.pending)return true;
         if(fence->GetCompletedValue()<s.value){if(FAILED(fence->SetEventOnCompletion(s.value,event))||WaitForSingleObject(event,10000)!=WAIT_OBJECT_0)return false;}
@@ -34,6 +39,7 @@ struct NvencD3D12Encoder::Impl {
 NvencD3D12Encoder::NvencD3D12Encoder():p_(std::make_unique<Impl>()){}
 NvencD3D12Encoder::~NvencD3D12Encoder(){close();}
 std::vector<uint8_t> NvencD3D12Encoder::headers()const{return p_->sequence;}
+std::wstring NvencD3D12Encoder::lastError()const{return p_->error;}
 std::wstring NvencD3D12Encoder::describe()const{
     return p_->hevc?L"NVIDIA NVENC HEVC (D3D12)":L"NVIDIA NVENC H.264 (D3D12)";
 }
@@ -41,56 +47,39 @@ bool NvencD3D12Encoder::open(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
     const bool hevc=config.hevc;const unsigned fpsNum=config.fpsNum,fpsDen=config.fpsDen;
     auto& p=*p_;p.ctx=&ctx;p.ring=&ring;p.graph=&graph;p.w=graph.workWidth();p.h=graph.workHeight();p.writer=std::move(writer);
     p.hevc=hevc;p.bitrateMbps=config.bitrateMbps;
+    p.error=L"NVENC initialization incomplete";
     wchar_t dir[MAX_PATH]{};GetSystemDirectoryW(dir,MAX_PATH);const auto dllPath=std::wstring(dir)+L"\\nvEncodeAPI64.dll";
-    p.dll=LoadLibraryExW(dllPath.c_str(),nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);if(!p.dll)return false;
+    p.dll=LoadLibraryExW(dllPath.c_str(),nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);if(!p.dll)return p.fail(std::format(L"LoadLibrary nvEncodeAPI64.dll win32={}",GetLastError()));
+    using MaxVersion=NVENCSTATUS(NVENCAPI*)(uint32_t*);
+    auto maxVersion=reinterpret_cast<MaxVersion>(GetProcAddress(p.dll,"NvEncodeAPIGetMaxSupportedVersion"));
+    uint32_t supported=0;
+    if(maxVersion)p.check(maxVersion(&supported),"GetMaxSupportedVersion");
+    log::info("nvenc",std::format("DLL={} driverApi={}.{} compiledAbi={}.{} codec={} extent={}x{} fps={}/{}",std::string(dllPath.begin(),dllPath.end()),supported>>4,supported&15,NVENCAPI_MAJOR_VERSION,NVENCAPI_MINOR_VERSION,hevc?"HEVC":"H264",p.w,p.h,fpsNum,fpsDen));
+    // Version/capability queries are diagnostics. The real API calls decide
+    // whether the driver can open and initialize this exact encoder request.
     using Create=NVENCSTATUS(NVENCAPI*)(NV_ENCODE_API_FUNCTION_LIST*);auto create=reinterpret_cast<Create>(GetProcAddress(p.dll,"NvEncodeAPICreateInstance"));
-    p.api.version=NV_ENCODE_API_FUNCTION_LIST_VER;if(!create||!p.check(create(&p.api),"CreateInstance"))return false;
+    if(!create)return p.fail(L"NvEncodeAPICreateInstance export missing");
+    p.api.version=NV_ENCODE_API_FUNCTION_LIST_VER;if(!p.check(create(&p.api),"CreateInstance"))return false;
     NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS open{};open.version=NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER;open.apiVersion=NVENCAPI_VERSION;open.device=ctx.device();open.deviceType=NV_ENC_DEVICE_TYPE_DIRECTX;
-    // Some systems carry an older nvEncodeAPI64.dll (System32 copy from a
-    // mixed driver/tool install) which rejects the compiled 13.1 declaration
-    // with NV_ENC_ERR_INVALID_VERSION (status 15) - observed on a user RTX
-    // 5060 where every export died here. Older API versions are fully
-    // sufficient for our usage (H.264/HEVC, D3D12, low latency), so retry
-    // downwards before giving up.
-    // Test-only: pretend the compiled declaration was refused, so the fallback
-    // ladder below still gets exercised on a healthy driver. Never set by the UI.
-    // 1 = skip the first open only (exercises the ladder), 2 = refuse every
-    // attempt (exercises the export's Media Foundation fallback). Test-only.
+    // Test injection goes through the same error handling as the real status.
     wchar_t forcedText[8]{};GetEnvironmentVariableW(L"VEYRA_TEST_NVENC_FIRST_OPEN_FAILS",forcedText,8);
     const int forcedMode=_wtoi(forcedText);
-    const bool forcedMiss=forcedMode>0;
-    const bool forcedMissAll=forcedMode>=2;
-    if(forcedMiss)veyra::log::warn("nvenc","test-only: skipping the first OpenD3D12Session so the apiVersion ladder runs");
-    if(forcedMiss||!p.check(p.api.nvEncOpenEncodeSessionEx(&open,&p.encoder),"OpenD3D12Session")) {
-        const uint32_t fallbackVersions[]={NVENCAPI_MAJOR_VERSION,13u,12u,11u};
-        bool opened=false;uint32_t accepted=0;
-        for(const uint32_t major:fallbackVersions){
-            if(!forcedMiss&&major==NVENCAPI_MAJOR_VERSION)continue; // already refused above
-            if(forcedMissAll){
-                log::info("nvenc",std::format("test-only: refusing apiVersion={}.0 as well",major));
-                continue;
-            }
-            open.apiVersion=major;
-            const auto result=p.api.nvEncOpenEncodeSessionEx(&open,&p.encoder);
-            log::info("nvenc",std::format("OpenD3D12Session retry apiVersion={}.0 status={}",major,unsigned(result)));
-            if(result==NV_ENC_SUCCESS){opened=true;accepted=major;break;}
-        }
-        if(!opened)return false;
-        log::info("nvenc",std::format("OpenD3D12Session accepted apiVersion={}.0 (compiled {}.0 was refused)",accepted,NVENCAPI_MAJOR_VERSION));
-    }
-    p.hdr=graph.hdrOutput();if(p.hdr&&!hevc){veyra::log::error("nvenc","HDR export requires HEVC Main10");return false;}
+    if(forcedMode>0)log::warn("nvenc","test-only: inject OpenD3D12Session failure");
+    const auto opened=forcedMode==1?NV_ENC_ERR_INVALID_VERSION:forcedMode>=2?NV_ENC_ERR_UNSUPPORTED_DEVICE:p.api.nvEncOpenEncodeSessionEx(&open,&p.encoder);
+    if(!p.check(opened,"OpenD3D12Session"))return false;
+    p.hdr=graph.hdrOutput();if(p.hdr&&!hevc)return p.fail(L"HDR export requires HEVC Main10");
     p.inputFormat=p.hdr?NV_ENC_BUFFER_FORMAT_YUV420_10BIT:NV_ENC_BUFFER_FORMAT_NV12;
     const GUID codec=hevc?NV_ENC_CODEC_HEVC_GUID:NV_ENC_CODEC_H264_GUID;
     int maxWidth=0,maxHeight=0;
     NV_ENC_CAPS_PARAM caps{};caps.version=NV_ENC_CAPS_PARAM_VER;caps.capsToQuery=NV_ENC_CAPS_WIDTH_MAX;
-    if(!p.check(p.api.nvEncGetEncodeCaps(p.encoder,codec,&caps,&maxWidth),"WidthMax"))return false;
+    p.check(p.api.nvEncGetEncodeCaps(p.encoder,codec,&caps,&maxWidth),"WidthMax");
     caps.capsToQuery=NV_ENC_CAPS_HEIGHT_MAX;
-    if(!p.check(p.api.nvEncGetEncodeCaps(p.encoder,codec,&caps,&maxHeight),"HeightMax"))return false;
+    p.check(p.api.nvEncGetEncodeCaps(p.encoder,codec,&caps,&maxHeight),"HeightMax");
     veyra::log::info("nvenc",std::format("codec={} requested={}x{} maximum={}x{}",hevc?"HEVC":"H264",p.w,p.h,maxWidth,maxHeight));
-    if(maxWidth<=0||maxHeight<=0||p.w>unsigned(maxWidth)||p.h>unsigned(maxHeight)||(p.w&1)||(p.h&1)){
-        veyra::log::error("nvenc","requested dimensions unsupported by selected codec/NV12 input");return false;
+    if((p.w&1)||(p.h&1)){
+        return p.fail(std::format(L"NV12 plane allocation requires even dimensions: {}x{}",p.w,p.h));
     }
-    if(p.hdr){int supported=0;caps.capsToQuery=NV_ENC_CAPS_SUPPORT_10BIT_ENCODE;if(!p.check(p.api.nvEncGetEncodeCaps(p.encoder,codec,&caps,&supported),"10bit support")||!supported)return false;}
+    if(p.hdr){int supported=0;caps.capsToQuery=NV_ENC_CAPS_SUPPORT_10BIT_ENCODE;p.check(p.api.nvEncGetEncodeCaps(p.encoder,codec,&caps,&supported),"10bit support");}
     NV_ENC_PRESET_CONFIG preset{};preset.version=NV_ENC_PRESET_CONFIG_VER;preset.presetCfg.version=NV_ENC_CONFIG_VER;
     if(!p.check(p.api.nvEncGetEncodePresetConfigEx(p.encoder,codec,NV_ENC_PRESET_P4_GUID,NV_ENC_TUNING_INFO_LOW_LATENCY,&preset),"GetPreset"))return false;
     preset.presetCfg.frameIntervalP=1;preset.presetCfg.gopLength=120;preset.presetCfg.rcParams.enableLookahead=0;
@@ -127,24 +116,31 @@ bool NvencD3D12Encoder::open(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
     if(!p.check(p.api.nvEncInitializeEncoder(p.encoder,&init),"InitializeEncoder"))return false;
     p.sequence.resize(4096);uint32_t size=0;NV_ENC_SEQUENCE_PARAM_PAYLOAD seq{};seq.version=NV_ENC_SEQUENCE_PARAM_PAYLOAD_VER;seq.inBufferSize=4096;seq.spsppsBuffer=p.sequence.data();seq.outSPSPPSPayloadSize=&size;
     if(!p.check(p.api.nvEncGetSequenceParams(p.encoder,&seq),"GetSequenceParams"))return false;p.sequence.resize(size);
-    if(FAILED(ctx.device()->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&p.fence))))return false;p.event=CreateEventW(nullptr,FALSE,FALSE,nullptr);if(!p.event)return false;
+    const HRESULT fenceResult=ctx.device()->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&p.fence));
+    if(FAILED(fenceResult))return p.fail(std::format(L"CreateFence HRESULT=0x{:08X}",unsigned(fenceResult)));
+    p.event=CreateEventW(nullptr,FALSE,FALSE,nullptr);if(!p.event)return p.fail(std::format(L"CreateEvent win32={}",GetLastError()));
+    p.error=L"NV12/P010 plane allocation failed";
     p.y=makeTexture(ctx.device(),p.w,p.h,p.hdr?DXGI_FORMAT_R16_UNORM:DXGI_FORMAT_R8_UNORM,true);p.uv=makeTexture(ctx.device(),p.w/2,p.h/2,p.hdr?DXGI_FORMAT_R16G16_UNORM:DXGI_FORMAT_R8G8_UNORM,true);if(!p.y||!p.uv)return false;
-    std::vector<uint8_t> cs;if(!p.convert.loadShader("RgbToNv12.dxil",cs)||!p.convert.create(ctx.device(),cs,10,1,2))return false;
-    for(unsigned i=0;i<8;++i)makeSrv(ctx.device(),i<2?graph.videoFrameResource(i):graph.generatedFrameResource(i-2),graph.outputFormat(),cpuHandleOf(p.convert,i));
-    makeUav(ctx.device(),p.y.Get(),p.hdr?DXGI_FORMAT_R16_UNORM:DXGI_FORMAT_R8_UNORM,cpuHandleOf(p.convert,8));makeUav(ctx.device(),p.uv.Get(),p.hdr?DXGI_FORMAT_R16G16_UNORM:DXGI_FORMAT_R8G8_UNORM,cpuHandleOf(p.convert,9));
+    p.error=L"RgbToNv12 shader load/create failed";
+    std::vector<uint8_t> cs;if(!p.convert.loadShader("RgbToNv12.dxil",cs)||!p.convert.create(ctx.device(),cs,kOutputPoolSlots+2,1,2))return false;
+    for(unsigned i=0;i<kOutputPoolSlots;++i)makeSrv(ctx.device(),i<2?graph.videoFrameResource(i):graph.generatedFrameResource(i-2),graph.outputFormat(),cpuHandleOf(p.convert,i));
+    makeUav(ctx.device(),p.y.Get(),p.hdr?DXGI_FORMAT_R16_UNORM:DXGI_FORMAT_R8_UNORM,cpuHandleOf(p.convert,kOutputPoolSlots));makeUav(ctx.device(),p.uv.Get(),p.hdr?DXGI_FORMAT_R16G16_UNORM:DXGI_FORMAT_R8G8_UNORM,cpuHandleOf(p.convert,kOutputPoolSlots+1));
     for(auto& s:p.slots){
+        p.error=L"NVENC input/output slot allocation failed";
         s.input=makeTexture(ctx.device(),p.w,p.h,p.hdr?DXGI_FORMAT_P010:DXGI_FORMAT_NV12,false);if(!s.input)return false;
         D3D12_HEAP_PROPERTIES hp{};hp.Type=D3D12_HEAP_TYPE_READBACK;D3D12_RESOURCE_DESC bd{};bd.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;bd.Width=(uint64_t(p.w)*p.h*4+4095)&~4095ull;bd.Height=1;bd.DepthOrArraySize=1;bd.MipLevels=1;bd.SampleDesc.Count=1;bd.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        if(FAILED(ctx.device()->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&bd,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&s.output))))return false;
+        const HRESULT resourceResult=ctx.device()->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&bd,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&s.output));
+        if(FAILED(resourceResult))return p.fail(std::format(L"CreateBitstreamResource HRESULT=0x{:08X}",unsigned(resourceResult)));
         auto reg=[&](ID3D12Resource* resource,bool output,NV_ENC_REGISTERED_PTR& registered,NV_ENC_INPUT_PTR& mapped){NV_ENC_REGISTER_RESOURCE r{};r.version=NV_ENC_REGISTER_RESOURCE_VER;r.resourceType=NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;r.resourceToRegister=resource;r.width=output?static_cast<uint32_t>(bd.Width):p.w;r.height=output?1:p.h;r.bufferFormat=output?NV_ENC_BUFFER_FORMAT_U8:p.inputFormat;r.bufferUsage=output?NV_ENC_OUTPUT_BITSTREAM:NV_ENC_INPUT_IMAGE;
             if(!p.check(p.api.nvEncRegisterResource(p.encoder,&r),output?"RegisterOutput":p.hdr?"RegisterP010":"RegisterNV12"))return false;registered=r.registeredResource;
             NV_ENC_MAP_INPUT_RESOURCE m{};m.version=NV_ENC_MAP_INPUT_RESOURCE_VER;m.registeredResource=registered;if(!p.check(p.api.nvEncMapInputResource(p.encoder,&m),"MapResource"))return false;mapped=m.mappedResource;return true;};
         if(!reg(s.input.Get(),false,s.registeredIn,s.mappedIn)||!reg(s.output.Get(),true,s.registeredOut,s.mappedOut))return false;
         s.in.version=NV_ENC_INPUT_RESOURCE_D3D12_VER;s.in.pInputBuffer=s.mappedIn;s.in.inputFencePoint.version=NV_ENC_FENCE_POINT_D3D12_VER;s.in.inputFencePoint.pFence=ctx.fence();s.in.inputFencePoint.bWait=1;
         s.out.version=NV_ENC_OUTPUT_RESOURCE_D3D12_VER;s.out.pOutputBuffer=s.mappedOut;s.out.outputFencePoint.version=NV_ENC_FENCE_POINT_D3D12_VER;s.out.outputFencePoint.pFence=p.fence.Get();s.out.outputFencePoint.bSignal=1;
-    }return true;
+    }p.error.clear();return true;
 }
 bool NvencD3D12Encoder::encode(unsigned frameSlot,bool generated,int64_t pts){auto& p=*p_;auto& s=p.slots[p.submitted%4];if(!p.drain(s))return false;
+    if(frameSlot>=(generated?kGeneratedPoolSlots:2))return p.fail(L"Encoder frame slot out of range");
     Status st=Status::Ok;uint32_t slot=0;auto* list=p.ring->acquireNext(slot,st);if(!list)return false;
     auto* color=generated?p.graph->generatedFrameResource(frameSlot):p.graph->videoFrameResource(frameSlot);
     p.states.transition(list,color,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);p.states.transition(list,p.y.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);p.states.transition(list,p.uv.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -152,7 +148,7 @@ bool NvencD3D12Encoder::encode(unsigned frameSlot,bool generated,int64_t pts){au
     // banding at the 8-bit (or 10-bit HDR) conversion; ungraded exports keep the
     // exact legacy bytes because the graph reports a zero step.
     const float dither=p.graph?p.graph->outputDitherStep():0.0f;
-    const float dims[8]={std::bit_cast<float>(p.w),std::bit_cast<float>(p.h),std::bit_cast<float>(p.hdr?(p.graph->hdr10Output()?2u:1u):0u),std::bit_cast<float>(dither),0,0,0,0};p.convert.bind(list,dims,gpuHandleOf(p.convert,frameSlot+(generated?2:0)).ptr,gpuHandleOf(p.convert,8).ptr);list->Dispatch((p.w+15)/16,(p.h+15)/16,1);
+    const float dims[8]={std::bit_cast<float>(p.w),std::bit_cast<float>(p.h),std::bit_cast<float>(p.hdr?(p.graph->hdr10Output()?2u:1u):0u),std::bit_cast<float>(dither),0,0,0,0};p.convert.bind(list,dims,gpuHandleOf(p.convert,frameSlot+(generated?2:0)).ptr,gpuHandleOf(p.convert,kOutputPoolSlots).ptr);list->Dispatch((p.w+15)/16,(p.h+15)/16,1);
     p.states.uavBarrier(list,p.y.Get());p.states.uavBarrier(list,p.uv.Get());p.states.transition(list,p.y.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE);p.states.transition(list,p.uv.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE);p.states.transition(list,s.input.Get(),D3D12_RESOURCE_STATE_COPY_DEST);
     for(unsigned plane=0;plane<2;++plane){D3D12_TEXTURE_COPY_LOCATION a{},b{};a.pResource=plane?p.uv.Get():p.y.Get();a.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;b.pResource=s.input.Get();b.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;b.SubresourceIndex=plane;list->CopyTextureRegion(&b,0,0,0,&a,nullptr);}
     p.states.transition(list,s.input.Get(),D3D12_RESOURCE_STATE_COMMON);p.states.transition(list,color,D3D12_RESOURCE_STATE_COMMON);if(!p.ring->submitAndSignal(slot))return false;
