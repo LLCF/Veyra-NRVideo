@@ -8,6 +8,8 @@
 
 正式构建 `cmd.exe /c out\build\3060-incremental.cmd` exit0，日志 `out/logs/release-1.4.1-build.log`；EXE FileVersion/ProductVersion 均 1.4.1，SHA256 `99EDAF165D742E8D677A71286149B26F2F6C53CFA030440FB06E915F90B43B20`。`scripts/gates/delivery.ps1 -Root . -BuildDirectory out/build/scheduling-audit-20260918` PASS，74.90 秒，结果 `logs/delivery/ccccf48711ca4544835b226163872bd3/result.json`。实际发布资产、专项回归与解压包验证见 `docs/RELEASE_1.4.1_EXECUTION.md`。
 
+发布完成：`0999a86` 与附注标签 `v1.4.1` 已通过 `git push --atomic nrvideo main refs/tags/v1.4.1` 推送。8 项专项回归、7 组最终解压包运行全部通过；三个 ZIP 上传后，GitHub 服务端大小与 SHA256 逐项匹配本地审核记录。`gh release edit v1.4.1 --repo Likely7/Veyra-NRVideo --draft=false --latest` 成功，latest API 确认正式版、非草稿，发布时间为北京时间 2026-09-18 10:48:08。发布地址：https://github.com/Likely7/Veyra-NRVideo/releases/tag/v1.4.1 。发布后仅补充核验文档，不移动标签、不替换实测资产。
+
 ## 2026-09-18 RTX3060 开启 DLSS 补帧卡死，r4 候选
 
 依据用户 `Desktop/logs/`：Create 成功、正式 Evaluate `0xBAD00002 / 0xC0000005` 后子进程停在 stage3。修正全局 Blackwell 架构伪装及全部69个 fatbin 改写，按固定上游只重建25个注册程序和精确匹配的字体程序，保留真实架构；补齐描述符长度、CUDA 函数预检和 D3D12 LUID 匹配。失败探测子进程直接退出，绕过异常运行库的清理挂死，保留错误和播放器恢复。

@@ -53,3 +53,12 @@ Expanded the final ZIP to `C:/veyra-releases/1.4.1-verify`. Ran `out/tmp/smoke-p
 Seven cases PASS: baseline 187 source frames; original/community/Ampere NR + native 6X each 141 source / 565 generated; forced Ampere 2X 78/52, forced Ampere 6X 78/260, forced Ada 6X 108/410. Counts include initialization and smoke-control pause/seek transitions; they are not steady-state FPS measurements. Every case exits normally and has a nonblank/nonconstant screenshot; the Ampere/Ada 6X images were also visually inspected. FFmpeg/CRT/NR/FG DLLs load from the extracted package with system-only PATH and TEMP working directory. EXE hash matches the tested build.
 
 Evidence: `out/logs/release-1.4.1-portable-smoke.log`, per-case logs/JPEGs and `out/logs/release-1.4.1-portable-smoke/result.json`. No final-package test failed. Publication is authorized; GitHub asset verification is recorded after upload.
+
+## Publication verification
+
+- Release commit: `0999a86caf437336753ced3cc1c845da7104b6d4`; annotated tag `v1.4.1` resolves to that commit. `git push --atomic nrvideo main refs/tags/v1.4.1` succeeded without force.
+- Created a draft with `gh release create v1.4.1 --repo Likely7/Veyra-NRVideo --verify-tag --draft --title 'Veyra 1.4.1 - RTX 30/40 DLSS 6X 与持续补帧修复' --notes-file docs/RELEASE_BODY_1.4.1.md`, then uploaded the three audited ZIPs with `gh release upload`.
+- GitHub release ID: `391180237`. All three remote assets report `uploaded`; names, byte sizes and server SHA256 digests exactly match the table above. No extra assets were uploaded.
+- Published with `gh release edit v1.4.1 --repo Likely7/Veyra-NRVideo --draft=false --latest`. API `repos/Likely7/Veyra-NRVideo/releases/latest` confirms tag `v1.4.1`, `draft=false`, `prerelease=false`, and publication at `2026-09-18T02:48:08Z` (10:48:08 Asia/Shanghai).
+- Public release: https://github.com/Likely7/Veyra-NRVideo/releases/tag/v1.4.1
+- Publication evidence is committed afterward as documentation only; the release tag and uploaded binaries remain at the tested release commit.
