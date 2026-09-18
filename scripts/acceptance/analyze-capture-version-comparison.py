@@ -2,6 +2,7 @@
 import argparse
 import csv
 import json
+import re
 from pathlib import Path
 from statistics import mean, median
 
@@ -30,6 +31,9 @@ def analyze(directory):
               "secondsBetweenSnapshots": samples[-1]["wall"] - samples[0]["wall"],
               "continuouslyActive4X": all(r["nr"] == 1 and r["fg"] == 1 and r["multiplier"] == 4 for r in samples),
               "limitedSnapshotPercent": 100 * mean(r["limited"] for r in samples)}
+    multipliers = sorted({int(r["multiplier"]) for r in samples})
+    result["multipliers"] = multipliers
+    result["continuouslyActive"] = len(multipliers) == 1 and all(r["nr"] == 1 and r["fg"] == 1 for r in samples)
     result["deltas"] = {key: samples[-1][key] - samples[0][key] for key in
                         ("received", "dropped", "generated", "realPresented", "generatedPresented", "fgSkipped", "fgExpired", "slotWaits")}
     values = [r["ageMs"] for r in rows]
@@ -40,6 +44,15 @@ def analyze(directory):
     result["medianSnapshotMetrics"] = {key: median(r[key] for r in rows) for key in
         ("callbackFps", "submitFps", "readAgeMs", "readyMeanMs", "deadlineMeanMs", "presentMeanMs",
          "colorMeanMs", "flowMeanMs", "nrMeanMs", "residualMeanMs", "fgMeanMs", "graphMeanMs")}
+    log_path = directory / "engine.log"
+    if log_path.exists():
+        # Whole-run events include startup/shutdown, unlike the CSV window.
+        # Some device names use the Windows ANSI code page; event keys are ASCII.
+        log_text = log_path.read_text(encoding="utf-8-sig", errors="replace")
+        result["logDecodeReplacementCount"] = log_text.count("\ufffd")
+        lines = log_text.splitlines()
+        result["wholeRunSlowEvents"] = [line for line in lines if "slow=true" in line or re.search(r"\[[\w-]*stall\]", line)]
+        result["wholeRunErrors"] = [line for line in lines if "[ERROR" in line]
     return result
 
 

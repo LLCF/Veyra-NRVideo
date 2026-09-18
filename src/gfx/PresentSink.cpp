@@ -5,8 +5,10 @@
 #include <dxgi1_6.h>
 
 #include <format>
+#include <chrono>
 
 #include "veyra/Log.h"
+#include "veyra/diagnostics/CpuStallTrace.h"
 
 namespace veyra::gfx {
 
@@ -304,19 +306,29 @@ ID3D12Resource* PresentSink::currentBackBuffer(uint32_t* acquiredIndex)
 
 bool PresentSink::present(Status& status)
 {
+    using Clock=std::chrono::steady_clock;
+    auto begin=Clock::now();
+    const auto split=[&]{const auto end=Clock::now();const double ms=std::chrono::duration<double,std::milli>(end-begin).count();begin=end;return ms;};
+    presentTiming_={};
     capacityAcquired_=false;
     xessFailed_=false;
     fsrFailed_=false;
     const UINT syncInterval = desc_.vsync ? 1 : 0;
     const UINT flags = (!desc_.vsync && tearingSupported_) ? DXGI_PRESENT_ALLOW_TEARING : 0;
     ++attemptedPresentCount_;
-    if(xess_&&!xess_->beforePresent()){xessFailed_=true;status=Status::WindowFailure;return false;}
+    const bool beforeOk=!xess_||xess_->beforePresent();
+    presentTiming_.beforeMs=split();
+    if(!beforeOk){xessFailed_=true;status=Status::WindowFailure;return false;}
     const HRESULT hr = swapChain_->Present(syncInterval, flags);
+    presentTiming_.callMs=split();presentTiming_.result=hr;
     if (SUCCEEDED(hr)) {
         ++presentCount_;
         backBufferIndex_ = swapChain_->GetCurrentBackBufferIndex();
-        if(xess_&&!xess_->afterPresent()){xessFailed_=true;status=Status::WindowFailure;return false;}
+        presentTiming_.bufferMs=split();
+        const bool afterOk=!xess_||xess_->afterPresent();
         if(fsr_)fsr_->afterPresent();
+        presentTiming_.afterMs=split();
+        if(!afterOk){xessFailed_=true;status=Status::WindowFailure;return false;}
         return true;
     }
     ++failedPresentCount_;
@@ -401,13 +413,17 @@ void PresentSink::resize(uint32_t width, uint32_t height)
 {
     if (width == 0 || height == 0) return;
     if (width == width_ && height == height_) return;
+    diagnostics::CpuStallTrace trace("resize-stall");
     const UINT flags = swapChainFlags_;
     // DXGI spec compliance before ResizeBuffers: wait for outstanding GPU
     // work on the presenting queue, then release ALL back-buffer references.
     if (!waitForQueueIdle()) return;
+    trace.mark("queueIdle");
     for (auto& b : backBuffers_) b.Reset();
+    trace.mark("releaseBuffers");
     HRESULT hr = swapChain_->ResizeBuffers(3, width, height,
         desc_.hdr10?DXGI_FORMAT_R10G10B10A2_UNORM:desc_.hdr?DXGI_FORMAT_R16G16B16A16_FLOAT:DXGI_FORMAT_R8G8B8A8_UNORM, flags);
+    trace.mark("resizeBuffers");
     if (FAILED(hr)) {
         log::error("present", std::format("ResizeBuffers FAILED hr=0x{:X} (queue idle, buffers released)",
             static_cast<unsigned>(hr)));
@@ -415,6 +431,7 @@ void PresentSink::resize(uint32_t width, uint32_t height)
         return;
     }
     if (!refetchBackBuffers()) return;
+    trace.mark("refetchBuffers");
     width_ = width;
     height_ = height;
     scBufferWidth_ = width_;

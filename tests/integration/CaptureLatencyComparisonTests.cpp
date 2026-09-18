@@ -11,7 +11,12 @@
 int wmain(int argc, wchar_t** argv) {
     using namespace veyra::engine;
     using Clock = std::chrono::steady_clock;
-    if (argc != 3) return 2;
+    if (argc != 3 && argc != 7) return 2;
+    const std::wstring backend = argc == 7 ? argv[3] : L"dlss";
+    const unsigned multiplier = argc == 7 ? _wtoi(argv[4]) : 4;
+    const bool native = argc == 7 && std::wstring_view(argv[5]) == L"native";
+    const bool resize = argc == 7 && std::wstring_view(argv[6]) == L"resize";
+    if ((backend != L"dlss" && backend != L"xess") || (multiplier != 2 && multiplier != 4)) return 2;
     const int seconds = _wtoi(argv[2]);
     if (seconds < 3 || seconds > 120) return 2;
     const std::filesystem::path dir = argv[1];
@@ -42,7 +47,8 @@ int wmain(int argc, wchar_t** argv) {
     GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &monitor);
     DEVMODEW dm{}; dm.dmSize = sizeof(dm); EnumDisplaySettingsW(monitor.szDevice, ENUM_CURRENT_SETTINGS, &dm);
     std::cout << "capture=VC-007PRO input=3840x2160 fps=" << format->fps << " NV12 formatIndex=" << format->index
-        << " audio=WASAPI-muted NR=realtime1080 FG=DLSS4X SR=off sync=default-off window=1280x760 display="
+        << " audio=WASAPI-muted NR=" << (native ? "native4K" : "realtime1080") << " FG=" << (backend == L"xess" ? "XeSS" : "DLSS") << multiplier
+        << " resize=" << resize << " SR=off sync=default-off window=1280x760 display="
         << dm.dmPelsWidth << 'x' << dm.dmPelsHeight << '@' << dm.dmDisplayFrequency << std::endl;
     int failures = 0;
     auto check = [&](bool ok, const char* label) { std::cout << (ok ? "PASS " : "FAIL ") << label << std::endl; failures += !ok; };
@@ -50,7 +56,9 @@ int wmain(int argc, wchar_t** argv) {
     {
         EngineController engine;
         engine.setVolume(0, true);
-        EnhancementSettings settings; settings.nr = true; settings.sr = false; settings.multiplier = 4;
+        EnhancementSettings settings; settings.nr = true; settings.sr = false; settings.multiplier = multiplier;
+        settings.frameGenerationBackend = backend == L"xess" ? FrameGenerationBackend::XeSS : FrameGenerationBackend::Dlss;
+        if (native) settings.nrPolicy = veyra::pipeline::NrSizePolicy::Native;
         engine.open(window, path, PlayerOptions::from(settings));
         auto wait = [&](auto predicate, int ms) {
             const auto until = Clock::now() + std::chrono::milliseconds(ms);
@@ -63,10 +71,10 @@ int wmain(int argc, wchar_t** argv) {
             return false;
         };
         const bool started = wait([](const auto& s) { return s.frames > 10 && s.nrActive && s.fgActive; }, 25000);
-        check(started, "first frames with NR and DLSS");
+        check(started, "first frames with NR and requested FG");
         const auto warm = Clock::now();
         const bool warmed = started && wait([&](const auto& s) {
-            return Clock::now() - warm >= std::chrono::seconds(10) && s.nrActive && s.fgActive && s.applied.multiplier == 4;
+            return Clock::now() - warm >= std::chrono::seconds(10) && s.nrActive && s.fgActive && s.applied.multiplier == multiplier && s.applied.frameGenerationBackend == settings.frameGenerationBackend;
         }, 20000);
         check(warmed, "ten second warmup");
         if (warmed) {
@@ -77,10 +85,17 @@ int wmain(int argc, wchar_t** argv) {
             auto last = first;
             const auto start = Clock::now();
             bool active = true;
+            unsigned resizeStep = 0;
             while (Clock::now() - start < std::chrono::seconds(seconds) && !last.failed) {
+                const unsigned step = unsigned(std::chrono::duration<double>(Clock::now() - start).count() / 10);
+                if (resize && step > resizeStep) {
+                    resizeStep = step;
+                    SetWindowPos(window,nullptr,0,0,step % 2 ? 1800 : 1280,step % 2 ? 1000 : 760,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+                    std::cout << "resize step=" << step << std::endl;
+                }
                 pump(); last = engine.snapshot();
                 const auto& flow = last.metrics.flow; const auto& c = flow.counters;
-                active = active && last.nrActive && last.fgActive && last.applied.multiplier == 4 && !last.srActive;
+                active = active && last.nrActive && last.fgActive && last.applied.multiplier == multiplier && last.applied.frameGenerationBackend == settings.frameGenerationBackend && !last.srActive;
                 auto cpu = [&](veyra::diagnostics::CpuStage stage) { return flow.cpuTiming[size_t(stage)].mean.value_or(-1); };
                 auto gpu = [&](veyra::diagnostics::GpuStage stage) { return flow.gpuTiming[size_t(stage)].mean.value_or(-1); };
                 using C = veyra::diagnostics::CpuStage; using G = veyra::diagnostics::GpuStage;
@@ -100,7 +115,7 @@ int wmain(int argc, wchar_t** argv) {
                 << " generatedDelta=" << last.generated - first.generated << " realPresentedDelta="
                 << last.metrics.flow.counters.realPresented - first.metrics.flow.counters.realPresented << std::endl;
             check(!last.failed && elapsed >= seconds && last.frames > first.frames + 10, "full measurement");
-            check(active && last.nrEvaluated > first.nrEvaluated && last.generated > first.generated, "NR and DLSS4X continuously active");
+            check(active && last.nrEvaluated > first.nrEvaluated && last.generated > first.generated, "NR and requested FG continuously active");
         }
         engine.stop(); check(wait([&](const auto&) { return engine.idle(); }, 15000), "clean stop");
     }

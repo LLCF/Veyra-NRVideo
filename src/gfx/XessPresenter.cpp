@@ -1,4 +1,5 @@
 #include "veyra/gfx/XessPresenter.h"
+#include "veyra/diagnostics/CpuStallTrace.h"
 #include "veyra/Log.h"
 #include "veyra/RuntimePaths.h"
 #include "veyra/gfx/XessMfgUnlock.h"
@@ -175,7 +176,9 @@ bool XessPresenter::initialize(ID3D12Device* device,ID3D12CommandQueue* queue,ID
 bool XessPresenter::beginFrame(){
 #ifdef VEYRA_HAS_XESS
     auto& p=*p_;++p.id;
-    return p.check(p.xellSleepFn(p.ll,p.id),"XeLL sleep")&&p.marker(XELL_SIMULATION_START)&&p.marker(XELL_SIMULATION_END)&&p.marker(XELL_RENDERSUBMIT_START);
+    diagnostics::CpuStallTrace trace("xess-begin-stall",p.id);
+    const bool slept=p.check(p.xellSleepFn(p.ll,p.id),"XeLL sleep");trace.mark("sleep");
+    return slept&&p.marker(XELL_SIMULATION_START)&&p.marker(XELL_SIMULATION_END)&&p.marker(XELL_RENDERSUBMIT_START);
 #else
     return false;
 #endif

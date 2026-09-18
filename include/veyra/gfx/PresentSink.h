@@ -71,6 +71,11 @@ public:
     // Presents the current back buffer. Returns false on device-lost class
     // failures (caller must trigger recovery).
     bool present(Status& status);
+    struct PresentTiming {
+        double beforeMs=0,callMs=0,bufferMs=0,afterMs=0;
+        HRESULT result=S_OK;
+    };
+    const PresentTiming& lastPresentTiming()const{return presentTiming_;}
     bool configurePacing(bool enabled,bool vsync);
     bool presentationReady();
     bool pacingActive()const{return pacing_;}
@@ -132,6 +137,7 @@ private:
     bool shutdownCalled_ = false;
     HANDLE latencyHandle_=nullptr;
     bool pacing_=false,capacityAcquired_=false;
+    PresentTiming presentTiming_{};
 };
 
 } // namespace veyra::gfx

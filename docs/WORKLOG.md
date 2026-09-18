@@ -1,5 +1,19 @@
 # Veyra 工作记录
 
+## 2026-09-18 DLSS / XeSS 两侧偶发长帧排查
+
+用户要求两边排查。沿用隔离分支 `codex/frame-pacing-20260918`，基线 `23cc720`，存档 `checkpoint/pre-stall-investigation-20260918`。本轮只加诊断与实测入口，未改调度策略或输入格式。逐项证据、修改文件、命令、真实返回码及限制见 [长帧调查](FRAME_STALL_INVESTIGATION_2026-09-18.md)。
+
+粉丝日志确认 XeSS2X 原生4K/HDR 正常播放存在1471/1392ms呈现包装调用阻塞，同时采集仍30fps、丢帧增加44/50；与窗口缩放的250ms记录阶段停顿分开处理。旧日志不能区分 Present 本体、前后标记、状态查询或线程被挂起，不能说已经锁定 Intel DLL 或功耗问题。
+
+本机 VC-007PRO 4K30 NV12、RTX5070/616.56/SDR：DLSS4X实时NR、XeSS2X原生NR、XeSS4X实时NR各120秒，回调到原帧Present返回中位数40.146/46.462/35.055ms，均零采集丢帧；三轮未重现稳态1.4秒阻塞。XeSS返回值之后仍有提供方异步呈现，35ms不冒充屏幕端低于DLSS。40秒XeSS缩放三次，实际ResizeBuffers分别115.439/103.269/102.315ms，队列排空仅约0.04ms，丢9帧，逐帧日志最大172.270ms。DLSS同样三次缩放40秒零丢帧，没有>=80ms呈现阻塞。五轮均exit0、NR/FG持续激活、停止成功、无ERROR；PASS不代表卡顿已修复。
+
+另记录两个预热期独立尖峰：XeSS GPU图timestamp跨度70.401ms，原帧年龄最高90.209ms；DLSS原帧83.072ms时GPU已于10.711ms被观察就绪，图跨度14.144ms，余下延迟仍需分辨调度/较短CPU阻塞/系统抢占。没有把预热事件算入正式窗统计，也没有用50ms抽样最大值冒充全帧最大。
+
+构建 `build-isolated.ps1 -Targets veyra_capture_latency_tests,veyra` 最终exit0。初次把新头文件include放错位置导致编译失败，修正后重编译成功；分析脚本初次被设备名非UTF8字节阻断，改为保留原日志、显式计数替换字符后分析成功。失败和成功记录均保留。NR Create18/DLSSG Create返回0x1 seh0，FG warmup Evaluate ok1/result0x1；XeSS Create/Init/XeLL返回0，SDK记录2/4帧呈现。未更换运行组件。
+
+产物：当前构建 `E:/项目/Veyra/build/frame-pacing-20260918`；五轮原始日志/CSV/run.json与comparison.json在 `E:/项目/Veyra/tests/frame-stall-20260918`；构建/分析日志 `E:/项目/Veyra/logs/frame-stall-20260918`；`E:/项目/Veyra/tmp/frame-stall-20260918`为空、测试进程已退出。`git diff --check`通过，无SDK/DLL/模型入Git，无新包、合并main、推送或发布。下一项唯一任务：反馈者原HDR/采集配置运行分段诊断版，抓正常播放1.4秒阻塞的确切调用，再决定修改；窗口重建已有独立优化目标，但未实施或冒充修复完成。
+
 ## 2026-09-18 原始 1.4.2beta 与帧同步版本同参数延迟对照
 
 用户明确保持 VC-007PRO 4K30 NV12、NR+DLSS4X，不接受换采集方案。停止 60fps/MJPEG 替代试验并移除其测试入口。历史基线为 `6e69eeb`，新建隔离分支/工作区 `codex/beta-latency-ab-20260918` / `E:/项目/Veyra/worktrees/beta-latency-ab-20260918`；其 src/include 共 220 文件与原始 beta 源码包一致，只新增共同采样程序和 CMake 目标，历史引擎不改。

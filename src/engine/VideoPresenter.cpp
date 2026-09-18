@@ -43,15 +43,19 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
     xessFailed_=false;fsrFailed_=false;
     RECT rc{};GetClientRect(window_,&rc);if(rc.right<1||rc.bottom<1)return true;
     const auto now=std::chrono::steady_clock::now();
+    bool resized=false;
     const auto deferUntil=uint64_t(uintptr_t(GetPropW(window_,L"Veyra.ResizeDeferUntil")));
     if((unsigned(rc.right)!=sink_.width()||unsigned(rc.bottom)!=sink_.height())&&GetTickCount64()>=deferUntil&&now-lastResize_>=std::chrono::milliseconds(100)) {
+        resized=true;
         if(!ring.drainQueue())return false;sink_.resize(rc.right,rc.bottom);
         // A capture hook may temporarily retain a DXGI buffer. Keep the old
         // valid buffers and let DXGI scale them until a later resize succeeds.
         if(!sink_.currentBackBuffer()||FAILED(ctx.device()->GetDeviceRemovedReason()))return false;
         refresh(ctx.device());lastResize_=now;xessWasEnabled_=false;
     }
+    const auto resizeEnd=std::chrono::steady_clock::now();
     if(sink_.xess()&&!sink_.xess()->beginFrame()){xessFailed_=true;return false;}
+    const auto beginEnd=std::chrono::steady_clock::now();
     if(presentationQueue_){
         const HRESULT hr=presentationQueue_->Wait(ctx.fence(),graph.presentationReadyFence(slot,generated));
         if(FAILED(hr)){veyra::log::error("present",std::format("producer handoff wait hr=0x{:X}",unsigned(hr)));return false;}
@@ -159,12 +163,16 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
     const bool presented=sink_.present(st);
     reflex_.mark(reflexFrame_,5);reflexFrame_=0;
     const auto presentEnd=std::chrono::steady_clock::now();
-    if(presentEnd>=nextCostLog_){
+    const auto ms=[](auto d){return std::chrono::duration<double,std::milli>(d).count();};
+    const bool slow=ms(presentEnd-presentStart)>=80.0;
+    if(slow||presentEnd>=nextCostLog_){
         nextCostLog_=presentEnd+std::chrono::seconds(1);
-        veyra::log::info("present-cost",std::format("generated={} totalMs={:.3f} recordSubmitMs={:.3f} slotWaitMs={:.3f} dxgiMs={:.3f}",generated,
+        const auto& timing=sink_.lastPresentTiming();
+        veyra::log::info("present-cost",std::format("generated={} totalMs={:.3f} recordSubmitMs={:.3f} slotWaitMs={:.3f} dxgiMs={:.3f} slow={} source={} epoch={} backend={} resized={} resizeMs={:.3f} beginMs={:.3f} commandsMs={:.3f} beforeMs={:.3f} presentCallMs={:.3f} bufferMs={:.3f} afterMs={:.3f} hr=0x{:X}",generated,
             std::chrono::duration<double,std::milli>(presentEnd-presentStart).count(),
             std::chrono::duration<double,std::milli>(dxgiStart-presentStart).count(),ring.cpuWaitMilliseconds()-slotWaitStart,
-            std::chrono::duration<double,std::milli>(presentEnd-dxgiStart).count()));
+            ms(presentEnd-dxgiStart),slow,identity.sourceFrameId,identity.epoch,sink_.xess()?"XeSS":sink_.fsr()?"FSR":"DXGI",resized,
+            ms(resizeEnd-presentStart),ms(beginEnd-resizeEnd),ms(dxgiStart-beginEnd),timing.beforeMs,timing.callMs,timing.bufferMs,timing.afterMs,unsigned(timing.result)));
     }
     xessFailed_=sink_.xessFailed();fsrFailed_=fsrFailed_||sink_.fsrFailed();return presented;
 }

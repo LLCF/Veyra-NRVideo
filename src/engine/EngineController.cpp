@@ -25,6 +25,7 @@
 #include "veyra/gfx/XessMfgUnlock.h"
 #include "veyra/ngx/AmpereMfgUnlock.h"
 #include "veyra/diagnostics/ResetCause.h"
+#include "veyra/diagnostics/CpuStallTrace.h"
 #include "veyra/sink/WasapiAudioSink.h"
 #include "veyra/sink/ImageExportSink.h"
 #include "veyra/gfx/D3D12DeviceContext.h"
@@ -540,8 +541,10 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     if(sample.identity.settingsRevision==fgBudgetRevision&&fgCost.state==diagnostics::SampleState::Measured&&fgCost.milliseconds)fgBudget.fgCost(*fgCost.milliseconds,host100ns());
                     if(frameFlow)frameFlow->gpuFrame(sample,host100ns());
                     for(size_t i=0;i<sample.gpu.size();++i){const auto& gpu=sample.gpu[i];
-                        if(gpu.state==diagnostics::SampleState::Measured&&gpu.milliseconds)
+                        if(gpu.state==diagnostics::SampleState::Measured&&gpu.milliseconds){
                             traceFrame(diagnostics::TraceKind::Gpu,sample.identity,0,0,0,unsigned(i),1,*gpu.milliseconds);
+                            if(*gpu.milliseconds>=80.0)veyra::log::info("gpu-stage-stall",std::format("source={} epoch={} revision={} stage={} gpuMs={:.3f}",sample.identity.sourceFrameId,sample.identity.epoch,sample.identity.settingsRevision,i,*gpu.milliseconds));
+                        }
                     }
                 };
                 for(const auto& sample:graph.takeGpuTimings())record(sample);
@@ -550,6 +553,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
             // Shared with the presenter: resolve each batch on this single
             // object so SDK status and generated counts are consumed once.
             auto pollCompletions=[&]{
+                diagnostics::CpuStallTrace trace("completion-stall");
                 collectTimings();
                 for(auto it=pendingCompletions.begin();it!=pendingCompletions.end();){
                     auto& watch=**it;auto& batch=watch.output;
@@ -674,7 +678,9 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 return true;
             };
             while(!stop_){
+                diagnostics::CpuStallTrace loopTrace("engine-stall",frames);
                 collectTimings();
+                loopTrace.mark("collect");
                 if(captureRecovering){
                     if(Clock::now()<captureRetryAt){std::this_thread::sleep_for(std::chrono::milliseconds(20));continue;}
                     ++captureRetries;
@@ -693,6 +699,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     }
                 }
                 if((gd.hdrInput||options.settings.videoHdr.enabled)&&GetTickCount64()-hdrDisplayCheck>2000){
+                    diagnostics::CpuStallTrace hdrTrace("hdr-query-stall",frames);
                     hdrDisplayCheck=GetTickCount64();
                     const bool native=options.settings.useHdrPreview(gd.hdrInput,gfx::PresentSink::hdrDisplayActive(window));
                     if(native!=gd.hdrOutput){std::lock_guard lock(mutex_);if(desired_.revision==options.settings.revision){desired_.revision=++nextRevision_;snapshot_.desired=desired_;snapshot_.applying=true;}}
@@ -902,6 +909,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     if(stop_||seekSeconds_>=0||(paused_&&!seekPreviewPending)||liveScheduler->failed()||liveScheduler->occupancy()>=2||!graph.nextFrameSlotAvailable()||enhancementPending())continue;
                 }
                 const auto decodeStart=Clock::now();
+                loopTrace.mark("controlAndSchedule");
                 if(injectSourceGap&&frames>=12){
                     if(!sourceGapUntil){sourceGapUntil=Clock::now()+std::chrono::milliseconds(400);veyra::log::info("capture-test","inject 400ms Waiting before next source read");}
                     if(Clock::now()<*sourceGapUntil){advanceLive();waitLive();continue;}
@@ -965,6 +973,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 if(isImage)pkt.sequence=1;
                 if(!rereadCached)++sourceFrames;
                 const double decodeMs=elapsedMs(decodeStart);decodeTimes.add(decodeMs);
+                loopTrace.mark("read");
                 double pts=isImage?0:pkt.pts.toDouble()*1000;
                 if(isCapture&&frames==0){anchor=Clock::now();anchorMs=pts;}
                 if(seekPreviewPending)++seekDecoded;
@@ -1076,7 +1085,9 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 wchar_t testWork[16]{};
                 const auto currentReflexFrame=(!paused_&&!isImage)?presenter.beginReflex():0;
                 if(!isImage&&GetEnvironmentVariableW(L"VEYRA_TEST_VIDEO_WORK_MS",testWork,16))std::this_thread::sleep_for(std::chrono::milliseconds(std::clamp(_wtoi(testWork),0,150)));
+                loopTrace.mark("prepare");
                 bool processed=false;{processWaitBase=ring.cpuWaitCount();processWaitMsBase=ring.cpuWaitMilliseconds();processSubmitBase=ring.submitCount();processed=!injectedReject&&graph.process(frame,pts,historyReset,out,pkt.sequence,&pkt.colorInfo,&pkt.hardwareSurface,comparisonMode_!=0,admitFg);processSlotWaitMs=ring.cpuWaitMilliseconds()-processWaitMsBase;}
+                loopTrace.mark("graphSubmit");
                 previewSkipSinceProcess=false;
                 if(!processed){
                     const auto failedComponent=graph.failedBackend();
@@ -1314,7 +1325,12 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
 #ifdef VEYRA_ENABLE_REMOTEPLAY
                             if(didPresent&&remote)remote->videoPresented(double(item.pts100ns)/10000,host100ns());
 #endif
-                            if(didPresent&&!generated&&!rereadCached)flow->latency(captureArrival,host100ns());
+                            if(didPresent&&!generated&&!rereadCached){
+                                const auto returned=host100ns();
+                                flow->latency(captureArrival,returned);
+                                const double age=double(returned-captureArrival)/10000;
+                                if(physicalCapture&&age>=80.0)veyra::log::info("capture-age-stall",std::format("source={} epoch={} revision={} callbackToReturnMs={:.3f} readyObservedAgeMs={:.3f} gpuSpanMs={:.3f} (CPU observation includes scheduling; not scanout)",item.identity.sourceFrameId,item.identity.epoch,item.identity.settingsRevision,age,watch->frameReadyObserved[s.next]?double(watch->frameReadyObserved[s.next]-captureArrival)/10000:-1.0,watch->gpuExecutionMs.value_or(-1.0)));
+                            }
                             if(didPresent&&!generated&&!rereadCached&&!paused_){
                                 const auto stamp=host100ns();const auto stats=flow->snapshot(stamp);
                                 const auto color=stats.gpuTiming[size_t(diagnostics::GpuStage::Color)].mean;
@@ -1371,6 +1387,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     if(presentFailed){status(L"图片呈现失败",true);break;}
                 }
                 if(!liveScheduler){scheduleWaits.add(frameWaitMs);presentTimes.add(framePresentMs);}
+                loopTrace.mark("scheduleAndPresent");
                 audioRebuffering=audioStarted&&audioPipe.waitingForVideo();
                 const double lateness=isCapture?0:isImage?nowMs()-pts:lastFilePresentLateness;
                 if(!paused_&&!isCapture){latenessSamples.push_back(std::abs(lateness));if(latenessSamples.size()>1200)latenessSamples.pop_front();}

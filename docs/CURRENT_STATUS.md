@@ -20,6 +20,8 @@
 
 采集呈现相位优化及原始 1.4.2beta 引擎同参数对照见[延迟优化与历史对比](CAPTURE_LATENCY_REDUCTION_2026-09-18.md)。保持 4K30 NV12、NR、DLSS4X，不使用换格式或降低倍率解释收益。
 
+DLSS / XeSS 双侧长帧排查见[分段诊断与实卡证据](FRAME_STALL_INVESTIGATION_2026-09-18.md)。本机已重现 XeSS 窗口重建阻塞；粉丝正常播放的约 1.4 秒呈现阻塞、历史 DLSS 尖峰尚未归因。本轮添加分段和逐长帧日志，不宣称性能修复，不更新既有 beta 包。
+
 RTX Video HDR 独立改动保留。用户已明确终止 NVIDIA FSR 4.1 实验并要求回退，不再执行此前 FSR4 施工和画质修复计划。
 
 **最新决定：FSR4 画质不接受，已撤掉实验入口和接入。** 原有 DLSS SR、RTX Video SR、官方 AMD FSR 保留；旧实验预设 mode 6 读取时转为 RTX Video SR 高档，保留其他参数。HDR 在 SDR 显示器预览不执行转换，保留开关旁的真实状态提示。回退构建与检查结果见 WORKLOG。
