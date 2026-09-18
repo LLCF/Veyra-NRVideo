@@ -234,9 +234,7 @@ void saveColourFoldState(){
     preferences.colourFoldMask=colorFoldMask;
     if(!store_.save(preferences,nullptr))veyra::log::warn("color-ui","fold state not saved");
 }
-void layoutColorPage(){
-    RECT bodyRect{};GetClientRect(body,&bodyRect);
-    const int bodyWidthDip=MulDiv(bodyRect.right,96,veyra::ui::layoutDpi(window));
+void layoutColorPage(int bodyWidthDip){
     auto place=[&](int id,int y,int height,bool hidden,int x=-1,int w=-2){
         for(auto& entry:items)if(GetDlgCtrlID(entry.h)==id){entry.y=y;entry.height=height;entry.hidden=hidden;if(x>=0)entry.x=x;if(w!=-2)entry.w=w;return;}
     };
@@ -248,12 +246,20 @@ void layoutColorPage(){
     // import/export. The combo and the name field used to both stretch to the
     // full width and cover each other, which is why users reported "there is no
     // place to save a preset".
-    const int presetHalf=std::max(dip(window,120),(bodyWidthDip-36)/2);
+    const int presetHalf=std::max(1,(bodyWidthDip-36)/2);
     place(803,y,30,false,12,presetHalf);
     place(804,y,30,false,12+presetHalf+12,presetHalf-6);
     y+=36;
-    place(805,y,32,false);place(806,y,32,false);place(807,y,32,false);place(808,y,32,false);place(809,y,32,false);y+=40;
-    place(801,y,32,false);place(802,y,32,false);place(824,y,32,false);place(822,y,32,false);place(823,y,32,false);y+=38;
+    auto toolbar=[&](std::initializer_list<int> ids){
+        const int available=std::max(1,bodyWidthDip-24);
+        const int columns=std::clamp((available+6)/96,1,int(ids.size()));
+        const int width=(available-6*(columns-1))/columns;
+        int index=0;
+        for(int id:ids){place(id,y+(index/columns)*38,32,false,12+(index%columns)*(width+6),width);++index;}
+        y+=((index+columns-1)/columns)*38;
+    };
+    toolbar({805,806,807,808,809});
+    toolbar({801,802,824,822,823});
     place(821,y,32,false);y+=42;
     for(int section=0;section<kColorSections;++section){
         const bool collapsed=(colorFoldMask>>section)&1u;
@@ -1091,7 +1097,8 @@ LRESULT CALLBACK holdOriginalProc(HWND h,UINT msg,WPARAM wp,LPARAM lp,UINT_PTR i
 void arrange(){
     if(!window||!body)return;RECT r{};GetClientRect(window,&r);int width=MulDiv(r.right,96,veyra::ui::layoutDpi(window)),height=MulDiv(r.bottom,96,veyra::ui::layoutDpi(window));
     const int sticky=128,viewport=std::max(1,height-sticky);contentHeight=0;
-    if(page==2)layoutColorPage();
+    // The child still has its previous size until SetWindowPos below.
+    if(page==2)layoutColorPage(width);
     int helpHeight=0;
     if(smoothMotionHelpExpanded){auto dc=GetDC(window);auto old=SelectObject(dc,font);RECT textRect{0,0,dip(window,std::max(1,width-24)),0};DrawTextW(dc,smoothMotionHelp,-1,&textRect,DT_CALCRECT|DT_WORDBREAK|DT_NOPREFIX);SelectObject(dc,old);ReleaseDC(window,dc);helpHeight=MulDiv(textRect.bottom,96,layoutDpi(window))+16;}
     const auto helpOffset=[&](const Item& entry){const auto id=GetDlgCtrlID(entry.h);return entry.page==1&&(id==1114||id==205||id==1110||id==240||id==241||id==242||id==1150)?helpHeight:0;};
@@ -1207,11 +1214,22 @@ LRESULT CALLBACK proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
         engine::ColorLookStore lookStore(runtime::localDataDirectory());
         if(id==805){
             wchar_t name[64]{};GetWindowTextW(item(804),name,64);
+            if(std::wstring(name).find_first_not_of(L" \t\r\n")==std::wstring::npos){
+                SetFocus(item(804));
+                MessageBoxW(window,L"请输入预设名称，再点击保存。",L"保存色彩预设",MB_OK|MB_ICONINFORMATION);
+                return 0;
+            }
+            if(!lookStore.load()){
+                MessageBoxW(window,lookStore.error().c_str(),L"保存失败",MB_OK|MB_ICONERROR);return 0;
+            }
+            const bool exists=std::any_of(lookStore.entries().begin(),lookStore.entries().end(),[&](const auto& entry){return entry.name==name;});
+            if(exists&&MessageBoxW(window,L"已存在同名预设，是否覆盖？",name,MB_YESNO|MB_ICONQUESTION)!=IDYES)return 0;
             auto colour=colourTarget();colour.enabled=true;
-            if(lookStore.load()&&lookStore.put(name,colour,true)){
+            if(lookStore.put(name,colour,true)){
                 refreshColourLooks(name);
-                message(L"已保存色彩预设（同名会覆盖）。可以导出成 .vpcolor 分享。");
-            }else message(L"保存失败："+lookStore.error());
+                message(L"已保存色彩预设："+std::wstring(name));
+                veyra::log::info("color-ui","named preset saved to disk and selected");
+            }else MessageBoxW(window,lookStore.error().c_str(),L"保存失败",MB_OK|MB_ICONERROR);
         }else if(id==806){
             const int index=int(SendMessageW(item(803),CB_GETCURSEL,0,0));
             if(lookStore.load()&&index>=1&&size_t(index-1)<lookStore.entries().size()){
@@ -1435,6 +1453,7 @@ case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.
         }
         // Preset toolbar.
         combo(803,2,0,{});add(L"EDIT",L"",804,ES_AUTOHSCROLL|WS_TABSTOP,2,12,0,-1,26);send(804,EM_SETLIMITTEXT,48,0);
+        send(804,EM_SETCUEBANNER,TRUE,LPARAM(L"预设名称"));
         button(L"保存为预设",805,2,12,0,110);button(L"应用",806,2,12,0,80);button(L"删除",807,2,12,0,80);
         button(L"导出",808,2,12,0,80);button(L"导入",809,2,12,0,80);
         SetPropW(item(804),L"veyra.tip",HANDLE(L"给当前色彩设置起个名字，点“保存预设”存下来；导出会生成 .vpcolor 文件，可以发给别人导入。"));

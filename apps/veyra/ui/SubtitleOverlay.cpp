@@ -34,9 +34,11 @@ std::wstring signatureOf(const std::vector<SubtitleLine>& lines,const SubtitleVi
     for(const auto& line:lines){
         signature+=std::format(L"{}|{:08X}|{:08X}|{}|{:.1f}|{}|{}|{}|",line.text,line.style.primary,line.style.outline,line.style.font,
             line.style.size,line.style.alignment,line.alignOverride,line.secondary?1:0);
+        signature+=std::format(L"{}:{:.4f}:{:.4f}|",reinterpret_cast<uintptr_t>(line.bitmap.get()),line.posX,line.posY);
     }
     signature+=std::format(L"#{:.2f}|{}|{}|{}|{}|{}",view.scale,view.fontOverride,view.outline?1:0,view.background?1:0,view.bottomMargin,view.blockGap);
     signature+=std::format(L"/{}x{}",rect.right,rect.bottom);
+    signature+=std::format(L"/{}/{}/{}/{}/{}",view.preview.zoom,view.preview.centerX,view.preview.centerY,view.videoWidth,view.videoHeight);
     return signature;
 }
 
@@ -56,9 +58,12 @@ HWND createSubtitleOverlay(HWND parent){
 
 void updateSubtitleOverlay(HWND h,const std::vector<SubtitleLine>& lines,const SubtitleView& view){
     RECT rect{};GetClientRect(h,&rect);
-    if(lines.empty()||rect.right<1||rect.bottom<1){ShowWindow(h,SW_HIDE);SetWindowTextW(h,L"");return;}
-    const auto signature=signatureOf(lines,view,rect);
     static thread_local std::wstring lastSignature;
+    static thread_local HWND lastWindow=nullptr;
+    static thread_local std::vector<std::shared_ptr<const engine::SubtitleBitmapFrame>> lastBitmaps;
+    if(h!=lastWindow){lastSignature.clear();lastBitmaps.clear();lastWindow=h;}
+    if(lines.empty()||rect.right<1||rect.bottom<1){lastSignature.clear();lastBitmaps.clear();ShowWindow(h,SW_HIDE);SetWindowTextW(h,L"");return;}
+    const auto signature=signatureOf(lines,view,rect);
     if(lastSignature==signature){ShowWindow(h,SW_SHOWNOACTIVATE);return;}
     const int width=rect.right,height=rect.bottom;
     BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=width;info.bmiHeader.biHeight=-height;
@@ -80,6 +85,22 @@ void updateSubtitleOverlay(HWND h,const std::vector<SubtitleLine>& lines,const S
         std::vector<Line> laid;
         laid.reserve(lines.size());
         for(const auto& line:lines){
+            if(line.bitmap){
+                const auto& frame=*line.bitmap;
+                const double vw=view.videoWidth>0?view.videoWidth:frame.width,vh=view.videoHeight>0?view.videoHeight:frame.height;
+                if(frame.width<=0||frame.height<=0||vw<=0||vh<=0)continue;
+                const double fit=std::min(width/vw,height/vh)*view.preview.zoom;
+                const double sx=vw*fit/frame.width,sy=vh*fit/frame.height;
+                const double ox=width*.5-view.preview.centerX*vw*fit,oy=height*.5-view.preview.centerY*vh*fit;
+                graphics.SetInterpolationMode(InterpolationModeHighQualityBilinear);
+                for(const auto& image:frame.images){
+                    auto pixels=image.pixels();if(pixels.empty())continue;
+                    Bitmap source(image.width,image.height,image.width*4,PixelFormat32bppPARGB,reinterpret_cast<BYTE*>(pixels.data()));
+                    graphics.DrawImage(&source,RectF(float(ox+image.x*sx),float(oy+image.y*sy),float(image.width*sx),float(image.height*sy)),0,0,float(image.width),float(image.height),UnitPixel);
+                }
+                continue;
+            }
+            if(line.text.empty())continue;
             Line entry;
             entry.path=std::make_unique<Gdiplus::GraphicsPath>();
             entry.style=line.style;
@@ -161,9 +182,13 @@ void updateSubtitleOverlay(HWND h,const std::vector<SubtitleLine>& lines,const S
             graphics.FillPath(&fill,entry.path.get());
         }
         lastSignature=signature;
+        // Retain the identities used by the cache until its signature changes.
+        lastBitmaps.clear();
+        for(const auto& line:lines)if(line.bitmap)lastBitmaps.push_back(line.bitmap);
     }
     SIZE dimensions{width,height};POINT origin{};BLENDFUNCTION blend{AC_SRC_OVER,0,255,AC_SRC_ALPHA};
     if(UpdateLayeredWindow(h,screen,nullptr,&dimensions,memory,&origin,0,&blend,ULW_ALPHA)){
+        SetWindowTextW(h,L"subtitle");
         ShowWindow(h,SW_SHOWNOACTIVATE);
         if(!GetPropW(h,L"subtitle.logged")){
             log::info("subtitle",std::format("layered update succeeded extent={}x{} lines={}",width,height,lines.size()));

@@ -1,16 +1,15 @@
 #pragma once
 
 // Subtitle engine: external text formats (SRT/ASS/SSA/WebVTT), subtitle tracks
-// embedded in the media container (text codecs only: SubRip/ASS/SSA/mov_text/
-// WebVTT) and the timing helpers the UI needs. Image subtitles (PGS/DVB) have
-// no decoder in the shipped FFmpeg build, so those tracks are listed with an
-// explicit note instead of silently disappearing.
+// embedded in the media container, including FFmpeg-decoded PGS/DVD/DVB images.
 #include <string>
 #include <vector>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <stop_token>
+#include <array>
+#include <cstdint>
 
 namespace veyra::engine {
 
@@ -29,12 +28,23 @@ struct SubtitleStyle {
     bool bold=false,italic=false,background=false;
 };
 
+struct SubtitleBitmap {
+    int x=0,y=0,width=0,height=0;
+    std::array<uint32_t,256> palette{}; // premultiplied ARGB
+    std::vector<uint32_t> runs;        // upper 24 bits = count, low 8 = palette index
+    std::vector<uint32_t> pixels()const;
+};
+struct SubtitleBitmapFrame {
+    int width=0,height=0;             // authored display canvas
+    std::vector<SubtitleBitmap> images;
+};
 struct SubtitleCue {
     double begin=0,end=0;
     std::wstring text;            // '\n' separated, override tags already removed
     int style=0;                  // index into SubtitleTrack::styles
     int alignOverride=0;          // 1..9 from {\anN}; 0 = keep the style value
     double posX=-1,posY=-1;       // {\pos(x,y)} in script pixels; -1 = unset
+    std::shared_ptr<const SubtitleBitmapFrame> bitmap;
 };
 
 struct SubtitleTrack {
@@ -53,7 +63,7 @@ struct SubtitleTrack {
 // Format is chosen from the file extension first, then sniffed from content.
 SubtitleTrack loadSubtitleFile(const std::wstring& path);
 
-// Text subtitle tracks inside the container (Matroska/MP4/...).
+// Subtitle tracks inside the container (Matroska/MP4/...).
 std::vector<SubtitleTrack> loadEmbeddedSubtitleTracks(const std::wstring& path,std::stop_token stop={},
     const std::function<void(const std::vector<SubtitleTrack>&)>& metadata={});
 

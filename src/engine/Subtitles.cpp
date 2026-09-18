@@ -14,6 +14,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <thread>
+#include <limits>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -391,6 +392,15 @@ std::wstring subtitleAt(const std::vector<SubtitleCue>& cues,double seconds){
     return {};
 }
 
+std::vector<uint32_t> SubtitleBitmap::pixels()const{
+    if(width<=0||height<=0||width>8192||height>8192)return {};
+    const size_t count=size_t(width)*height;
+    std::vector<uint32_t> result;result.reserve(count);
+    for(const auto run:runs){const auto n=run>>8;if(!n||n>count-result.size())return {};result.insert(result.end(),n,palette[run&255]);}
+    if(result.size()!=count)return {};
+    return result;
+}
+
 std::vector<SubtitleTrack> loadEmbeddedSubtitleTracks(const std::wstring& path,std::stop_token stop,
     const std::function<void(const std::vector<SubtitleTrack>&)>& metadata){
     std::vector<SubtitleTrack> tracks;
@@ -428,14 +438,16 @@ std::vector<SubtitleTrack> loadEmbeddedSubtitleTracks(const std::wstring& path,s
         track.styles.push_back(SubtitleStyle{});
         streamToTrack[streamIndex]=int(tracks.size());
         decoders.emplace_back();
-        if(!isTextSubtitleCodec(track.codec)){
-            track.note=L"图形/字幕格式不支持（本版本仅支持文本字幕）";
+        const auto codec=stream->codecpar->codec_id;
+        if(!isTextSubtitleCodec(track.codec)&&codec!=AV_CODEC_ID_HDMV_PGS_SUBTITLE&&codec!=AV_CODEC_ID_DVD_SUBTITLE&&codec!=AV_CODEC_ID_DVB_SUBTITLE){
+            track.note=L"暂不支持此字幕格式";
             log::info("subtitle",std::format("embedded track {} codec={} listed as unsupported",streamIndex,codecName?codecName:""));
             tracks.push_back(std::move(track));
             continue;
         }
         const AVCodec* decoder=avcodec_find_decoder(stream->codecpar->codec_id);
         AVCodecContext* context=decoder?avcodec_alloc_context3(decoder):nullptr;
+        if(context){context->pkt_timebase=stream->time_base;}
         if(!decoder||!context||avcodec_parameters_to_context(context,stream->codecpar)<0||avcodec_open2(context,decoder,nullptr)<0){
             track.note=L"字幕解码器初始化失败";
             if(context)avcodec_free_context(&context);
@@ -451,6 +463,10 @@ std::vector<SubtitleTrack> loadEmbeddedSubtitleTracks(const std::wstring& path,s
     struct PacketCleanup {AVPacket*& packet;~PacketCleanup(){av_packet_free(&packet);}} packetCleanup{packet};
     constexpr size_t maxCacheBytes=64u*1024u*1024u;
     size_t cacheBytes=0,totalCues=0;uint64_t packets=0;
+    int videoWidth=1920,videoHeight=1080;
+    for(unsigned i=0;i<input->nb_streams;++i)if(input->streams[i]->codecpar->codec_type==AVMEDIA_TYPE_VIDEO){
+        videoWidth=std::max(1,input->streams[i]->codecpar->width);videoHeight=std::max(1,input->streams[i]->codecpar->height);break;
+    }
     auto nextPublish=std::chrono::steady_clock::now()+std::chrono::milliseconds(250);
     while(packet&&!stop.stop_requested()&&av_read_frame(input,packet)>=0){
             ++packets;
@@ -461,7 +477,51 @@ std::vector<SubtitleTrack> loadEmbeddedSubtitleTracks(const std::wstring& path,s
             AVSubtitle subtitle{};
             int got=0;
             if(avcodec_decode_subtitle2(context,&subtitle,&got,packet)<0||!got){avsubtitle_free(&subtitle);av_packet_unref(packet);continue;}
-            const double packetSeconds=packet->pts==AV_NOPTS_VALUE?0:double(packet->pts)*timeBase;
+            const double packetSeconds=(subtitle.pts!=AV_NOPTS_VALUE?double(subtitle.pts)/AV_TIME_BASE:
+                packet->pts==AV_NOPTS_VALUE?0:double(packet->pts)*timeBase);
+            const bool bitmapCodec=context->codec_id==AV_CODEC_ID_HDMV_PGS_SUBTITLE||context->codec_id==AV_CODEC_ID_DVD_SUBTITLE||context->codec_id==AV_CODEC_ID_DVB_SUBTITLE;
+            if(bitmapCodec){
+                const double begin=packetSeconds+double(subtitle.start_display_time)/1000.0;
+                // A new display set (including an empty clear set) replaces the old one.
+                if(!track.cues.empty()&&begin>=track.cues.back().begin){
+                    if(begin==track.cues.back().begin)track.cues.pop_back();
+                    else track.cues.back().end=std::min(track.cues.back().end,begin);
+                }
+                auto frame=std::make_shared<SubtitleBitmapFrame>();
+                frame->width=context->width>0?context->width:videoWidth;
+                frame->height=context->height>0?context->height:videoHeight;
+                size_t bytes=sizeof(SubtitleCue)+sizeof(SubtitleBitmapFrame);
+                bool valid=bytes<=maxCacheBytes-cacheBytes&&subtitle.num_rects<=256;
+                for(unsigned r=0;r<subtitle.num_rects&&valid;++r){
+                    const auto* rect=subtitle.rects[r];
+                    if(!rect||rect->type!=SUBTITLE_BITMAP)continue;
+                    if(rect->w<=0||rect->h<=0||rect->w>8192||rect->h>8192||!rect->data[0]||!rect->data[1]||rect->linesize[0]<rect->w||rect->nb_colors<1||rect->nb_colors>256){valid=false;break;}
+                    if(sizeof(SubtitleBitmap)>maxCacheBytes-cacheBytes-bytes){valid=false;break;}
+                    const size_t runBudget=(maxCacheBytes-cacheBytes-bytes-sizeof(SubtitleBitmap))/sizeof(uint32_t);
+                    SubtitleBitmap image;image.x=rect->x;image.y=rect->y;image.width=rect->w;image.height=rect->h;
+                    for(int p=0;p<rect->nb_colors;++p){
+                        uint32_t c=0;std::memcpy(&c,rect->data[1]+p*4,4);const uint32_t a=c>>24;
+                        image.palette[p]=(a<<24)|((((c>>16)&255)*a/255)<<16)|((((c>>8)&255)*a/255)<<8)|((c&255)*a/255);
+                    }
+                    for(int y=0;y<rect->h&&valid;++y)for(int x=0;x<rect->w;++x){
+                        const uint8_t pixel=rect->data[0][size_t(y)*rect->linesize[0]+x];
+                        if(pixel>=rect->nb_colors){valid=false;break;}
+                        if(!image.runs.empty()&&(image.runs.back()&255)==pixel&&(image.runs.back()>>8)<0xFFFFFF)image.runs.back()+=256;
+                        else {if(image.runs.size()>=runBudget){valid=false;break;}image.runs.push_back(256u|pixel);}
+                    }
+                    if(!valid)break;
+                    bytes+=sizeof(SubtitleBitmap)+image.runs.size()*sizeof(uint32_t);
+                    frame->images.push_back(std::move(image));
+                }
+                if(valid&&!frame->images.empty()){
+                    SubtitleCue cue;cue.begin=begin;
+                    cue.end=subtitle.end_display_time>subtitle.start_display_time&&subtitle.end_display_time!=UINT32_MAX?
+                        packetSeconds+double(subtitle.end_display_time)/1000.0:std::numeric_limits<double>::infinity();
+                    cue.bitmap=std::move(frame);
+                    if(totalCues<kMaxCues&&bytes<=maxCacheBytes-cacheBytes){cacheBytes+=bytes;++totalCues;track.cues.push_back(std::move(cue));}
+                    else track.note=L"字幕缓存已达上限，后续字幕未加载";
+                }else if(!valid){track.note=L"图形字幕数据无效或超出缓存上限";log::warn("subtitle","bitmap display rejected: invalid rectangle or cache budget");}
+            }
             for(unsigned rect=0;rect<subtitle.num_rects;++rect){
                 const auto* entry=subtitle.rects[rect];
                 if(!entry)continue;

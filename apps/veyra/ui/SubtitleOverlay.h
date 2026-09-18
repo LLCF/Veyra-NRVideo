@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "veyra/engine/Subtitles.h"
+#include "veyra/engine/PreviewView.h"
 
 namespace veyra::ui {
 struct SubtitleLine {
@@ -18,6 +19,7 @@ struct SubtitleLine {
     int alignOverride=0;               // {\anN}, 0 = style alignment
     double posX=-1,posY=-1;            // {\pos(x,y)} normalised to 0..1 (or -1)
     bool secondary=false;
+    std::shared_ptr<const engine::SubtitleBitmapFrame> bitmap;
 };
 struct SubtitleView {
     double scale=1.0;                  // viewer size multiplier
@@ -26,6 +28,8 @@ struct SubtitleView {
     bool background=false;
     int bottomMargin=0;                // extra logical pixels above the bar
     int blockGap=6;                    // gap between the two languages
+    engine::PreviewView preview;
+    double videoWidth=0,videoHeight=0;
 };
 HWND createSubtitleOverlay(HWND parent);
 void updateSubtitleOverlay(HWND,const std::vector<SubtitleLine>&,const SubtitleView&);

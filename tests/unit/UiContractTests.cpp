@@ -6,6 +6,7 @@
 #include "../../apps/veyra/ui/CapturePreferenceStore.h"
 #include "../../apps/veyra/ui/SourceTitle.h"
 #include "veyra/engine/EngineController.h"
+#include "../../apps/veyra/ui/LiveStatusHistory.h"
 #include "veyra/sink/AudioGain.h"
 #include "veyra/engine/PreviewView.h"
 #include <iostream>
@@ -14,6 +15,22 @@
 void require(bool value,const char* why){if(!value)throw std::runtime_error(why);}
 int wmain(int argc,wchar_t** argv){try{
     using namespace veyra;
+    {
+        ui::live_status::DashboardHistory history;engine::PlayerSnapshot s;
+        s.running=s.capture=true;s.transport=engine::TransportState::Playing;s.sessionId=1;s.applied.revision=1;
+        s.captureReceived=120;s.captureFps=40;s.nominalSourceFps=60;s.applied.multiplier=4;
+        s.metrics.flow.rateWindowReady=true;s.metrics.flow.presentSubmitFps=160;
+        for(int i=0;i<9;++i)history.sample(s);
+        require(!history.overloaded&&history.inputLimited,"40fps source delivering160fps at4X is input limited, not FG limited");
+        s.captureFps=60;s.metrics.flow.presentSubmitFps=120;
+        for(int i=0;i<9;++i)history.sample(s);
+        require(history.overloaded&&!history.inputLimited,"actual output deficit remains visible");
+        s.applied.multiplier=1;s.fgBudgetLimited=true;
+        require(std::wstring(history.rateStatus(s))!=L"补帧调度降档","disabled FG cannot report FG throttling");
+        for(int i=1;i<8;++i){s.metrics.flow.reset.epoch=i*10;history.sample(s);}
+        require(history.resetSamples>=3,"continuous reset storm is identified separately");
+        s.applied.revision=2;history.sample(s);require(!history.overloaded&&!history.inputLimited&&!history.resetSamples,"revision invalidates stale warnings");
+    }
     {engine::PresentationCadence c;require(c.due(100,10)==100,"no startup pacing reserve");c.submitted(108);require(c.due(110,10)==117,"front edge spaces late outputs with bounded catch-up");c.submitted(999);require(c.due(120,10)==1008,"stale subframe cannot burst after stall");c.reset();require(c.due(120,10)==120,"reset revokes optional deadline");}
     {engine::PreviewView v;v.wheel(3,800,300,1000,600,1920,1080);require(std::abs(v.zoom-1.728f)<.0001f,"wheel scale");
     const float anchored=(800-500)/(1920.0f*(1000.0f/1920)*v.zoom)+v.centerX;require(std::abs(anchored-.8f)<.0001f,"pointer anchor fixed");

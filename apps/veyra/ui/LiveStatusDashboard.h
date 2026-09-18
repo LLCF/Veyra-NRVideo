@@ -1,24 +1,9 @@
 #pragma once
 #include <deque>
 #include <optional>
+#include "LiveStatusHistory.h"
 
 namespace veyra::ui::live_status {
-struct DashboardHistory {
-    std::deque<std::optional<double>> points;
-    uint64_t session=0,revision=0;unsigned low=0,good=0;bool overloaded=false;
-    void sample(const engine::PlayerSnapshot& s){
-        if(session!=s.sessionId||revision!=s.applied.revision){points.clear();low=good=0;overloaded=false;session=s.sessionId;revision=s.applied.revision;}
-        const bool active=s.running&&!s.image&&s.transport==engine::TransportState::Playing&&!s.applying;
-        auto value=active?s.metrics.flow.enhancementProcessing.mean:std::optional<double>{};
-        points.push_back(value);if(points.size()>120)points.pop_front();
-        const bool xess=s.applied.multiplier>1&&engine::presentSinkFrameGeneration(s.applied.frameGenerationBackend);
-        const double actual=xess?s.metrics.flow.xessSdkSubmitFps:s.metrics.flow.presentSubmitFps;
-        const double target=s.nominalSourceFps*(s.captureHalfRate?.5:1)*s.applied.multiplier;
-        if(!active||!s.metrics.flow.rateWindowReady||target<=0){low=good=0;overloaded=false;return;}
-        if(actual<target*.95){good=0;if(++low>=8)overloaded=true;}
-        else{low=0;if(++good>=8)overloaded=false;}
-    }
-};
 inline void paintDashboard(HWND h,HDC dc,int w,int height,const engine::PlayerSnapshot& s,const DashboardHistory& history,bool advanced=false){
     const auto& f=s.metrics.flow;const bool active=s.running&&!s.image&&s.transport==engine::TransportState::Playing;
     auto text=[&](std::wstring str,int x,int y,int width,int ht,int size,COLORREF color){chromeText(dc,h,str,x,y,width,ht,size,color);};
@@ -69,11 +54,11 @@ inline void paintDashboard(HWND h,HDC dc,int w,int height,const engine::PlayerSn
     std::wstring status=L"待机";COLORREF color=RGB(145,151,149);
     if(s.failed){status=L"错误";color=RGB(245,86,86);}
     else if(s.remoteRecovering){status=L"恢复中";color=RGB(242,185,65);}
-    else if(active&&!s.applying&&f.rateWindowReady){status=history.overloaded?(s.applied.multiplier>1?L"补帧受限":L"处理过载"):L"正常";color=history.overloaded?RGB(242,185,65):RGB(111,211,127);}
+    else if(active&&!s.applying&&f.rateWindowReady){status=history.rateStatus(s);color=status!=L"正常"?RGB(242,185,65):RGB(111,211,127);}
     else if(s.applying&&s.running)status=L"调整中";else if(active)status=L"采样中";else if(s.transport==engine::TransportState::Paused)status=L"已暂停";
     text(L"当前状态",26+bw,bottom+6,bw-20,18,10,secondary);
     {AlphaGraphics draw(dc);Gdiplus::SolidBrush dot(Gdiplus::Color(255,GetRValue(color),GetGValue(color),GetBValue(color)));draw.get().FillEllipse(&dot,dip(h,27+bw),dip(h,bottom+35),dip(h,8),dip(h,8));}
-    text(status,42+bw,bottom+27,bw-38,23,16,textColor);
+    text(status,42+bw,bottom+27,bw-38,23,status.size()>5?11:16,textColor);
     text(xess?L"* 帧生成耗时为应用侧计时，不含提供方内部插值":L"增强阶段GPU计时 · 不含音频和呈现等待",12,height-18,w-24,16,8,secondary);
 }
 }

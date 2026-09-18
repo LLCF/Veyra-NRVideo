@@ -377,7 +377,7 @@ for(int id:std::initializer_list<int>{Open,Capture,Recent,Master,Save,Sr,Play,St
     pos(statusBar,0,0,1,1,false);pos(diagnosticPanel,g.left,g.top,g.viewWidth,h-g.top-20,!full&&pro&&showDiagnostics);
     const bool empty=currentFile.empty();put(EmptyTitle,0,0,1,1,false);put(EmptyHint,0,0,1,1,false);
     for(int id:{EmptyTitle,EmptyHint})surface(GetDlgItem(mainWindow,id),background);
-    pos(subtitleLabel,full?20:g.left+20,full?h-(fullControls?274:190):g.top+g.viewHeight-190,full?w-40:g.viewWidth-40,180,uiState.subtitles&&GetWindowTextLengthW(subtitleLabel)>0);
+    pos(subtitleLabel,full?0:g.left,full?0:g.top,full?w:g.viewWidth,full?h:g.viewHeight,uiState.subtitles&&GetWindowTextLengthW(subtitleLabel)>0);
     put(JobProgress,tx,barTop+10,std::min(300,tw),24,exportJob.poll().state!=veyra::engine::ExportState::Idle&&!full);
     // Each HWND enters the batch once. Mixing HIDE/SHOW entries for a child
     // causes DeferWindowPos to preserve the earlier hide flag on Windows.
@@ -697,6 +697,7 @@ if(smokeStep==4&&elapsed>5200&&GetEnvironmentVariableW(L"VEYRA_TEST_LARGE_IMAGE_
             for(const auto* cue:veyra::engine::cuesAt(track,position,3)){
                 veyra::ui::SubtitleLine line;
                 line.text=cue->text;
+                line.bitmap=cue->bitmap;
                 line.style=track.styles.empty()?veyra::engine::SubtitleStyle{}:track.styles[size_t(std::clamp(cue->style,0,int(track.styles.size())-1))];
                 if(cue->alignOverride)line.style.alignment=cue->alignOverride;
                 line.alignOverride=cue->alignOverride;
@@ -716,6 +717,10 @@ if(smokeStep==4&&elapsed>5200&&GetEnvironmentVariableW(L"VEYRA_TEST_LARGE_IMAGE_
     view.outline=uiState.subtitleOutline;
     view.background=uiState.subtitleBackground;
     view.bottomMargin=uiState.subtitleMargin;
+    if(full&&fullControls)view.bottomMargin+=84;
+    view.preview=engine.previewView();
+    view.videoWidth=s.metrics.resolution.output.width;
+    view.videoHeight=s.metrics.resolution.output.height;
     veyra::ui::updateSubtitleOverlay(subtitleLabel,draw,view);
     static std::wstring lastSubtitleLog;
     if(!draw.empty()){
@@ -890,6 +895,15 @@ else if(colorStep==47){
 // Named colour presets: save the current look, clear a value, apply the preset,
 // then delete it - the same three actions the panel exposes.
 else if(colorStep==52){
+    veyra::ui::settingsColorScrollToTest(805);
+    bool hit=true;
+    for(int id:{805,806,807,808,809}){
+        const auto control=colourControl(id);RECT rect{};GetWindowRect(control,&rect);
+        POINT point{(rect.left+rect.right)/2,(rect.top+rect.bottom)/2};ScreenToClient(GetParent(control),&point);
+        hit&=ChildWindowFromPointEx(GetParent(control),point,CWP_SKIPINVISIBLE|CWP_SKIPDISABLED)==control;
+    }
+    veyra::log::info("color-ui-test",std::format("preset toolbar buttons reachable={}",hit));
+    if(!hit){colorStep=-1;return 0;}
     if(auto edit=colourControl(804))SetWindowTextW(edit,L"烟测预设");
     SendMessageW(colourControl(805),BM_CLICK,0,0);
     colorStep=53;

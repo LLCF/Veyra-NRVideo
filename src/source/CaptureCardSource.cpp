@@ -216,6 +216,7 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
     double pendingTime=0,lastPts=0,readAgeMs=0;bool pendingDiscontinuity=false,forceDiscontinuity=false;
     int64_t nominalDuration100ns=0;pipeline::Rational pendingDuration=pipeline::Rational::unknown();
     uint64_t received=0,dropped=0,lastDrop=0,sequence=0;
+    uint64_t discontinuitySamples=0;
     Clock::time_point pendingArrival{},readArrival{},firstArrival{},latestArrival{};
     ComPtr<IGraphBuilder> graph;ComPtr<ICaptureGraphBuilder2> builder;ComPtr<IBaseFilter> device,grabFilter,nullFilter,audioFilter;ComPtr<IAMStreamConfig> config;ComPtr<ISampleGrabber> grab;ComPtr<IMediaControl> control;ComPtr<IMediaEvent> events;
     float lastAudioGain=-1;bool audioGainSupported=false;
@@ -354,6 +355,14 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
             // empty between reads; only the native path requires it here.
             if(!valid||(!compressedPath&&!pendingFrame)){callbackError=true;}
             else {
+                const double previous=compressedPath?lastCallbackTime:pendingTime;
+                const bool driverBreak=sample->IsDiscontinuity()==S_OK;
+                const bool clockBreak=received&&(time<=previous||time-previous>(info.averageFps>0?2.5/info.averageFps:.1));
+                if(driverBreak||clockBreak){
+                    ++discontinuitySamples;
+                    if(discontinuitySamples<=4||discontinuitySamples%120==0)
+                        log::warn("capture-discontinuity",std::format("source={} count={} driverFlag={} clockBreak={} previousPtsMs={:.4f} ptsMs={:.4f} deltaMs={:.4f} arrivalDeltaMs={:.4f} sampleStart={} sampleEnd={} completeTime={} nominalFps={:.4f}",received+1,discontinuitySamples,driverBreak,clockBreak,previous*1000,time*1000,(time-previous)*1000,received?std::chrono::duration<double,std::milli>(arrival-latestArrival).count():0.0,sampleStart,sampleEnd,sampleTime,info.averageFps));
+                }
                 // Copy directly into our bounded mailbox; read() swaps frames
                 // under this lock, so the frame consumed by the GPU is untouched.
                 // Compressed payloads are decoded by our own backend instead of
@@ -366,7 +375,7 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
                     if(compressedQueue.size()>=compressedQueueLimit){compressedQueue.pop_front();++compressedDropped;++dropped;}
                     CompressedSample entry;entry.payload.assign(payload,payload+bytes);
                     entry.time=time;entry.arrival=arrival;entry.start=sampleStart;entry.end=sampleEnd;entry.completeTime=sampleTime;
-                    entry.bad=captureDiscontinuity(!compressedQueue.empty()||pending,pendingDiscontinuity,sample->IsDiscontinuity()==S_OK,received>0,lastCallbackTime,time,info.averageFps);
+                    entry.bad=captureDiscontinuity(!compressedQueue.empty()||pending,pendingDiscontinuity,driverBreak,received>0,lastCallbackTime,time,info.averageFps);
                     pendingDiscontinuity=entry.bad;lastCallbackTime=time;
                     compressedQueue.push_back(std::move(entry));enqueued=true;
                 }else{
@@ -375,7 +384,7 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
                     // Inspect consecutive callbacks, not consecutive mailbox reads.
                     // Preserve a driver/clock break when its sample is overwritten.
                     pendingDiscontinuity=captureDiscontinuity(pending,pendingDiscontinuity,
-                        sample->IsDiscontinuity()==S_OK,received>0,pendingTime,time,info.averageFps);
+                        driverBreak,received>0,pendingTime,time,info.averageFps);
                     pending=true;pendingTime=time;pendingArrival=arrival;
                     pendingDuration=captureDuration(sampleStart,sampleEnd,sampleTime,nominalDuration100ns);
                 }

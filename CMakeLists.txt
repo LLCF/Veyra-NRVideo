@@ -542,6 +542,9 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
 
   add_executable(veyra_repair_contract_tests tests/unit/RepairContractTests.cpp)
   add_executable(veyra_subtitle_loading_tests tests/integration/SubtitleLoadingTests.cpp)
+  add_executable(veyra_bitmap_subtitle_tests tests/integration/BitmapSubtitleTests.cpp)
+  target_link_libraries(veyra_bitmap_subtitle_tests PRIVATE veyra_engine)
+  target_compile_features(veyra_bitmap_subtitle_tests PRIVATE cxx_std_20)
   target_link_libraries(veyra_subtitle_loading_tests PRIVATE veyra_engine)
   target_compile_features(veyra_subtitle_loading_tests PRIVATE cxx_std_20)
   # veyra_engine is linked for the subtitle engine (SRT/ASS/VTT parsing +
