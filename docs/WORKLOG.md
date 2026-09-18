@@ -1,5 +1,13 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-18 圆刚与 Smooth Motion 收尾、磁盘清理审计
+
+用户决定圆刚方案结束，Smooth Motion 已确认可用。圆刚 worktree 原有未提交诊断工具（`CMakeLists.txt`、`tools/avermedia_probe/main.cpp`）独立提交 `8819ca8`，标签 `checkpoint/avermedia-closed-20260918`；未合入 main。Smooth Motion 历史实验 `27c17eb` 标记为 `checkpoint/smooth-motion-closed-20260918`，普通版现行策略保持。两份对应说明文档补充收尾状态，不扩大实卡验收结论。
+
+执行本地只读扫描 `out/tmp/disk-audit-20260918.ps1`，C/E 两盘约 231.5 万文件，123 秒完成；345 处访问失败、6,932 个重解析点跳过。结果 `out/cleanup-audit-20260918/{directories.csv,large-files.csv,summary.json,access-errors.txt,skipped-reparse-points.txt}`，优先候选 `priority-candidates.csv`。桌面本地报告 `cleanup-audit-2026-09-18.md` 分类列出路径、容量和保留项；私人磁盘清单不进入 Git。37.77 GiB 缓存/普通日志与 30.54 GiB 旧测试/构建/发布副本合计 68.31 GiB 逻辑容量，非实际释放保证。未删除任何文件、分支或 worktree。
+
+检查使用 `git status --short`、`git worktree list --porcelain`、`git ls-files`、发布脚本与 CMakeCache 依赖引用；ZIP 仅检查目录元数据。发现 vcpkg buildtrees 的部分源码仍被对应源码打包脚本直接使用，排除整目录清理。一次 PowerShell Split-Path 参数冲突及一次 rg 通配路径错误均已用正确路径查询替代，不影响扫描结果。本轮仅存档与文档，不构建、不运行 RTX/NGX 测试，不修改或重新发布 1.4.1。下一步按用户选择的清单执行实际清理。
+
 ## 2026-09-18 Release 实测截图与固定二维码
 
 按用户授权，更新 1.4.1 Release 正文并原样上传三张用户截图作为 PNG 资产：RTX4070 IMAX/6X、RTX4070 任务管理器同屏、RTX5070 NR+6X。截图显示宽度 900px，标注软件显示提交读数；没有将截图当作物理刷新率或全场景性能证明。补回 1.4.0 的支持与反馈区块，微信赞助与交流群并排各 220px；`docs/RELEASE_SUPPORT.md` 保存固定区块，`AGENTS.md` 要求后续每个 Release 保留并在发布后核验。

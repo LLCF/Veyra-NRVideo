@@ -1,5 +1,9 @@
 # AVerMedia 5.1 采集开关：实现与验证
 
+## 2026-09-18 收尾决定
+
+用户决定圆刚方案到此结束，不再作为待办继续开发。已验证的产品修复已随 1.4.1 合入 main。隔离区剩余诊断工具以 `8819ca8` 单独存档，标签 `checkpoint/avermedia-closed-20260918`；未合入产品，也未新增构建或实卡验证结论。以下保留历史证据，任务结束不等于所有圆刚型号的 5.1 均已验收。
+
 日期：2026-09-17
 分支：`codex/avermedia-51-switch-20260917`（独立 worktree `out/worktrees/avermedia-51`，基于 `6119a7d`）
 上游调研：[`AVERMEDIA_5P1_CAPTURE_FEASIBILITY_2026-09-17.md`](AVERMEDIA_5P1_CAPTURE_FEASIBILITY_2026-09-17.md)
