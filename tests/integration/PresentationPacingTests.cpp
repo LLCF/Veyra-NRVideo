@@ -18,20 +18,21 @@ int wmain(int argc,wchar_t** argv){
     SetEnvironmentVariableW(L"VEYRA_VERBOSE_FRAME_LOGS",L"1");
     veyra::Logger::instance().openFile((dir/L"engine.log").wstring());veyra::Logger::instance().setConsoleEnabled(false);
     if(FAILED(CoInitializeEx(nullptr,COINIT_MULTITHREADED)))return 2;
-    const bool physical=scenario==L"capture-nr";
+    const bool physical=scenario==L"capture-nr"||scenario==L"capture-nr-recovery";
+    if(physical&&(multiplier<2||multiplier>6))return 2;
     std::wstring sourcePath=argv[1];
     if(physical){
         const auto devices=veyra::source::CaptureCardSource::deviceDetails();
         const auto device=std::find_if(devices.begin(),devices.end(),[](const auto& d){return d.name==L"VC-007PRO";});
         if(device==devices.end()){std::cout<<"FAIL VC-007PRO missing"<<std::endl;return 3;}
         const auto formats=veyra::source::CaptureCardSource::formatsByPath(device->path);
-        const auto format=std::find_if(formats.begin(),formats.end(),[](const auto& f){return f.width==3840&&f.height==2160&&std::abs(f.fps-30)<.01&&f.label.find(L"NV12")!=std::wstring::npos;});
+        const auto format=std::find_if(formats.begin(),formats.end(),[&](const auto& f){return f.width==3840&&f.height==2160&&std::abs(f.fps-30)<.01&&f.label.find(L"NV12")!=std::wstring::npos;});
         if(format==formats.end()){std::cout<<"FAIL exact 3840x2160 30fps NV12 format missing"<<std::endl;return 3;}
         const auto audios=veyra::source::CaptureCardSource::deviceDetails(true);
         const auto audio=std::find_if(audios.begin(),audios.end(),[](const auto& a){return a.wasapi&&a.name.find(L"HDMI (VC-007PRO)")!=std::wstring::npos;});
         const int audioMode=audio!=audios.end()?veyra::source::kCaptureAudioWasapi:veyra::source::kCaptureAudioDisabled;
         sourcePath=veyra::source::CaptureCardSource::makeCapturePath(unsigned(device-devices.begin()),*device,format->index,audioMode,audio!=audios.end()?&*audio:nullptr);
-        std::cout<<"capture=VC-007PRO input=3840x2160 fps="<<format->fps<<" formatIndex="<<format->index<<" audioMode="<<audioMode<<" NR=realtime1080 FG=DLSS4X SR=off"<<std::endl;
+        std::cout<<"capture=VC-007PRO input=3840x2160 fps="<<format->fps<<" inputFormat=NV12 formatIndex="<<format->index<<" audioMode="<<audioMode<<" NR=realtime1080 FG=DLSS"<<multiplier<<"X SR=off"<<std::endl;
     }
     HWND window=CreateWindowExW(0,L"STATIC",L"Veyra pacing acceptance",WS_OVERLAPPEDWINDOW|WS_VISIBLE,40,40,1280,760,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
     if(!window)return 2;
@@ -44,7 +45,7 @@ int wmain(int argc,wchar_t** argv){
         PresentationSettings p{mode>=0,PacingMode(std::max(0,mode)),DisplaySync(display)};engine.requestPresentation(p);
         EnhancementSettings effects;effects.multiplier=unsigned(multiplier);if(scenario==L"xess")effects.frameGenerationBackend=FrameGenerationBackend::XeSS;
         if(scenario==L"effects"){effects.nr=true;effects.sr=true;effects.srTarget=veyra::pipeline::SrTarget::Qhd;}
-        if(physical){effects.nr=true;effects.sr=false;effects.multiplier=4;}
+        if(physical){effects.nr=true;effects.sr=false;}
         auto options=PlayerOptions::from(effects);options.captureReplayForTest=scenario==L"replay";
         engine.open(window,sourcePath,options);
         auto pump=[] {MSG msg;while(PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)){TranslateMessage(&msg);DispatchMessageW(&msg);}};
@@ -93,6 +94,24 @@ int wmain(int argc,wchar_t** argv){
             check(wait([](auto& s){return !s.presentationEffective.enabled;},1000),"disable during overload within one second");
             SetEnvironmentVariableW(L"VEYRA_TEST_VIDEO_WORK_MS",nullptr);
             before=engine.snapshot();check(wait([&](auto& s){return s.frames>before.frames+20;}),"recover after overload");
+        }
+        if(scenario==L"capture-nr-recovery"){
+            auto before=engine.snapshot();
+            SetEnvironmentVariableW(L"VEYRA_TEST_VIDEO_WORK_MS",L"80");
+            const auto overloadStart=Clock::now();
+            check(wait([&](auto& s){return Clock::now()-overloadStart>std::chrono::seconds(3)&&s.frames>before.frames+5;}),"capture progresses during injected 80ms work");
+            check(engine.snapshot().captureDropped>before.captureDropped,"capture overload reports mailbox drops");
+            SetEnvironmentVariableW(L"VEYRA_TEST_VIDEO_WORK_MS",nullptr);
+            const auto recoveryStart=Clock::now();
+            check(wait([&](auto& s){return Clock::now()-recoveryStart>std::chrono::seconds(12)&&s.fgActive&&s.nrActive&&!s.fgBudgetLimited&&s.captureAgeP95Ms<80;},20000),"capture recovers full FG without accumulating latency");
+            engine.pause(true);check(wait([](auto& s){return s.transport==TransportState::Paused;}),"capture pause");
+            engine.pause(false);before=engine.snapshot();
+            check(wait([&](auto& s){return s.frames>before.frames+30&&s.fgActive&&s.nrActive;}),"capture resume restores NR and FG");
+            for(const unsigned factor:{2u,6u,unsigned(multiplier)}){
+                effects.multiplier=factor;check(engine.requestSettings(effects),"capture multiplier request accepted");
+                const auto changed=Clock::now();
+                check(wait([&](auto& s){return Clock::now()-changed>std::chrono::seconds(3)&&s.applied.multiplier==factor&&s.fgActive&&s.nrActive;}),"capture multiplier applied with active NR and FG");
+            }
         }
         engine.stop();check(wait([&](auto&){return engine.idle();}),"clean stop");
     }

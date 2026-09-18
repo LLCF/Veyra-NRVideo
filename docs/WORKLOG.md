@@ -1,5 +1,17 @@
 # Veyra 工作记录
 
+## 2026-09-18 原始 1.4.2beta 与帧同步版本同参数延迟对照
+
+用户明确保持 VC-007PRO 4K30 NV12、NR+DLSS4X，不接受换采集方案。停止 60fps/MJPEG 替代试验并移除其测试入口。历史基线为 `6e69eeb`，新建隔离分支/工作区 `codex/beta-latency-ab-20260918` / `E:/项目/Veyra/worktrees/beta-latency-ab-20260918`；其 src/include 共 220 文件与原始 beta 源码包一致，只新增共同采样程序和 CMake 目标，历史引擎不改。
+
+四轮各预热 10 秒、正式 120 秒，全部 exit0：旧 beta 两次中位数 42.578/42.683ms，新版关闭且禁用本轮优化 42.631ms，优化候选 40.496ms。未测出新同步代码在关闭状态下的明显软件延迟回归；相位优化约省 2.135ms（5.01%）。旧 beta 首轮最大 317ms、丢帧 23；新版未优化最大 172ms、丢帧 5；候选最大 56.673ms、无采集丢帧但仍过期 8 张生成帧；旧 beta 复测最大 45.045ms、过期 4 张。未将单轮峰值差冒充根因定位或稳定性根治。
+
+完整参数、执行命令、阶段耗时、返回码与限制见 [历史对照与优化报告](CAPTURE_LATENCY_REDUCTION_2026-09-18.md)。这是同一探针链接原始/当前引擎的重新编译比较，不是原便携 GUI 二进制或 HDMI→屏幕的物理延迟测试；50ms 快照抽样不冒充全帧统计。两版复用相同批准运行库，NR/DLSSG Create `0x1 seh=0`、FG warm-up Evaluate `ok=1 result=0x1`，正式四轮 NR/FG 全程激活、无 ERROR。
+
+本轮还完成先前同构建逐帧 A/B：42.439→40.233ms，低排队 40.057ms；该“旧策略”从未代表原 beta，已在报告明确纠正。相位优化只作用物理采集 DLSS、保留真实 PTS/倍率/fence。产品和测试构建成功，单测通过，契约 205 项 0 失败；真实采集 80ms 人为阻塞后恢复、暂停/恢复、2X→6X→4X 均通过。30/40 本轮未执行，显示扫描未测。
+
+产物：`E:/项目/Veyra/build/frame-pacing-20260918`、`build/beta-latency-ab-20260918`；证据 `tests/capture-latency-reduction-20260918`、`tests/beta-latency-ab-20260918`；日志 `logs/capture-latency-reduction-20260918`；临时 `tmp/frame-pacing-20260918`、`tmp/beta-latency-ab-20260918`。历史探针第一次缺本地 ngx 配置和 PresentBlit shader，修复 CMake 依赖/补齐同源配置后再跑，失败保留于 beta120。当前源码在 frame-pacing 隔离分支；存档点 `checkpoint/pre-capture-latency-reduction-20260918`。无新包或解压副本，无 SDK/运行库入 Git，不合并 main、不推送、不发布。下一项唯一任务：偶发长帧的可重复归因与屏幕端实测。
+
 ## 2026-09-18 VC-007PRO / NR / DLSS 4X 四模式两分钟实测
 
 用户将本轮采集延迟对比从 XeSS 改为 DLSS 4X。沿用隔离分支 `codex/frame-pacing-20260918`、基准 `a471474`，增加采集 callback/read/graph/present 逐帧关联日志和 `capture-nr` 真机测试入口；产品同步算法未改。固定 VC-007PRO 3840x2160 30fps NV12、NR 实时 1080p、4K DLSS 4X、SR 关闭、允许撕裂，低排队/均匀呈现/Reflex 请求/关闭各 120 秒，预热 10 秒。Reflex+FG 实际回退低排队，不冒充原生 Reflex 测试。

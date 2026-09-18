@@ -1,6 +1,7 @@
 #include "veyra/engine/LiveGpuScheduler.h"
 #include "veyra/engine/TimingWindow.h"
 #include "veyra/engine/FgRecoveryBudget.h"
+#include "veyra/engine/LivePairLatency.h"
 #include <iostream>
 #include <memory>
 #include <atomic>
@@ -71,5 +72,27 @@ int main(){
     budget.complete(std::nullopt,true,false,36000000);
     check(!budget.predicted(36000000),"missing GPU timing cannot retain a stale CPU polling cost");
     check(!budget.admit(36000000,35800000,0,0),"unknown cost still rejects expired presentation deadlines");
+    veyra::engine::LivePairLatency phase;
+    check(phase.select(10000000,420000,333333,4)==420000,"unknown live readiness keeps legacy phase");
+    for(int i=0;i<8;++i)phase.observe(10000000+i,370000);
+    check(phase.select(10000008,420000,333333,4)==417500,"phase advance is gradual rather than a burst");
+    for(int i=0;i<32;++i)phase.select(10000100+i,420000,333333,4);
+    check(phase.select(10000200,420000,333333,4)==380000,"4X keeps measured readiness plus jitter margin");
+    phase.observe(10000201,410000);
+    check(phase.select(10000202,420000,333333,4)==420000,"slow batch immediately restores conservative phase");
+    check(phase.select(21000000,420000,333333,4)==420000,"stale readiness cannot shorten a new pair");
+    for(unsigned multiplier:{2u,4u,6u}){
+        phase.reset();
+        const int64_t interval=333667,ready=120000;
+        const int64_t needed=ready+interval*(multiplier-1)/multiplier;
+        for(int i=0;i<8;++i)phase.observe(30000000+i,needed);
+        auto last=interval+90000;bool bounded=true;
+        for(int i=0;i<80;++i){const auto delay=phase.select(30000100+i,interval+90000,interval,multiplier);
+            bounded&=delay>=needed&&delay<=interval+90000&&last-delay<=2500;last=delay;}
+        check(bounded,"2X/4X/6X preserves readiness and bounded phase at 29.97 Hz");
+        phase.reset();check(phase.select(30001000,interval+90000,interval,multiplier)==interval+90000,"reset discards earlier readiness");
+    }
+    phase.observe(40000000,-1);phase.observe(40000000,30000000);
+    check(phase.select(40000001,420000,333333,4)==420000,"invalid observations cannot train phase");
     return failures?1:0;
 }

@@ -15,7 +15,8 @@ def stats(values):
         i = (len(values) - 1) * p
         lo = int(i)
         return values[lo] + (values[min(lo + 1, len(values) - 1)] - values[lo]) * (i - lo)
-    return {"n": len(values), "mean": sum(values) / len(values),
+    return {"n": len(values), "mean": sum(values) / len(values), "min": values[0],
+            "p01": percentile(.01), "p05": percentile(.05),
             "p50": percentile(.5), "p95": percentile(.95),
             "p99": percentile(.99), "max": values[-1]}
 
@@ -73,6 +74,8 @@ def analyze(directory):
         if x["ready"]:
             ms(kind + "_callback_to_ready_observed", x["arrival"], x["ready"])
             ms(kind + "_ready_to_present_begin", x["ready"], x["begin"])
+            ms(f"subframe_{x['subframe']}_callback_to_ready", x["arrival"], x["ready"])
+        ms(f"subframe_{x['subframe']}_callback_to_present", x["arrival"], x["end"])
         if x["generated"] and x["arrivalA"]:
             ms("generated_a_callback_to_present_return", x["arrivalA"], x["end"])
             ms("generated_ab_arrival_gap", x["arrivalA"], x["arrival"])
@@ -89,6 +92,8 @@ def analyze(directory):
         rows.append({**x, "softwareLatencyMs": (x["end"] - x["arrival"]) / 10_000})
     for a, b in zip(presented, presented[1:]):
         ms("present_interval", a["end"], b["end"])
+    multiplier = int(re.search(r"FG=DLSS(\d+)X", result)[1])
+    nominal_interval = stats(values["callback_interval"])["p50"] / multiplier
     gpu_groups = defaultdict(list)
     stages = {0: "upload_color", 1: "sr", 2: "flow", 3: "nr", 4: "residual",
               5: "fg1", 6: "fg2", 7: "fg3", 8: "fg4", 9: "fg5",
@@ -112,6 +117,9 @@ def analyze(directory):
     counters = {key: int(last[key]) - int(first[key]) for key in
                 ["received", "dropped", "processed", "generated", "realPresented", "generatedPresented", "fgSkipped", "fgExpired"]}
     counters.update(limitedFraction=sum(int(x["limited"]) for x in snapshots) / len(snapshots),
+                    shortIntervals=sum(x < nominal_interval * .5 for x in values["present_interval"]),
+                    longIntervals=sum(x > nominal_interval * 1.5 for x in values["present_interval"]),
+                    nominalPresentIntervalMs=nominal_interval,
                     nrAllActive=all(int(x["nr"]) for x in snapshots),
                     fgAllActive=all(int(x["fg"]) for x in snapshots),
                     effectiveModes=sorted({int(x["effective"]) for x in snapshots}),
