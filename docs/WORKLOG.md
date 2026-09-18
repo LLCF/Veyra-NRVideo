@@ -1,5 +1,17 @@
 # Veyra 工作记录
 
+## 2026-09-18 VC-007PRO / NR / DLSS 4X 四模式两分钟实测
+
+用户将本轮采集延迟对比从 XeSS 改为 DLSS 4X。沿用隔离分支 `codex/frame-pacing-20260918`、基准 `a471474`，增加采集 callback/read/graph/present 逐帧关联日志和 `capture-nr` 真机测试入口；产品同步算法未改。固定 VC-007PRO 3840x2160 30fps NV12、NR 实时 1080p、4K DLSS 4X、SR 关闭、允许撕裂，低排队/均匀呈现/Reflex 请求/关闭各 120 秒，预热 10 秒。Reflex+FG 实际回退低排队，不冒充原生 Reflex 测试。
+
+构建命令、方法、结果、边界与每段耗时统一记录在 [CAPTURE_LATENCY_DLSS4X_2026-09-18.md](CAPTURE_LATENCY_DLSS4X_2026-09-18.md)。本轮构建 `veyra_presentation_pacing_tests,veyra_capture_tests` exit0；产物 `E:/项目/Veyra/build/frame-pacing-20260918`，日志 `E:/项目/Veyra/logs/capture-latency-20260918/build.log`，实卡证据与分析 `E:/项目/Veyra/tests/capture-latency-20260918`，临时目录 `E:/项目/Veyra/tmp/frame-pacing-20260918`。没有新增运行库/SDK 入 Git，没有打包、合并 main、推送或发布。
+
+四轮各 120 秒 exit0，原帧回调到 Present 返回中位数：低排队 42.211ms、均匀呈现 42.290ms、Reflex 请求（实际低排队）42.188ms、关闭 42.184ms；P95 分别 42.553/44.784/42.518/42.507ms。正式窗内采集丢帧、补帧新增跳过/过期、command slot wait 均为 0，NR/FG 始终激活，没有测出新增同步的明显降延迟收益。主要等待为原帧 GPU 就绪后约 32ms 的基础补帧排布，GPU 全图区间约 13.8ms，CPU 与 GPU 重叠不能累加。完整阶段与统计脚本已交付。
+
+NV12 没有压缩解码阶段；总耗时不包含采集卡内部与屏幕扫描。20 秒独立 signal-check exit0，截图目视确认为 PS5 主界面，不能推广为动态游戏最坏情形。第一次截图因遮挡主动失败，仅将测试窗口置前后重试成功。NR/DLSS Create/Evaluate 真实返回 `0x1 seh=0`，四轮无 ERROR。保留原始日志、JSON/CSV 和截图；无新增包、解压副本和临时残留。下一步：同动态输入的外部高帧率拍摄对照，并验证基础补帧时序可减少的等待。
+
+收尾：`git diff --check` exit0，全部测试进程已退出、tmp 为空，桌面 main 工作区干净。仅将上述诊断源码/脚本与文档保存到本地隔离分支，不包含本地证据或二进制。
+
 ## 2026-09-18 帧同步隔离实现与本机验收交付
 
 在 `codex/frame-pacing-20260918` 完成默认关闭的低排队/均匀呈现/Reflex 实验、允许撕裂/VSync/自动、UI v6 独立持久化、请求与实际状态，以及相关回归。当前构建 `E:/项目/Veyra/build/frame-pacing-20260918/veyra.exe`。存档仍为 `6e69eeb` / `checkpoint/pre-frame-pacing-20260918`；没有合并 main、推送、发布或改动此前 beta 包。
