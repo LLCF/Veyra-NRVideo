@@ -1,5 +1,7 @@
 # Veyra 项目 Agent 执行规则
 
+> 2026-09-18 用户决定：今后每个 GitHub Release 的正文必须保留交流群和微信赞助二维码，不能只放 README。固定区块见 `docs/RELEASE_SUPPORT.md`；两图并排、各 `width="220"`，保持用户认可的现有尺寸，未经要求不删、不换、不放大。发布及编辑后核对远端正文中的两个图片地址、尺寸与实际可访问性。用户授权公开的实测截图可作为 Release 图片资产展示，按截图事实标注显卡、设置和软件读数，不将显示提交 FPS 冒充物理屏幕刷新率。
+
 > 2026-09-16 用户决定：**有成熟开源实现就直接搬过来改造，不要重复造轮子**。XeSS MFG 解锁（OptiScaler 的 XeFGUnlock/XeFGPacing，经 Magpie fork 适配）、40 系 DLSS MFG 解锁（RTX40MFG-Unlock、MFGAdaUnlock-RenoDx，MIT）、30 系原生 2X（dlssg_for_sm86）、AMD FSR 帧生成（FidelityFX SDK 的 Frame Interpolation / AMD FSR Frame Generation）等能力，一律**优先移植现成开源实现并接入 Veyra**，不做等价重写、不另起炉灶。搬运要求：逐项记录来源仓库、固定提交、许可证、被改动的文件与改动说明，写入 `THIRD_PARTY_NOTICES.md` 与对应源码；Veyra 自身为 GPLv3，与本批 MIT / GPL-3.0 来源兼容，禁止只改名不标注。对 NVIDIA / Intel 运行库只允许**进程内修改**，不改磁盘文件、不重签名、不伪装身份。移植后仍按本次改动范围做真实验证，未验证项如实报告，不得用上游项目名替代本机证据。计划见 `docs/FRAMEGEN_FSR_DOLBY_PLAN_2026-09-16.md`。
 
 > 2026-09-16 用户追加决定：FSR 超分按显卡分档——**AMD 卡开放 FSR 4.1（ML）；N 卡只提供 FSR 2 / FSR 3.1，不开放 FSR 4.1**（N 卡跑 FSR4 目前无可用实现，仅列入观察名单，成熟后按"有开源就直接搬"处理）。AMD 补帧**必做且优先用新版**：先接 AMD FSR SDK 2.3.0 的 `AMD FSR Frame Generation 4.0.1`（ML），不支持的显卡回退本地 SDK 1.1.4 的 3.1.x。40 系 DLSS MFG 解锁已获条件授权：**只要确认不影响 50 系即可施工**（50 系走原生路径、不安装任何补丁）。

@@ -8,6 +8,22 @@ Windows 视频播放器与采集卡增强工具。**1.4.1 重点修复 RTX 30/40
 - **运行一段时间后补帧受限**：修复统计、队列等待和恢复调度错误，避免显卡未满载却长期不再补帧；同步修复 6X 的批次数组、计时与资源交接。
 - **RTX 50 保持原生路径**。受影响用户已反馈最新测试包可用；30/40 兼容解锁仍属社区实验功能，未宣称所有型号和驱动组合均已验证。
 
+## 用户实测截图
+
+**RTX 4070：4K IMAX 素材，DLSS 6X，NR/SR 关闭。** 软件显示提交 360.0 fps，当前状态正常。
+
+<p align="center"><img src="https://github.com/Likely7/Veyra-NRVideo/releases/download/v1.4.1/rtx4070-dlss6x-imax.png" alt="RTX 4070：IMAX 素材与 DLSS 6X 设置" width="900"></p>
+
+**RTX 4070：任务管理器与播放状态同屏。** 截图显示 GPU 64%，DLSS 6X，软件显示提交 360.0 fps。
+
+<p align="center"><img src="https://github.com/Likely7/Veyra-NRVideo/releases/download/v1.4.1/rtx4070-dlss6x-gpu.png" alt="RTX 4070：DLSS 6X 播放与 GPU 状态" width="900"></p>
+
+**RTX 5070：4K 输入/输出，1080p 内部 NR 处理与 DLSS 6X。** 截图显示 GPU 61%，软件显示提交 180.0 fps，当前状态正常。
+
+<p align="center"><img src="https://github.com/Likely7/Veyra-NRVideo/releases/download/v1.4.1/rtx5070-nr-dlss6x.png" alt="RTX 5070：NR 与 DLSS 6X 同时运行" width="900"></p>
+
+以上为用户提供的实测截图；帧率是软件“显示提交”读数，不代表显示器的物理刷新率，也不是所有素材与设置的性能承诺。
+
 ## 其他更新
 
 - MKV **主/副字幕可选、内嵌音轨可切换**，导出跟随所选音轨；多字幕大文件改为单次后台扫描，优化打开速度和拖动定位。
@@ -29,3 +45,14 @@ Windows 视频播放器与采集卡增强工具。**1.4.1 重点修复 RTX 30/40
 Also fixes embedded subtitle/audio selection, large-MKV startup and seeking, saved settings, sleep prevention, NR/XeSS presentation, capture audio recovery and AverMedia initialization. Export corrects NVENC ABI compatibility, preserves variable timing/selected audio, removes qualification gates and the final full-file decode, and handles HDR through HEVC Main10.
 
 Download the portable ZIP. The other two archives provide corresponding dependency source. See the full notes for testing and remaining limitations.
+
+## 支持与反馈
+
+如果这个项目帮到了你，可以请作者喝杯咖啡（微信扫码，完全自愿，不影响任何功能）；有问题或想第一时间拿到 beta 版，欢迎进群。
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Likely7/Veyra-NRVideo/v1.4.0/docs/images/1.4.0/donate-wechat.jpg" alt="微信赞助" width="220">
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="https://raw.githubusercontent.com/Likely7/Veyra-NRVideo/v1.4.0/docs/images/1.4.0/community-group.jpg" alt="Veyra 交流群 / bug 反馈 / beta 版本" width="220">
+</p>
+<p align="center"><small>左：微信赞助　右：Veyra 交流群（bug 反馈与 beta 版本发布）</small></p>

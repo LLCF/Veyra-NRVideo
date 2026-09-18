@@ -62,3 +62,15 @@ Evidence: `out/logs/release-1.4.1-portable-smoke.log`, per-case logs/JPEGs and `
 - Published with `gh release edit v1.4.1 --repo Likely7/Veyra-NRVideo --draft=false --latest`. API `repos/Likely7/Veyra-NRVideo/releases/latest` confirms tag `v1.4.1`, `draft=false`, `prerelease=false`, and publication at `2026-09-18T02:48:08Z` (10:48:08 Asia/Shanghai).
 - Public release: https://github.com/Likely7/Veyra-NRVideo/releases/tag/v1.4.1
 - Publication evidence is committed afterward as documentation only; the release tag and uploaded binaries remain at the tested release commit.
+
+## User screenshots and support block
+
+After publication, the user authorized adding three supplied screenshots and required the community/donation QR codes in every future release at their existing 220px width. Updated `RELEASE_BODY_1.4.1.md`, added reusable `RELEASE_SUPPORT.md`, and recorded the requirement in `AGENTS.md`. The three PNGs are separate Release assets; the original three ZIPs and tag are unchanged.
+
+| Screenshot asset | Bytes | SHA256 |
+| --- | ---: | --- |
+| rtx4070-dlss6x-imax.png | 498701 | `35e879ada2430bf36261e16b8623d9ebf904e713ce9983cea1eaa6ee4f29a433` |
+| rtx4070-dlss6x-gpu.png | 360370 | `84c2c42d5269dbf03a65e43b6507e065617f246a7cf95f0f7f19a436926cab74` |
+| rtx5070-nr-dlss6x.png | 839615 | `5ef048ae86a933133b3a811c9eb4deb437f7931e042d914759fc77f012dd3b6f` |
+
+GitHub API verifies uploaded image sizes/digests and exact release-body content. Browser inspection confirms all five images loaded (nonzero natural widths), screenshots rendered at 900px and both QR codes at 220px. Asset download endpoints use application/octet-stream in HTTP responses despite image/png asset metadata; the initial MIME-only check was overly strict, and actual browser rendering passed. No product rebuild was needed for this documentation-only change.

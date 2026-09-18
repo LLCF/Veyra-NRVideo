@@ -1,5 +1,11 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-18 Release 实测截图与固定二维码
+
+按用户授权，更新 1.4.1 Release 正文并原样上传三张用户截图作为 PNG 资产：RTX4070 IMAX/6X、RTX4070 任务管理器同屏、RTX5070 NR+6X。截图显示宽度 900px，标注软件显示提交读数；没有将截图当作物理刷新率或全场景性能证明。补回 1.4.0 的支持与反馈区块，微信赞助与交流群并排各 220px；`docs/RELEASE_SUPPORT.md` 保存固定区块，`AGENTS.md` 要求后续每个 Release 保留并在发布后核验。
+
+执行 `gh release upload v1.4.1 ... --repo Likely7/Veyra-NRVideo` 与 `gh release edit v1.4.1 --repo Likely7/Veyra-NRVideo --notes-file docs/RELEASE_BODY_1.4.1.md` 成功。API 验证远端正文与本地一致、三个 PNG 的大小和 SHA256 与原图一致、三个既有 ZIP 的 SHA256 未变。初始 HTTP 检查误将下载端点的 application/octet-stream 判作图片不可用；浏览器 DOM 实际确认五图 complete=true、naturalWidth>0，三图宽 900、二维码宽 220，均正常加载。本次只改发布展示与规则文档，未改程序、重打包或移动版本标签。
+
 ## 2026-09-18 1.4.1 合并与发布验收
 
 用户确认最新测试包“测试好了都可用”，明确授权汇总 1.4.0 后全部修复、合并 main 并发布 1.4.1。该反馈更新此前 RTX30/40 待实卡确认状态，但不代表所有型号、驱动和画质场景均已覆盖。
