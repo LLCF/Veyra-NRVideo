@@ -1,5 +1,17 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-18 Video HDR 与 NVIDIA FSR 4.1 施工方案
+
+用户决定先加入 RTX Video HDR，再尝试把 NVIDIA FSR 4.1.1 AI 超分接入 Veyra。新增 `docs/VIDEO_HDR_FSR41_EXECUTION_PLAN_2026-09-18.md`：Video HDR 先拆分输入/工作/输出颜色合同，新增独立 TrueHDR D3D12 backend，复用 EnhanceGraph、Presenter、NVENC 与现有 fence/slot；FSR4 单独隔离 provider、探针和 A/B，不静默回退、不进默认 UI，未通过画质/时序/性能/设备移除门槛不发布。计划固定 FSR4 研究提交 `88635b94083965a7c3b5f64e099808b8ba2ce576` 与本地 TrueHDR DLL 身份，所有产物继续放 `E:/项目/Veyra/`。
+
+本轮只写方案和工作记录；没有创建分支、修改运行代码、加载 `nvngx_truehdr.dll`、构建、Create/Evaluate、GPU/导出测试或发布。`git diff --check` 通过，仅提示既有 CRLF 转换。复核补充单次测试最多 300 秒，以及不得恢复已取消的导出门禁和结束逐帧校验。
+
+## 2026-09-18 FSR 4.1 NVIDIA 与 RTX HDR 可行性调研
+
+用户要求调查 NVIDIA FSR 4.1 AI 超分及游戏/视频 RTX HDR。只读核对当前 FSR/NGX/HDR 图与输出代码、AMD SDK 2.3.0、OptiScaler、FSR 4.1.1 INT8 研究 provider、NVEnc、NVIDIA Profile Inspector 和本地 RTX Video SDK 1.1.0。结论和固定提交、许可、接入顺序、待验证项见 `docs/FSR41_NVIDIA_RTX_HDR_RESEARCH_PLAN_2026-09-18.md`。FSR 4.1.1 有面向 NVIDIA 的研究路径，但不是成熟产品；AMD license 明确将 upscaler DLL 列入 MIT 例外。Video HDR 有官方 D3D12 API 和既有编码器应用，优先接共享图；游戏 RTX HDR 为外部显示兼容路线，不能当成内部导出滤镜。
+
+执行 `git status --short --branch`、`rg`/PowerShell 源码读取、`gh api`/`Invoke-WebRequest` 上游读取、本地 DLL SHA256/版本/签名检查、bundled Python pypdf 只读文档提取。系统 Python 无 pypdf，改用现成 bundled runtime；PDF 对象偏移警告未阻止所需页提取。只新增调研文档和本条记录，无新外部产物，无新 DLL 加载或驱动配置写入，无构建、Create/Evaluate 或 RTX 实测；不能据此声称新功能已可用。下一步按方案优先实施并验证 Video HDR，FSR 4.1 NVIDIA 先做隔离验证。本轮不推送、不发布。
+
 ## 2026-09-18 外部残留清理与统一产物根目录
 
 用户授权删除上一轮列出的项目外残留，并指定今后产物统一放在 `E:/项目/Veyra/`。执行 `E:/项目/Veyra/tmp/cleanup-external-20260918.ps1` exit0：删除 Downloads 中 9 个 Veyra ZIP、Temp 中 143 个 Veyra 项、7 个 Veyra 崩溃转储、E 盘 1.3.0/1.4.0 旧便携目录，以及旧 RemotePlay 对应源码中间 ZIP 和校验旁文件，共 163 项、6,641,615,214 字节。删除前逐项验证允许的绝对路径、父路径与内容无重解析点、无 Veyra/构建进程；使用 PowerShell LiteralPath 删除，不清理其他软件或系统配置。
