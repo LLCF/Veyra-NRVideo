@@ -52,7 +52,7 @@ struct CaptureAudioSession::Impl : AudioPcmSource {
         headPts=pcmTimeline.at(double(pcmHead)).value_or(headPts);
         pcmTimeline.discardBefore(pcmHead);queueChanged();
     }
-    void fail(const wchar_t* reason){std::lock_guard lock(mutex);state.available=false;state.running=false;state.skewMs.reset();state.error=reason;}
+    void fail(const wchar_t* reason){std::lock_guard lock(mutex);state.available=false;state.running=false;state.outputRecovering=false;state.skewMs.reset();state.error=reason;}
     size_t pull(float* dst,size_t frames,double* pts)override{
         std::lock_guard lock(mutex);
         const size_t take=std::min(frames,pcm.size()/layout.channels);
@@ -112,11 +112,14 @@ struct CaptureAudioSession::Impl : AudioPcmSource {
         };
         auto recoverEndpoint=[&]{
             const auto error=renderer.lastError();renderer.shutdown();endpointReady=false;retryAt=hostTime()+5000000;
+            if(injectEndpointLoss&&GetEnvironmentVariableW(L"VEYRA_TEST_CAPTURE_AUDIO_LONG_OUTAGE",nullptr,0)>0)
+                retryAt=hostTime()+40000000;
             clearPcm();swr_close(swr);if(swr_init(swr)<0){fail(L"音频重采样重置失败");return false;}
             if(!clearCorrection())return false;
             endpointEventReady=false;
             std::lock_guard lock(mutex);input.clear();inputBytes=convertingBytes=0;pendingReset=false;haveVideo=false;
             state.available=false;state.running=false;state.skewMs.reset();state.endpointBufferedMs=0;
+            state.outputRecovering=true;
             state.error=L"音频输出断开，正在重连（"+std::to_wstring(unsigned(error))+L"）";queueChanged();return true;
         };
         while(!stop){
@@ -132,7 +135,7 @@ struct CaptureAudioSession::Impl : AudioPcmSource {
                 if(!renderer.start(layout,20.0)){if(!recoverEndpoint())break;continue;}
                 endpointReady=true;lastUnderruns=renderer.underruns();
                 lastUnderrunFrames=renderer.underrunFrames();lastSilenceFrames=renderer.silenceFrames();starvationSince=0;
-                {std::lock_guard lock(mutex);state.error.clear();state.inputChannels=layout.channels;state.inputChannelMask=layout.mask;const auto output=renderer.outputFormat();state.outputChannels=output.channels;state.outputChannelMask=output.mask;pendingReset=true;}
+                {std::lock_guard lock(mutex);state.error.clear();state.outputRecovering=false;state.inputChannels=layout.channels;state.inputChannelMask=layout.mask;const auto output=renderer.outputFormat();state.outputChannels=output.channels;state.outputChannelMask=output.mask;pendingReset=true;}
             }
             renderer.setGain(gain);
             // Wait before collecting callbacks, so PCM arriving during the
@@ -413,13 +416,16 @@ void CaptureAudioSession::stop(){p_->stop=true;p_->wake.notify_all();if(p_->thre
 bool CaptureAudioSession::push(const void* data,size_t bytes,double pts,bool discontinuity){
     auto& p=*p_;if(!data||!p.format.nBlockAlign||bytes%p.format.nBlockAlign||bytes>p.format.nAvgBytesPerSec/2||!std::isfinite(pts))return false;if(!bytes)return true;
     std::lock_guard lock(p.mutex);
-    if(p.stop||!p.state.error.empty())return true;
-    p.recording.raw(data,bytes);
-    if(discontinuity){p.input.clear();p.inputBytes=0;p.pendingReset=true;p.haveVideo=false;}
+    if(p.stop||(!p.state.error.empty()&&!p.state.outputRecovering))return true;
     const auto arrival=hostTime();
     p.state.inputIntervalMs=p.state.inputBlocks&&!discontinuity?double(arrival-p.lastArrival)/10000:0;
     p.state.inputBlockMs=1000.0*bytes/p.format.nAvgBytesPerSec;++p.state.inputBlocks;
     p.lastArrival=arrival;
+    // A lost output endpoint does not mean the capture device stopped sending.
+    // Keep its liveness visible without accumulating stale PCM for replay.
+    if(p.state.outputRecovering)return true;
+    p.recording.raw(data,bytes);
+    if(discontinuity){p.input.clear();p.inputBytes=0;p.pendingReset=true;p.haveVideo=false;}
     if(!p.haveIngress||discontinuity){p.ingressClock.reset();p.haveIngress=true;}
     p.ingressMapping=p.ingressClock.observe(double(p.lastArrival)/10000,pts);
     const double blockMs=1000.0*bytes/p.format.nAvgBytesPerSec;

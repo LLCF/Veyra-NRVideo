@@ -49,6 +49,7 @@ class NgxCoreHost;
 class DlssSrBackend;
 class VideoSrBackend;
 class DlssFgBackend;
+class FgCompatibilitySession;
 class DlssNrRuntimeAdapter;
 class NvOfSession;
 }
@@ -61,6 +62,7 @@ struct HardwareSurfaceInput;
 // One generated-frame texture per (parity, subframe): 2 parities x 5 generated
 // frames = 6X multi-frame generation. Sized once, reused for every FG backend.
 inline constexpr unsigned kGeneratedPoolSlots=10;
+inline constexpr unsigned kOutputPoolSlots=2+kGeneratedPoolSlots;
 
 struct EnhanceGraphDesc {
     uint32_t sourceWidth = 0;
@@ -107,6 +109,8 @@ struct EnhanceGraphDesc {
     std::wstring runtimeAbsPath; // absolute runtime_local/nvidia path
     // Optional stage instrumentation hook (GPU timing experiments).
     std::function<void(const char*)> stageMark;
+    // Product host supplies a cancellable, isolated compatibility startup probe.
+    std::function<bool(const EnhanceGraphDesc&,const gfx::D3D12DeviceContext&)> compatibilityPreflight;
     // Output dither step for the 8/10-bit write paths, in coded units. -1 keeps
     // the product default (one LSB while the colour grade is active, nothing
     // otherwise) so ungraded output stays byte-identical; tests and diagnostics
@@ -119,6 +123,8 @@ struct EnhanceGraphDesc {
     // working-extent RG16F current->previous pixel motion, ready in SRV state.
     // Caller retains it through graph drain/shutdown, synchronizing any writes.
     ID3D12Resource* srMotionProbe = nullptr;
+    // Same borrowed diagnostic contract as srMotionProbe, for FG only.
+    ID3D12Resource* fgMotionProbe = nullptr;
 };
 
 class EnhanceGraph {
@@ -167,9 +173,17 @@ public:
     bool process(const AVFrame* frame, double ptsMs, bool reset, FrameOutputs& out, uint64_t sourceFrameId = 0, const ColorDescription* color = nullptr, const HardwareSurfaceInput* hardwareSurface = nullptr, bool retainReferences = true, const FgAdmission& admitFg = {});
     bool nextFrameSlotAvailable()const {
         const unsigned slot=unsigned(realFrameIndex_%2);
+        if(presentationFences_[slot]&&presentationFences_[slot]->GetCompletedValue()<presentationValues_[slot])return false;
         if(!realLeases_[slot].expired())return false;
         for(unsigned i=slot;i<kGeneratedPoolSlots;i+=2)if(!generatedLeases_[i].expired())return false;
         return true;
+    }
+    uint64_t presentationReadyFence(unsigned slot,bool generated)const {
+        if(generated&&slot<kGeneratedPoolSlots){if(auto lease=generatedLeases_[slot].lock())return lease->readyFence;}
+        return uploadFences_[slot%2];
+    }
+    void presentationSubmitted(unsigned slot,ID3D12Fence* fence,uint64_t value){
+        presentationFences_[slot%2]=fence;presentationValues_[slot%2]=value;
     }
     // Nonblocking. The scheduler polls at a GPU-ready/deadline boundary; no
     // full image readback and no waits inside the graph's individual passes.
@@ -296,6 +310,7 @@ private:
     // resolves NvAPI_GPU_GetArchInfo once and caches the architecture decision.
     void prepareAmpereFgSpoof();
     bool ampereSpoofed_ = false;
+    std::unique_ptr<ngx::FgCompatibilitySession> fgCompatibility_;
     bool createComputePasses();
 
     gfx::D3D12DeviceContext& context_;
@@ -402,6 +417,8 @@ private:
     std::weak_ptr<FrameLease> realLeases_[2],generatedLeases_[kGeneratedPoolSlots];
     uint32_t nextListSlot_ = 0;
     uint64_t uploadFences_[2] = {};
+    std::array<Microsoft::WRL::ComPtr<ID3D12Fence>,2> presentationFences_;
+    std::array<uint64_t,2> presentationValues_{};
     // FFmpeg may recycle a hardware surface as soon as its AVFrame is freed.
     // Retain each imported surface until our last consumer fence completes.
     std::shared_ptr<AVFrame> hardwareInputFrames_[2];

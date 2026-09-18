@@ -15,7 +15,7 @@ struct SeekPreview {
         target=seconds;released=release;
         // Mouse release supersedes even an outstanding preview: the final
         // exact target must never be dropped behind a busy preview.
-        if(release){engine.seek(target);submitted=target;}
+        if(release&&target!=submitted){engine.seek(target);submitted=target;}
         else tick();
     }
     void tick() {

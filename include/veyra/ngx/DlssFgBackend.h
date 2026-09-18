@@ -28,10 +28,12 @@
 namespace veyra::ngx {
 
 class NgxCoreHost;
+class FgCompatibilitySession;
 
 class DlssFgBackend {
 public:
     DlssFgBackend() = default;
+    void setCompatibility(FgCompatibilitySession* session) { compatibility_=session; }
     ~DlssFgBackend();
 
     DlssFgBackend(const DlssFgBackend&) = delete;
@@ -102,12 +104,16 @@ public:
     uint32_t height() const { return height_; }
 
 private:
+    FgCompatibilitySession* compatibility_=nullptr;
     NVSDK_NGX_Handle* handle_ = nullptr;
     uint64_t createResult_ = 0;
     uint64_t evaluateCount_ = 0;
     uint64_t resetCount_ = 0;
     uint32_t width_ = 0;
     uint32_t height_ = 0;
+    // A provider-side access violation or failed Evaluate poisons the
+    // feature wrapper.  Never call the same handle again after that point.
+    bool fatal_ = false;
 };
 
 } // namespace veyra::ngx

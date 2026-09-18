@@ -279,8 +279,14 @@ bool PresentSink::processMessages(bool& windowClosed)
     return true;
 }
 
-ID3D12Resource* PresentSink::currentBackBuffer()
+ID3D12Resource* PresentSink::currentBackBuffer(uint32_t* acquiredIndex)
 {
+    if(!swapChain_)return nullptr;
+    // Provider proxy swapchains own their buffer rotation. Acquire once for
+    // both the resource barriers and the matching render-target descriptor.
+    backBufferIndex_=swapChain_->GetCurrentBackBufferIndex();
+    if(backBufferIndex_>=3)return nullptr;
+    if(acquiredIndex)*acquiredIndex=backBufferIndex_;
     return backBuffers_[backBufferIndex_].Get();
 }
 

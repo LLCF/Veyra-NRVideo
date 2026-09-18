@@ -9,6 +9,7 @@ namespace veyra::sink {
 struct WavePcmFormat;
 struct CaptureAudioState {
     bool available=false,running=false,clockEstimated=true,limited=false;
+    bool outputRecovering=false;
     unsigned inputChannels=0,outputChannels=0;uint32_t inputChannelMask=0,outputChannelMask=0;
     uint32_t inputSampleRate=0;unsigned inputContainerBits=0,inputValidBits=0;bool inputFloating=false;
     // Non-empty when the input is a compressed bitstream (Dolby/DTS) that was

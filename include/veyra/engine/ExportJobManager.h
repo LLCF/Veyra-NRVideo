@@ -8,7 +8,8 @@ struct ExportJobSnapshot {
     double progress=0;
     uint64_t jobId=0,frozenRevision=0,sourceFrames=0,generated=0,holds=0,encoded=0;
     EnhancementSettings frozen;
-    std::wstring message,output;
+    std::wstring message,output,workerLog;
+    uint32_t workerPid=0;
     bool active()const{return state>=ExportState::Preparing&&state<=ExportState::Finishing;}
 };
 // One isolated NGX context in a child process. Anonymous inherited mapping is
@@ -16,7 +17,7 @@ struct ExportJobSnapshot {
 class ExportJobManager {
 public:
     ExportJobManager();~ExportJobManager();
-    bool start(const std::wstring&,const std::wstring&,EnhancementSettings,bool hevc,unsigned maxFrames=0);
+    bool start(const std::wstring&,const std::wstring&,EnhancementSettings,bool hevc,unsigned maxFrames=0,int audioStreamIndex=-1);
     void cancel();void pause(bool);void watching(bool);
     ExportJobSnapshot poll();
 private:struct Impl;std::unique_ptr<Impl> p_;

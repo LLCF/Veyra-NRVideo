@@ -360,6 +360,85 @@ void copyUploadToTexture(ID3D12GraphicsCommandList* list, ID3D12Resource* dst,
 
 } // namespace
 
+// Diagnostic readback only: isolate the NGX backend from graph scheduling,
+// pool ownership, source conversion and optical-flow estimation.
+static bool runPlanarSix(veyra::gfx::CommandSlotRing& ring,
+    veyra::ngx::NgxCoreHost& core, NVSDK_NGX_Parameter* params, GpuTextures& t)
+{
+    veyra::Status status = veyra::Status::Ok;
+    veyra::ngx::DlssFgBackend fg;
+    auto* list = ring.acquire(0, status);
+    veyra::ngx::DlssFgBackend::CreateDesc create{kWidth,kHeight,kWidth,kHeight,DXGI_FORMAT_R8G8B8A8_UNORM,false};
+    if (!list || !fg.create(core,list,params,create,status) || !ring.submitAndSignal(0) || !ring.waitIdle()) return false;
+    std::vector<uint8_t> previous(kRowPitch*kHeight), current(previous.size());
+    unsigned generated=0, accurate=0, distinct=0;
+    bool ok=true;
+    for (unsigned frame=0; ok && frame<12; ++frame) {
+        for(unsigned y=0;y<kHeight;++y)for(unsigned x=0;x<kWidth;++x){
+            const double local=double(x)-frame*16;
+            auto* p=current.data()+size_t(y)*kRowPitch+x*4;
+            p[0]=p[1]=p[2]=uint8_t(std::lround(128+45*std::sin(local*0.07)+35*std::sin(local*0.031+y*0.06)+25*std::sin(y*0.031)));p[3]=255;
+            auto* mv=reinterpret_cast<uint16_t*>(t.mappedMvec+size_t(y)*kRowPitch+x*4);
+            mv[0]=frame?floatToHalf(16.0f):0;mv[1]=0;
+        }
+        std::memcpy(t.mappedColor,current.data(),current.size());
+        uint64_t previousHash=0;
+        for(unsigned sub=1;ok&&sub<=5;++sub){
+            list=ring.acquire(0,status);if(!list){ok=false;break;}
+            if(sub==1){
+                copyUploadToTexture(list,t.backbuffer.Get(),t.uploadColor.Get(),DXGI_FORMAT_R8G8B8A8_UNORM,kWidth,kHeight);
+                copyUploadToTexture(list,t.mvecs.Get(),t.uploadMvec.Get(),DXGI_FORMAT_R16G16_FLOAT,kWidth,kHeight);
+                copyUploadToTexture(list,t.depth.Get(),t.uploadDepth.Get(),DXGI_FORMAT_R32_FLOAT,kWidth,kHeight);
+            }
+            ID3D12Resource* resources[]={t.backbuffer.Get(),t.depth.Get(),t.mvecs.Get(),t.outInterp.Get(),t.disableFlag.Get()};
+            D3D12_RESOURCE_BARRIER barriers[5]{};
+            for(unsigned j=0;j<5;++j){barriers[j].Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;barriers[j].Transition={resources[j],D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,D3D12_RESOURCE_STATE_COMMON,j<3?D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE:D3D12_RESOURCE_STATE_UNORDERED_ACCESS};}
+            list->ResourceBarrier(5,barriers);
+            veyra::ngx::DlssFgBackend::EvalDesc evaluate{};
+            evaluate.backbuffer=t.backbuffer.Get();evaluate.depth=t.depth.Get();evaluate.mvecs=t.mvecs.Get();
+            evaluate.outputInterpolated=t.outInterp.Get();evaluate.outputDisableInterpolation=t.disableFlag.Get();
+            evaluate.reset=frame==0;evaluate.frameId=frame+1;evaluate.multiFrameCount=5;evaluate.multiFrameIndex=sub;
+            evaluate.mvecScaleX=1.0f/kWidth;evaluate.mvecScaleY=1.0f/kHeight;
+            ok=fg.evaluate(list,params,evaluate,status);
+            for(unsigned j=0;j<5;++j){barriers[j].Transition.StateBefore=barriers[j].Transition.StateAfter;barriers[j].Transition.StateAfter=j<3?D3D12_RESOURCE_STATE_COMMON:D3D12_RESOURCE_STATE_COPY_SOURCE;}
+            list->ResourceBarrier(5,barriers);
+            D3D12_TEXTURE_COPY_LOCATION dst{},src{};
+            dst.pResource=t.readbackInterp.Get();dst.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            dst.PlacedFootprint.Footprint={DXGI_FORMAT_R8G8B8A8_UNORM,kWidth,kHeight,1,UINT(kRowPitch)};
+            src.pResource=t.outInterp.Get();src.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            list->CopyTextureRegion(&dst,0,0,0,&src,nullptr);list->CopyBufferRegion(t.readbackFlag.Get(),0,t.disableFlag.Get(),0,4);
+            for(unsigned j=3;j<5;++j){barriers[j].Transition.StateBefore=D3D12_RESOURCE_STATE_COPY_SOURCE;barriers[j].Transition.StateAfter=D3D12_RESOURCE_STATE_COMMON;}
+            list->ResourceBarrier(2,barriers+3);
+            ok=ring.submitAndSignal(0)&&ring.waitIdle()&&ok;if(!ok)break;
+            if(!frame)continue;
+            uint8_t* pixels=nullptr;uint8_t* flag=nullptr;
+            if(FAILED(t.readbackInterp->Map(0,nullptr,reinterpret_cast<void**>(&pixels)))){ok=false;break;}
+            if(FAILED(t.readbackFlag->Map(0,nullptr,reinterpret_cast<void**>(&flag)))){t.readbackInterp->Unmap(0,nullptr);ok=false;break;}
+            double best=1e30,shift=0;
+            for(unsigned quarter=0;quarter<=64;++quarter){
+                const double dx=quarter*0.25;double error=0;
+                for(unsigned y=200;y<880;y+=8)for(unsigned x=300;x<1620;x+=8){
+                    const double sample=x-dx;const unsigned left=unsigned(sample);const double fraction=sample-left;
+                    const size_t offset=size_t(y)*kRowPitch+left*4;
+                    const double expected=previous[offset]*(1-fraction)+previous[offset+4]*fraction;
+                    const double delta=expected-pixels[size_t(y)*kRowPitch+x*4];error+=delta*delta;
+                }
+                if(error<best){best=error;shift=dx;}
+            }
+            const uint64_t hash=fnv1a64(pixels,current.size());
+            const bool unique=hash!=previousHash&&hash!=fnv1a64(previous.data(),previous.size())&&hash!=fnv1a64(current.data(),current.size());
+            const bool position=std::abs(shift-16.0*sub/6)<=1.0;
+            ++generated;distinct+=unique;accurate+=position&&unique&&!*flag;previousHash=hash;
+            log::info("fg-planar6",std::format("frame={} sub={} expected={:.3f} observed={:.3f} distinct={} disabled={} positionPass={}",frame,sub,16.0*sub/6,shift,unique,unsigned(*flag),position));
+            t.readbackInterp->Unmap(0,nullptr);t.readbackFlag->Unmap(0,nullptr);
+        }
+        previous=current;
+    }
+    const bool drained=ring.drainQueue();fg.release();
+    log::info("fg-planar6",std::format("directNGX=true generated={} distinct={} contentValid={} graphUsed=false",generated,distinct,accurate));
+    return ok&&drained&&generated==55&&accurate==55;
+}
+
 // Runs one DLSSG phase (translation or cut) for a given mvec convention.
 // The FG feature must already be created; textures must be initialized.
 static PhaseResult runPhase(
@@ -756,6 +835,12 @@ int runFgTest(const FgTestArgs& args)
     if (!createGpuTextures(context.device(), textures)) {
         coreHost.destroyParameters(params);
         coreHost.shutdown(); ring.shutdown(); context.shutdown(); return 9;
+    }
+
+    if(args.planarSix){
+        const bool passed=caps.multiFrameCountMax>=5&&runPlanarSix(ring,coreHost,params,textures);
+        coreHost.destroyParameters(params);coreHost.shutdown();ring.shutdown();context.shutdown();
+        return passed?0:1;
     }
 
     // CPU truth: real-frame centroids for both phases.

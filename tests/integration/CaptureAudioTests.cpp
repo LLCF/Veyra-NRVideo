@@ -1,5 +1,6 @@
 #include "veyra/sink/CaptureAudioSession.h"
 #include "veyra/sink/AudioFormat.h"
+#include "veyra/source/AudioInputRecovery.h"
 #include <chrono>
 #include <thread>
 #include <iostream>
@@ -20,7 +21,9 @@ int main(int argc,char** argv){
             else std::this_thread::sleep_until(due);
         }
     } pacer;
-    const bool endpointTest=argc>=2&&std::string_view(argv[1])=="--endpoint-loss";
+    const bool longOutage=argc>=2&&std::string_view(argv[1])=="--long-endpoint-loss";
+    const bool endpointTest=longOutage||(argc>=2&&std::string_view(argv[1])=="--endpoint-loss");
+    if(longOutage)SetEnvironmentVariableW(L"VEYRA_TEST_CAPTURE_AUDIO_LONG_OUTAGE",L"1");
     const bool slowStart=argc>=2&&std::string_view(argv[1])=="--slow-start";
     const bool jitterTest=slowStart||(argc>=2&&std::string_view(argv[1])=="--jitter");
     const bool transientTest=argc>=2&&std::string_view(argv[1])=="--transient";
@@ -143,19 +146,33 @@ int main(int argc,char** argv){
         std::cout<<(pass?"PASS ":"FAIL ")<<"120s capture clock speed="<<speed<<" p95SkewMs="<<p95<<" missing="<<missing<<" resets="<<state.resets<<" highWaterMs="<<state.bufferHighWaterMs<<'\n';return pass?0:1;
     }
     double sum=0;unsigned count=0;bool bounded=true,sawReconnecting=false;
-    for(unsigned i=0;i<(endpointTest?350u:160u);++i){
+    veyra::source::AudioInputRecovery inputRecovery;inputRecovery.reset(GetTickCount64());
+    unsigned falseInputRecoveries=0,callbacksDuringOutage=0;
+    const unsigned blocks=longOutage?650u:endpointTest?350u:160u;
+    for(unsigned i=0;i<blocks;++i){
         const auto due=start+std::chrono::milliseconds(i*10);pacer.until(due);
         const auto time=std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count()/100;
         if(!audio.push(pcm.data(),pcm.size()*2,i*10.0,i==0))return 3;
         if(i>=8)present(i*10.0-80,time,80);
         const auto s=audio.snapshot();bounded&=s.bufferedMs<=520;
         sawReconnecting|=!s.error.empty();
-        if(i>(endpointTest?240u:70u)&&s.running&&s.skewMs){sum+=std::abs(*s.skewMs);++count;}
+        if(!s.error.empty())++callbacksDuringOutage;
+        if(inputRecovery.due(s.inputBlocks,GetTickCount64()))++falseInputRecoveries;
+        if(i>(longOutage?540u:endpointTest?240u:70u)&&s.running&&s.skewMs){sum+=std::abs(*s.skewMs);++count;}
     }
     const auto state=audio.snapshot();
     std::cout<<"capture_audio meanAbsSkewMs="<<(count?sum/count:-1)<<" samples="<<count<<" compensationMs="<<state.compensationMs<<" queueMs="<<state.bufferedMs<<" resets="<<state.resets<<" overflows="<<state.overflows<<" underruns="<<state.underruns<<'\n';
     bool ok=count>=60&&sum/count<25&&state.compensationMs>=65&&state.compensationMs<=95&&bounded&&state.overflows==0;
-    if(endpointTest){ok=ok&&sawReconnecting&&state.error.empty()&&state.endpointRetries>=2&&state.running;audio.stop();std::cout<<(ok?"PASS ":"FAIL ")<<"owned WASAPI endpoint recovered without reopening capture retries="<<state.endpointRetries<<'\n';return ok?0:1;}
+    if(endpointTest){
+        ok=ok&&sawReconnecting&&state.error.empty()&&state.endpointRetries>=2&&state.running;
+        const auto lastProgress=GetTickCount64();
+        inputRecovery.due(state.inputBlocks,lastProgress);
+        const bool actualInputLossDetected=inputRecovery.due(state.inputBlocks,lastProgress+3001);
+        if(longOutage)ok=ok&&falseInputRecoveries==0&&callbacksDuringOutage>=350&&state.inputBlocks==blocks&&actualInputLossDetected;
+        audio.stop();std::cout<<(ok?"PASS ":"FAIL ")<<"owned WASAPI endpoint recovered without reopening capture retries="<<state.endpointRetries
+            <<" falseInputRecoveries="<<falseInputRecoveries<<" callbacksDuringOutage="<<callbacksDuringOutage<<" inputBlocks="<<state.inputBlocks
+            <<" actualInputLossDetected="<<actualInputLossDetected<<'\n';return ok?0:1;
+    }
     std::cout<<(ok?"PASS":"FAIL")<<" synthetic capture PTS with 80ms video delay; real WASAPI, no physical capture\n";
     unsigned sequence=160;
     auto phase=[&](unsigned mode,int offset,double delay,double expectedComp,double expectedSkew,double commonInputMs=0,double maxSkewError=28){

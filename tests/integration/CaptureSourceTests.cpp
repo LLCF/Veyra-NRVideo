@@ -20,9 +20,20 @@ int wmain(int argc,wchar_t** argv){
         CoUninitialize();return videos.empty()?1:0;
     }
     const bool wasapiTest=argc==3&&wcscmp(argv[1],L"--wasapi")==0;
+    const bool outageTest=argc==2&&wcscmp(argv[1],L"--output-outage")==0;
     if(argc!=2&&!wasapiTest){printf("Specify capture:device:format:audio or --wasapi <explicit endpoint ID>; real hardware required\n");return 2;}
     CoInitializeEx(nullptr,COINIT_MULTITHREADED);
     veyra::source::CaptureCardSource source;veyra::source::SourceOpenDesc d;d.path=argv[1];
+    if(outageTest){
+        const auto videos=veyra::source::CaptureCardSource::deviceDetails();
+        const auto audios=veyra::source::CaptureCardSource::deviceDetails(true);
+        const auto video=std::find_if(videos.begin(),videos.end(),[](const auto& v){return v.name==L"USB3 Video";});
+        const auto audio=std::find_if(audios.begin(),audios.end(),[](const auto& a){return !a.wasapi&&a.name.find(L"USB3 Digital Audio")!=std::wstring::npos;});
+        if(video==videos.end()||audio==audios.end()){printf("FAIL explicit physical USB3 A/V fixture unavailable\n");return 3;}
+        d.path=veyra::source::CaptureCardSource::makeCapturePath(unsigned(video-videos.begin()),*video,0,unsigned(audio-audios.begin()),&*audio);
+        SetEnvironmentVariableW(L"VEYRA_TEST_CAPTURE_AUDIO_ENDPOINT_LOSS",L"1");
+        SetEnvironmentVariableW(L"VEYRA_TEST_CAPTURE_AUDIO_LONG_OUTAGE",L"1");
+    }
     if(wasapiTest){
         const auto videos=veyra::source::CaptureCardSource::deviceDetails();
         const auto video=std::find_if(videos.begin(),videos.end(),[](const auto& v){return v.name==L"USB3 Video";});
@@ -46,6 +57,27 @@ int wmain(int argc,wchar_t** argv){
     auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
     auto readFrame=[&](){while(std::chrono::steady_clock::now()<deadline){auto r=source.read(packet,&frame);if(r==veyra::source::SourceReadStatus::Frame){if(wasapiTest)source.videoPresented(packet.pts.toDouble()*1000,std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()/100,packet.arrivalHost100ns);return true;}if(r==veyra::source::SourceReadStatus::Error)return false;}return false;};
     if(!readFrame()){printf("FAIL first frame\n");return 5;}
+    if(outageTest){
+        const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(7);
+        auto last=std::chrono::steady_clock::now();double maxGapMs=0;
+        unsigned frames=0;bool sawOutage=false;uint64_t firstBlocks=0,lastBlocks=0;
+        bool monotonic=true;
+        while(std::chrono::steady_clock::now()<until){
+            source.recoverAudio(0,2,0);
+            deadline=until;if(!readFrame())break;
+            const auto now=std::chrono::steady_clock::now();
+            maxGapMs=std::max(maxGapMs,std::chrono::duration<double,std::milli>(now-last).count());last=now;++frames;
+            const auto s=source.audioState();
+            if(s.outputRecovering){sawOutage=true;if(!firstBlocks)firstBlocks=s.inputBlocks;}
+            monotonic&=s.inputBlocks>=lastBlocks;lastBlocks=s.inputBlocks;
+        }
+        const auto s=source.audioState();
+        check(sawOutage&&s.running&&!s.outputRecovering&&s.error.empty()&&s.endpointRetries>=2,"owned output outage recovers on physical audio input");
+        check(monotonic&&firstBlocks&&s.inputBlocks>firstBlocks+350,"input continues without graph/audio-session restart");
+        check(frames>=350&&maxGapMs<150,"physical video stays continuous through output outage");
+        printf("PHYSICAL_OUTAGE frames=%u maxReadGapMs=%.3f inputBlocks=%llu endpointRetries=%llu monotonic=%d\n",frames,maxGapMs,s.inputBlocks,s.endpointRetries,monotonic);
+        source.close();CoUninitialize();return failures?1:0;
+    }
     const auto initialPts=packet.pts.toDouble();const auto initialReceived=source.metrics().received;
     const int rowBytes=av_image_get_linesize(AVPixelFormat(frame->format),frame->width,0);
     std::vector<unsigned char> row(frame->data[0],frame->data[0]+rowBytes);

@@ -49,6 +49,25 @@ void decode(const std::filesystem::path& file) {
     check(pipe.overruns()==0, "bounded PCM ring did not overflow");
     pipe.stopThread();
 }
+int startupSeek(const std::filesystem::path& dir) {
+    const auto file=dir/"startup-seek.wav";fixture(file,48000,4000);
+    for(unsigned attempt=0;attempt<3;++attempt){
+        AudioPipeline pipe;AudioRenderer renderer;renderer.setGain(0);
+        check(pipe.open(file.wstring()),"open startup seek fixture");
+        pipe.holdForVideo();pipe.startThread(&renderer,true);
+        // Interrupt the initial prefill while the owned WASAPI endpoint opens.
+        const double target=pipe.requestSeek(1000);
+        check(std::abs(target-1000)<.05&&renderer.started(),"startup seek anchors actual PCM");
+        check(!pipe.endpointRecovering(),"successful startup seek clears endpoint recovery");
+        const double held=renderer.mediaTimeMs();std::this_thread::sleep_for(40ms);
+        check(std::abs(held-1000)<.1&&std::abs(renderer.mediaTimeMs()-held)<.1,"startup seek remains held for first video");
+        pipe.videoPresented(1042);
+        check(until([&]{return renderer.mediaTimeMs()>1100;}),"first video releases startup seek audio");
+        check(pipe.overruns()==0,"startup seek keeps bounded PCM");
+        pipe.stopThread();
+    }
+    return failures?1:0;
+}
 int jitter(const std::filesystem::path& dir) {
     const auto file=dir/"video-jitter.wav";fixture(file,48000,6000);
     // Alternating 0/5ms completion jitter around 30fps. Real/generated frames
@@ -112,8 +131,9 @@ int underrate(const std::filesystem::path& dir) {
 }
 }
 int wmain(int argc, wchar_t** argv) {
-    if (argc!=2&&!(argc==3&&(wcscmp(argv[2],L"--jitter")==0||wcscmp(argv[2],L"--underrate")==0))) return 2;
+    if (argc!=2&&!(argc==3&&(wcscmp(argv[2],L"--jitter")==0||wcscmp(argv[2],L"--underrate")==0||wcscmp(argv[2],L"--startup-seek")==0))) return 2;
     const std::filesystem::path dir=argv[1]; std::filesystem::create_directories(dir);
+    if(argc==3&&wcscmp(argv[2],L"--startup-seek")==0)return startupSeek(dir);
     if(argc==3&&wcscmp(argv[2],L"--underrate")==0)return underrate(dir);
     if(argc==3)return jitter(dir);
     for(uint32_t rate:{48000u,44100u}) { const auto file=dir/(std::to_string(rate)+".wav"); fixture(file,rate); decode(file); }

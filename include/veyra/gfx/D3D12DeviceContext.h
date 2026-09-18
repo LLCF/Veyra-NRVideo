@@ -32,6 +32,7 @@ struct DeviceContextDesc {
     bool enableDebugLayer = false;
     uint32_t commandSlotCount = 4;
     uint32_t requiredVendorId = 0; // 0: highest-performance hardware adapter
+    uint64_t requiredLuid = 0; // 0: no adapter identity constraint
 };
 
 // One DXGI adapter + one ID3D12Device + one direct command queue + one fence

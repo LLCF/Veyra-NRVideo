@@ -20,12 +20,11 @@ namespace veyra::ngx {
 //     referenced by eight identical 25-entry registration tables of 48-byte
 //     records whose +8 field holds the fatbin pointer (8x25 = 200 slot
 //     pointers);
-//   * 44 neural-network fatbins live in .rdata and are referenced by a single
-//     RIP-relative `lea` each; 6 auxiliary fatbins (font / capture / clear)
-//     live in .data and are referenced the same way (50 lea sites total);
-//   * RTX 30 has no sm_86 target anywhere in the provider, so every one of
-//     these fatbins is rebuilt as a single-entry sm_86 PTX fatbin and the
-//     references are redirected to the rebuilt copies. The temporal slot's
+//   * 38 network and 6 auxiliary fatbins are inventoried (44 LEA sites).
+//     Only the 25 registered programs and hash-identified font program are
+//     rebuilt, matching upstream's scope. Network programs stay untouched.
+//     The font is replaced in place to preserve all its references.
+//     The temporal slot's
 //     PTX additionally gets the midpoint correction (compiled-in 0.5 replaced
 //     with the kernel's own temporal parameter), exactly as on Ada;
 //   * the two architecture compares (0x1b0, Blackwell) are retargeted to
@@ -98,11 +97,13 @@ public:
     // audited structure matches. Callers that make the provider see Blackwell
     // through the NVAPI spoof must pass false so the provider's own 0x1b0
     // compare stays byte-identical and therefore passes.
-    static State apply(HMODULE module, bool retargetArchGates = true);
+    // The product supplies its D3D12 adapter LUID; zero selects CUDA device 0
+    // only for standalone diagnostics without a D3D12 context.
+    static State apply(HMODULE module, bool retargetArchGates = true, uint64_t adapterLuid = 0);
 
     // Restores every patched byte and frees the rebuilt fatbins. Safe to call
     // repeatedly and when nothing was applied.
-    static void release();
+    static bool release();
 
     static State snapshot();
     static bool applied();

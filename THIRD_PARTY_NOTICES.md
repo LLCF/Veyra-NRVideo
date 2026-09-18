@@ -4,9 +4,9 @@ NVIDIA SDKs and runtimes are excluded from source control. The publisher-authori
 
 ## NVENC API declarations
 
-Source: https://github.com/FFmpeg/nv-codec-headers ; checkout `eddcea9e27f6b772057c9b3f87de2cc1737faffc` (SDK 13.1.15 declarations), stored only under ignored `third_party_local/nvidia/nv-codec-headers`.
+Source: https://github.com/FFmpeg/nv-codec-headers ; encoder ABI baseline `e844e5b26f46bb77479f063029595293aa8f812d` (tag `n13.0.19.0`, SDK 13.0 declarations), stored only under ignored `third_party_local/nvidia/nv-codec-headers-13.0`. Stage with `git clone --depth 1 --branch n13.0.19.0 https://github.com/FFmpeg/nv-codec-headers.git third_party_local/nvidia/nv-codec-headers-13.0`. CMake accepts `VEYRA_NVENC_HEADERS_ROOT`; compilation checks major/minor 13.0. The previous 13.1 checkout `eddcea9e27f6b772057c9b3f87de2cc1737faffc` remains unmodified for other local tools. Veyra now queries the driver's maximum API before creating the 13.0 function table/session and uses the same ABI for every structure, without pretending that a version-number-only downgrade changes structure layouts. No header or runtime is copied into source control.
 
-The nvEncodeAPI.h header itself has NVIDIA's permissive MIT-style notice (Copyright 2010–2026 NVIDIA Corporation). Its full notice is retained unmodified in that header. This permits using the declarations without retrieving the full developer-portal sample package; it does not grant rights to distribute NVIDIA driver/runtime binaries. Veyra uses the system NVENC library, never copies it into a package. Implementation is independently authored against these declarations; no competitor/sample implementation copied.
+The nvEncodeAPI.h header itself has NVIDIA's permissive MIT-style notice (Copyright 2010–2024 NVIDIA Corporation in the pinned 13.0 header). Its full notice is retained unmodified in that header. This permits using the declarations without retrieving the full developer-portal sample package; it does not grant rights to distribute NVIDIA driver/runtime binaries. Veyra uses the system NVENC library, never copies it into a package. Implementation is independently authored against these declarations; no competitor/sample implementation copied.
 
 FFmpeg: dynamically linked 9.0.1#1 vcpkg build. The portable package carries five FFmpeg DLLs, the complete copyright/license notices and SPDX provenance. Corresponding upstream source and the vcpkg patch/build recipe are listed in `docs/BUILD.md`. No FFmpeg command-line executable or test-media toolchain is shipped.
 
@@ -216,32 +216,74 @@ Same upstream (MIT, commit `33b41835dc39c5d8ab1ef93efb2449be31139c09`),
 (sm_86 adapter contract), ported into
 `include/veyra/ngx/AmpereMfgUnlock.h` / `src/ngx/AmpereMfgUnlock.cpp`.
 
-The provider ships zero sm_86 targets; every DLSS-G fatbin only carries sm_89
-PTX and sm_120 PTX/cubin. Veyra rebuilds all 69 fatbins of the audited 310.7
-runtime as single-entry sm_86 PTX programs — 25 registration-table programs
-(8 runs x 25 slots, 200 pointer fields), 38 `.rdata` neural-network programs
-and 6 `.data` auxiliary programs (font/capture/clear) referenced through 44
-RIP-relative `lea` sites — and republishes every reference plus the two
-architecture compares (`0x1b0` -> `0x170`). The temporal program additionally
-receives the same midpoint correction as the Ada path. Ada/Blackwell-only PTX
-constructs (`.e4m3`, `.e5m2`, `wgmma.`, `tcgen05.`, `mmma.sp::ordered_metadata`,
-`sm_90`, `sm_120`) are refused, matching the upstream refusal list.
+2026-09-18 correction: the current port rebuilds only the 25 registered DLFG
+programs and the hash-identified auxiliary font, matching upstream's scope.
+It preserves the 38 network and other five auxiliary fatbins. The previous
+all-69 rewrite and global Blackwell architecture spoof are superseded.
+Real NVAPI architecture is preserved for provider hardware selection; scoped
+capability policies and two ceiling comparisons are adapted separately.
+Both registration pointer and supplied length are published. The temporal
+program retains the upstream midpoint correction and unsupported PTX checks.
 
-Veyra additions: module identity is verified against the audited 310.7 build;
-the rebuilt set must load through a private CUDA context (`cuModuleLoadDataEx`)
-before any pointer is published; the allocation window is chosen so every
-RIP-relative displacement stays encodable; every write is recorded and fully
-restored on release; the on-disk DLL is never touched. The upstream native
-cache (cubin) path is not used — dashdogy does not publish those kernels, and
-the published PTX path is sufficient (verified 69/69 through the driver JIT).
-Upstream explicitly labels its RTX 30 support "very early and experimental";
-the same caveat applies here until real Ampere hardware validation.
+Additional source from the same MIT commit: `ampere_font_program.inl`
+(`PrepareFont`, `FontPageProtectionMatches`, `RestoreFontPage`, `WriteFont`)
+and `ampere_cuda_program.cpp` (adapter LUID matching and function preflight).
+Veyra adapts these into `src/ngx/AmpereMfgUnlock.cpp`: rebuild font PTX from
+the mapped provider, preserve its address, save/restore page bytes and actual
+protection, accept privatized WRITECOPY pages only with working-set proof.
+No upstream native font payload is embedded. The 26 rebuilt programs must
+pass `cuModuleLoadData`, `cuModuleGetFunction` and available `cuFuncLoad` on
+the D3D12 adapter's CUDA device, with the caller's context restored.
+`src/pipeline/EnhanceGraph.cpp` passes that LUID and defaults to no spoof.
+All modifications are in process memory; the provider DLL on disk is untouched.
 
-Local evidence (RTX 5070, structure and mechanics only):
+Current evidence: `out/logs/3060-r4-real-arch-lifecycle-final.stdout.log`
+passes 2X through 6X and repeated patch restoration on RTX5070, with 26/26
+preflight and actual NGX Evaluate. RTX3060 execution remains unverified;
+CUDA preflight on RTX5070 is not proof of target hardware support.
+
+Historical evidence for the superseded all-69 implementation (RTX5070 only):
 `veyra_dlssg_ampere_probe` — scan (runs=8, 200 slots, 25+38+6 fatbins, 44 lea,
 2 gates, temporal unique), apply (applied=1, preflight=69/69, readBack=1,
 restored=1), delivery gate
 `logs/delivery/548a606d92484286806f272d4744d2a7/result.json`.
+
+## NGX compatibility session port (2026-09-17)
+
+Source: dashdogy/RTX40MFG-Unlock, fixed commit
+`33b41835dc39c5d8ab1ef93efb2449be31139c09`, MIT, copyright 2026 Michael Robles.
+Full permission notice: `src/ngx/compat/RTX40MFG_LICENSE.txt`.
+
+- `source/native/ampere_backend.cpp` discovery and scoped startup/Create logic:
+  adapted into `src/ngx/compat/NgxDiscovery.h`, `src/ngx/FgCompatibilitySession.cpp`
+  and `include/veyra/ngx/FgCompatibilitySession.h`. Veyra substitutes its direct
+  NGX calls and owned D3D12 resources for upstream wrapper/swapchain hooks;
+  adds an exclusive session lease, absolute-path/module ownership, adapter
+  and texture identity, and restoration before releasing module references.
+  Follow-up on 2026-09-18: extend the verified Ampere metadata scope to the
+  direct NGX Init call in `src/pipeline/EnhanceGraph.cpp`, matching upstream's
+  startup coverage before capability results can be cached. Restore on both
+  successful and failed Init; reject capabilities before successful Init.
+- `source/native/ampere_patterns.h`: metadata/Create patterns only, extracted
+  into `src/ngx/compat/NgxPatterns.h`; Streamline patterns omitted.
+- `source/native/protected_pointer.h`: retained implementation in
+  `src/ngx/compat/protected_pointer.h`, attribution comment added.
+- `src/ngx/compat/RestoreMemory.h`: Veyra helper using the above page-query
+  and restoration routines; accepts Windows image-page copy-on-write protection,
+  verifies writes/cache flush/protection and retains a process failure latch.
+  Ada/Ampere program publications now retain rollback records before each
+  checked write. Unproven rollback blocks later NGX sessions.
+- Upstream MinHook HDE64 decoder: `src/ngx/compat/hde/{hde64.c,hde64.h,table64.h,pstdint.h}`.
+  BSD copyright/terms retained in `src/ngx/compat/HDE_LICENSE.txt` and source
+  headers. Compiled as C++; local `c` initialized to zero for MSVC /WX.
+
+The session is used only for the requested Ada/Ampere compatibility path.
+Native RTX50 does not install these patches. Forced-path RTX5070 diagnostics
+are not evidence of RTX30/40 hardware compatibility.
+`src/engine/FgCompatibilityProbe.cpp` is Veyra's own bounded child-process
+Create/Evaluate preflight, with inherited mapping, process job, exact adapter
+selection and cancellation; it is not upstream wrapper code or a quality gate.
+
 
 ## Media Foundation encoder（系统硬件编码路径，移植自 FFmpeg mfenc.c）
 

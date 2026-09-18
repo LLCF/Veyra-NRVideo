@@ -75,6 +75,12 @@ int main(){
         auto& last=gpu.gpu[size_t(diagnostics::GpuStage::FgBatch)];last={diagnostics::SampleState::Measured,3,10000,13000,1000000};
         gpu.gpu[size_t(diagnostics::GpuStage::Blit)]={diagnostics::SampleState::Measured,2,100000,102000,1000000};
         check(diagnostics::graphExecutionSpanMs(gpu)==12,"GPU budget excludes delayed presentation and CPU completion observation");
+        for(unsigned sub=1;sub<=5;++sub){
+            const auto stage=static_cast<diagnostics::GpuStage>(unsigned(diagnostics::GpuStage::Fg1)+sub-1);
+            gpu.gpu[size_t(stage)]={diagnostics::SampleState::Measured,1,3000+sub*1000,4000+sub*1000,1000000};
+        }
+        check(last.begin==10000&&last.end==13000&&gpu.gpu[size_t(diagnostics::GpuStage::Blit)].begin==100000,
+            "6X subframe timestamps cannot overwrite batch or presentation timestamps");
         last.frequency=1000;check(!diagnostics::graphExecutionSpanMs(gpu),"unrelated GPU clocks cannot form a processing envelope");
     }
     const auto logPath=std::filesystem::temp_directory_path()/(L"veyra-log-reopen-"+std::to_wstring(GetCurrentProcessId())+L".log");
@@ -261,6 +267,14 @@ int main(){
     check(pipeline::FrameBatch::interpolate(0,200000,1,3)==66667&&pipeline::FrameBatch::interpolate(0,200000,2,3)==133333,"rational 3X PTS within tick");
     pipeline::FrameBatch b;b.identity={1,2,3};pipeline::BatchFrame f;f.identity=b.identity;f.pts100ns=1;b.append(f);f.identity.settingsRevision=3;
     bool rejected=false;try{b.append(f);}catch(...){rejected=true;}check(rejected,"reject mixed settingsRevision");
+    for(uint32_t multiplier=2;multiplier<=pipeline::FrameBatch::Capacity;++multiplier){
+        pipeline::FrameBatch batch;batch.identity={7,9,11};batch.a100ns=0;batch.b100ns=1000000;
+        for(uint32_t j=1;j<multiplier;++j){pipeline::BatchFrame item;item.identity=batch.identity;item.kind=pipeline::FrameKind::Generated;item.subframe=j;item.pts100ns=pipeline::FrameBatch::interpolate(0,1000000,j,multiplier);batch.append(item);}
+        pipeline::BatchFrame real;real.identity=batch.identity;real.pts100ns=1000000;batch.append(real);
+        check(batch.count==multiplier&&batch.frames[batch.count-1].kind==pipeline::FrameKind::Real,"2-6X batch retains every generated position and final real frame");
+        if(multiplier==pipeline::FrameBatch::Capacity){real.pts100ns++;bool overflow=false;try{batch.append(real);}catch(const std::invalid_argument&){overflow=true;}check(overflow,"full 6X batch rejects seventh frame before writing");
+            batch.count=UINT32_MAX;overflow=false;try{batch.append(real);}catch(const std::invalid_argument&){overflow=true;}check(overflow,"corrupt batch count rejects before indexing previous frame");}
+    }
     diagnostics::FrameMetrics m;check(!m.displayFps&& !m.gpu[0].milliseconds,"unknown display/GPU is not zero");
     diagnostics::DiagnosticHistory h;diagnostics::DiagnosticEvent e;e.fingerprint="same";for(int i=0;i<100;++i)h.add(e);
     check(h.size()==1&&h.events()[0].occurrenceCount==100,"merge repeated error");

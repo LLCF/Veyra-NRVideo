@@ -175,7 +175,9 @@ bool D3D12DeviceContext::initialize(const DeviceContextDesc& desc, Status& statu
             candidateDesc.DedicatedVideoMemory / (1024 * 1024),
             narrow(candidateDesc.Description)));
 
-        if ((!desc.requiredVendorId||candidateDesc.VendorId==desc.requiredVendorId) && !isSoftware &&
+        const auto candidateLuid=(uint64_t(uint32_t(candidateDesc.AdapterLuid.HighPart))<<32)|candidateDesc.AdapterLuid.LowPart;
+        if ((!desc.requiredVendorId||candidateDesc.VendorId==desc.requiredVendorId) &&
+            (!desc.requiredLuid||candidateLuid==desc.requiredLuid) && !isSoftware &&
             SUCCEEDED(D3D12CreateDevice(candidate.Get(),D3D_FEATURE_LEVEL_12_0,__uuidof(ID3D12Device),nullptr))) {
             adapter_ = candidate;
             chosenDesc = candidateDesc;

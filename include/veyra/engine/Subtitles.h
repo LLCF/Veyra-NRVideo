@@ -7,6 +7,10 @@
 // explicit note instead of silently disappearing.
 #include <string>
 #include <vector>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <stop_token>
 
 namespace veyra::engine {
 
@@ -50,7 +54,22 @@ struct SubtitleTrack {
 SubtitleTrack loadSubtitleFile(const std::wstring& path);
 
 // Text subtitle tracks inside the container (Matroska/MP4/...).
-std::vector<SubtitleTrack> loadEmbeddedSubtitleTracks(const std::wstring& path);
+std::vector<SubtitleTrack> loadEmbeddedSubtitleTracks(const std::wstring& path,std::stop_token stop={},
+    const std::function<void(const std::vector<SubtitleTrack>&)>& metadata={});
+
+// One worker, one pending source and one published snapshot. Replacing a source
+// interrupts its demuxer and prevents stale results from reaching the UI.
+class SubtitleLoader {
+public:
+    struct Result {uint64_t generation=0;bool complete=false;std::vector<SubtitleTrack> tracks;};
+    SubtitleLoader();
+    ~SubtitleLoader();
+    uint64_t request(std::wstring path);
+    std::optional<Result> poll();
+private:
+    struct Impl;
+    std::unique_ptr<Impl> p_;
+};
 
 // Cues overlapping `seconds`, newest first, at most `limit`; binary searched.
 std::vector<const SubtitleCue*> cuesAt(const SubtitleTrack&,double seconds,size_t limit=4);

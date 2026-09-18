@@ -11,6 +11,9 @@
 #include <fstream>
 #include <map>
 #include <sstream>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -388,19 +391,28 @@ std::wstring subtitleAt(const std::vector<SubtitleCue>& cues,double seconds){
     return {};
 }
 
-std::vector<SubtitleTrack> loadEmbeddedSubtitleTracks(const std::wstring& path){
+std::vector<SubtitleTrack> loadEmbeddedSubtitleTracks(const std::wstring& path,std::stop_token stop,
+    const std::function<void(const std::vector<SubtitleTrack>&)>& metadata){
     std::vector<SubtitleTrack> tracks;
-    AVFormatContext* input=nullptr;
+    if(stop.stop_requested())return tracks;
+    const auto started=std::chrono::steady_clock::now();
+    AVFormatContext* input=avformat_alloc_context();
+    if(!input)return tracks;
+    input->interrupt_callback={[](void* opaque){return static_cast<std::stop_token*>(opaque)->stop_requested()?1:0;},&stop};
+    struct InputCleanup {AVFormatContext*& input;~InputCleanup(){avformat_close_input(&input);}} cleanup{input};
     const auto utf8Path=utf8(path);
     if(avformat_open_input(&input,utf8Path.c_str(),nullptr,nullptr)<0||!input){
         log::warn("subtitle","cannot open media for embedded subtitle listing");
         return tracks;
     }
     if(avformat_find_stream_info(input,nullptr)<0){
-        avformat_close_input(&input);
         return tracks;
     }
+    struct DecoderCleanup {void operator()(AVCodecContext* context)const{avcodec_free_context(&context);}};
+    std::vector<std::unique_ptr<AVCodecContext,DecoderCleanup>> decoders;
+    std::vector<int> streamToTrack(input->nb_streams,-1);
     for(unsigned streamIndex=0;streamIndex<input->nb_streams;++streamIndex){
+        if(stop.stop_requested())return {};
         AVStream* stream=input->streams[streamIndex];
         if(stream->codecpar->codec_type!=AVMEDIA_TYPE_SUBTITLE)continue;
         SubtitleTrack track;
@@ -414,6 +426,8 @@ std::vector<SubtitleTrack> loadEmbeddedSubtitleTracks(const std::wstring& path){
         }
         if(track.name.empty())track.name=track.language.empty()?std::format(L"字幕轨 {}",tracks.size()+1):track.language;
         track.styles.push_back(SubtitleStyle{});
+        streamToTrack[streamIndex]=int(tracks.size());
+        decoders.emplace_back();
         if(!isTextSubtitleCodec(track.codec)){
             track.note=L"图形/字幕格式不支持（本版本仅支持文本字幕）";
             log::info("subtitle",std::format("embedded track {} codec={} listed as unsupported",streamIndex,codecName?codecName:""));
@@ -428,14 +442,25 @@ std::vector<SubtitleTrack> loadEmbeddedSubtitleTracks(const std::wstring& path){
             tracks.push_back(std::move(track));
             continue;
         }
-        AVPacket* packet=av_packet_alloc();
-        const double timeBase=av_q2d(stream->time_base);
-        bool ssaStyle=lower(track.codec)==L"ass"||lower(track.codec)==L"ssa";
-        while(packet&&av_read_frame(input,packet)>=0&&track.cues.size()<kMaxCues){
-            if(packet->stream_index!=int(streamIndex)){av_packet_unref(packet);continue;}
+        decoders.back().reset(context);
+        tracks.push_back(std::move(track));
+    }
+    if(metadata&&!stop.stop_requested())metadata(tracks);
+    if(std::none_of(decoders.begin(),decoders.end(),[](const auto& decoder){return bool(decoder);}))return tracks;
+    AVPacket* packet=av_packet_alloc();
+    struct PacketCleanup {AVPacket*& packet;~PacketCleanup(){av_packet_free(&packet);}} packetCleanup{packet};
+    constexpr size_t maxCacheBytes=64u*1024u*1024u;
+    size_t cacheBytes=0,totalCues=0;uint64_t packets=0;
+    auto nextPublish=std::chrono::steady_clock::now()+std::chrono::milliseconds(250);
+    while(packet&&!stop.stop_requested()&&av_read_frame(input,packet)>=0){
+            ++packets;
+            const int index=packet->stream_index>=0&&size_t(packet->stream_index)<streamToTrack.size()?streamToTrack[packet->stream_index]:-1;
+            if(index<0||!decoders[index]){av_packet_unref(packet);continue;}
+            auto& track=tracks[index];auto* context=decoders[index].get();
+            const double timeBase=av_q2d(input->streams[packet->stream_index]->time_base);
             AVSubtitle subtitle{};
             int got=0;
-            if(avcodec_decode_subtitle2(context,&subtitle,&got,packet)<0||!got){av_packet_unref(packet);continue;}
+            if(avcodec_decode_subtitle2(context,&subtitle,&got,packet)<0||!got){avsubtitle_free(&subtitle);av_packet_unref(packet);continue;}
             const double packetSeconds=packet->pts==AV_NOPTS_VALUE?0:double(packet->pts)*timeBase;
             for(unsigned rect=0;rect<subtitle.num_rects;++rect){
                 const auto* entry=subtitle.rects[rect];
@@ -450,23 +475,73 @@ std::vector<SubtitleTrack> loadEmbeddedSubtitleTracks(const std::wstring& path){
                 cue.end=subtitle.end_display_time>subtitle.start_display_time?packetSeconds+double(subtitle.end_display_time)/1000.0:cue.begin+3.0;
                 cue.text=std::move(text);
                 cue.alignOverride=alignOverride;cue.posX=posX;cue.posY=posY;
-                if(cue.end>cue.begin&&track.cues.size()<kMaxCues)track.cues.push_back(std::move(cue));
+                const size_t bytes=sizeof(SubtitleCue)+sizeof(double)+cue.text.size()*sizeof(wchar_t);
+                if(cue.end>cue.begin){
+                    if(totalCues>=kMaxCues||bytes>maxCacheBytes-cacheBytes){track.note=L"字幕缓存已达上限，后续字幕未加载";continue;}
+                    cacheBytes+=bytes;++totalCues;track.cues.push_back(std::move(cue));
+                }
             }
             avsubtitle_free(&subtitle);
             av_packet_unref(packet);
-        }
-        if(packet)av_packet_free(&packet);
-        avcodec_free_context(&context);
-        if(!ssaStyle&&track.styles.empty())track.styles.push_back(SubtitleStyle{});
-        track.rebuildIndex();
-        log::info("subtitle",std::format("embedded track {} codec={} cues={}",streamIndex,codecName?codecName:"",track.cues.size()));
-        tracks.push_back(std::move(track));
-        // av_read_frame consumed the shared demuxer: rewind for the next track.
-        av_seek_frame(input,-1,0,AVSEEK_FLAG_BACKWARD);
+            if(metadata&&std::chrono::steady_clock::now()>=nextPublish){
+                for(auto& t:tracks)t.rebuildIndex();
+                metadata(tracks);
+                nextPublish=std::chrono::steady_clock::now()+std::chrono::seconds(1);
+            }
     }
-    avformat_close_input(&input);
+    if(stop.stop_requested())return {};
+    for(auto& track:tracks){
+        track.rebuildIndex();
+        log::info("subtitle",std::format("embedded track {} codec={} cues={}",track.streamIndex,utf8(track.codec),track.cues.size()));
+    }
+    log::info("subtitle",std::format("single-pass complete tracks={} packets={} cues={} cacheBytes={} elapsedMs={:.3f}",tracks.size(),packets,totalCues,cacheBytes,std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count()));
     return tracks;
 }
+
+struct SubtitleLoader::Impl {
+    std::mutex mutex;
+    std::condition_variable_any wake;
+    std::wstring pending;
+    uint64_t generation=0;
+    bool requested=false;
+    std::stop_source cancel;
+    std::optional<Result> ready;
+    std::jthread worker;
+    Impl():worker([this](std::stop_token shutdown){
+        while(!shutdown.stop_requested()){
+            std::unique_lock lock(mutex);
+            if(!wake.wait(lock,shutdown,[&]{return requested;}))break;
+            const auto path=std::move(pending);const auto id=generation;const auto stop=cancel.get_token();requested=false;
+            lock.unlock();
+            auto publish=[&](std::vector<SubtitleTrack> tracks,bool complete){
+                std::lock_guard guard(mutex);
+                if(id==generation&&!stop.stop_requested())ready=Result{id,complete,std::move(tracks)};
+            };
+            try{
+                std::vector<SubtitleTrack> external;
+                if(path.empty()||path.starts_with(L"capture:")||path.starts_with(L"capture2:")||path.starts_with(L"remoteplay:")){publish({},true);continue;}
+                for(const wchar_t* extension:{L".srt",L".ass",L".ssa",L".vtt"}){
+                    if(stop.stop_requested())break;
+                    auto candidate=std::filesystem::path(path);candidate.replace_extension(extension);
+                    std::error_code ec;if(!std::filesystem::exists(candidate,ec))continue;
+                    auto track=loadSubtitleFile(candidate.wstring());if(!track.usable())continue;
+                    track.name=std::format(L"外挂 · {}",candidate.filename().wstring());external.push_back(std::move(track));break;
+                }
+                auto embedded=loadEmbeddedSubtitleTracks(path,stop,[&](const auto& tracks){auto listing=external;listing.insert(listing.end(),tracks.begin(),tracks.end());publish(std::move(listing),false);});
+                for(auto& track:embedded)external.push_back(std::move(track));
+                publish(std::move(external),true);
+            }catch(const std::exception& e){log::error("subtitle",std::format("loader failed: {}",e.what()));publish({},true);}
+        }
+    }){}
+    ~Impl(){cancel.request_stop();worker.request_stop();wake.notify_all();worker.join();}
+};
+SubtitleLoader::SubtitleLoader():p_(std::make_unique<Impl>()){}
+SubtitleLoader::~SubtitleLoader()=default;
+uint64_t SubtitleLoader::request(std::wstring path){
+    std::lock_guard lock(p_->mutex);p_->cancel.request_stop();p_->cancel=std::stop_source{};
+    p_->pending=std::move(path);p_->requested=true;p_->ready.reset();++p_->generation;p_->wake.notify_all();return p_->generation;
+}
+std::optional<SubtitleLoader::Result> SubtitleLoader::poll(){std::lock_guard lock(p_->mutex);auto result=std::move(p_->ready);p_->ready.reset();return result;}
 
 SubtitleAlignResult alignSubtitleToAudio(const std::wstring& mediaPath,const SubtitleTrack& track,int maxShiftSeconds){
     SubtitleAlignResult result;

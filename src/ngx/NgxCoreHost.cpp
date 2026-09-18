@@ -11,6 +11,11 @@ namespace veyra::ngx {
 
 namespace {
 
+void NVSDK_CONV runtimeLog(const char* message, NVSDK_NGX_Logging_Level, NVSDK_NGX_Feature)
+{
+    if (message) log::info("ngx-runtime", message);
+}
+
 // SEH boundary: no C++ objects with destructors may live in a __try scope,
 // so the external call sits in its own frame (Playbook section 7.2).
 __declspec(noinline) NVSDK_NGX_Result CallInitWithProjectId(
@@ -25,6 +30,8 @@ __declspec(noinline) NVSDK_NGX_Result CallInitWithProjectId(
 {
     sehCode = 0;
     NVSDK_NGX_Result result = NVSDK_NGX_Result_Fail;
+    if(GetEnvironmentVariableW(L"VEYRA_TEST_NGX_INIT_FAILURE",nullptr,0)>0)
+        return NVSDK_NGX_Result_FAIL_UnableToInitializeFeature;
     __try {
         result = NVSDK_NGX_D3D12_Init_with_ProjectID(projectId, engineType, engineVersion,
             applicationDataPath, device, featureInfo, sdkVersion);
@@ -108,6 +115,11 @@ bool NgxCoreHost::initialize(ID3D12Device* device,
     NVSDK_NGX_FeatureCommonInfo common{};
     common.PathListInfo.Path = const_cast<const wchar_t**>(featurePaths);
     common.PathListInfo.Length = 1;
+    if (GetEnvironmentVariableW(L"VEYRA_TEST_NGX_VERBOSE", nullptr, 0)) {
+        common.LoggingInfo.LoggingCallback = runtimeLog;
+        common.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_ON;
+        common.LoggingInfo.DisableOtherLoggingSinks = true;
+    }
 
     uint32_t sehCode = 0;
     const NVSDK_NGX_Result result = CallInitWithProjectId(projectId, NVSDK_NGX_ENGINE_TYPE_CUSTOM,
