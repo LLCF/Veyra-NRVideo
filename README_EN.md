@@ -14,7 +14,15 @@ English | [简体中文](README.md)
 
 A Windows video player and capture-card enhancement tool. Play videos, process images, and preview capture devices with optional super resolution, NR enhancement, and frame generation.
 
-[Download 1.4.0 Portable](https://github.com/Likely7/Veyra-NRVideo/releases/tag/v1.4.0) · [Release Notes](docs/RELEASE_NOTES_1.4.0.md) · [Report an Issue](https://github.com/Likely7/Veyra-NRVideo/issues)
+[Download 1.4.1 Portable](https://github.com/Likely7/Veyra-NRVideo/releases/tag/v1.4.1) · [Release Notes](docs/RELEASE_NOTES_1.4.1.md) · [Report an Issue](https://github.com/Likely7/Veyra-NRVideo/issues)
+
+## 1.4.1 Update
+
+**RTX 30/40 DLSS frame generation fixes, up to 6X**: fixes initialization failures, unintended 2X fallback and RTX 3060 freezes when enabling FG. Also repairs sustained-playback scheduling that could leave FG limited despite low total GPU utilization, plus 6X batch capacity, timestamps and presentation synchronization. RTX 50 retains its native path. Affected users report successful testing; compatibility unlocks remain community experimental, with no claim that every GPU/driver combination was tested.
+
+**Playback and capture**: selectable embedded primary/secondary subtitles and audio tracks, faster large-MKV opening and seeking, persistent NR/SR settings, sleep/screensaver prevention during playback, consistent presentation when enabling NR before XeSS, and recovery from audio-output faults without unnecessarily restarting video capture.
+
+**Export**: NVENC ABI compatibility and clearer errors; removes qualification gates and the final full-file frame-by-frame decode, preserves variable frame timing and selected audio, and automatically uses HEVC Main10 for HDR requests with H.264 selected. See the [complete 1.4.1 notes](docs/RELEASE_NOTES_1.4.1.md) for changes, evidence and limits.
 
 ## 1.4.0 Update
 
@@ -54,11 +62,11 @@ See [1.3.0 release notes](docs/RELEASE_NOTES_1.3.0.md) for the full list and lim
 
 Daily mode focuses on watching. Professional mode expands the controls, diagnostics, and export tools without reopening the video. The application currently uses a Chinese interface.
 
-Features introduced in 1.2.0 include HDR file/capture enhancement, HDR10 export and HDR screenshots, retained 5.1 PCM, and a live Convert to SDR display switch. Fresh installations still disable all enhancements. RTX30 hardware validation is still pending.
+Features introduced in 1.2.0 include HDR file/capture enhancement, HDR10 export and HDR screenshots, retained 5.1 PCM, and a live Convert to SDR display switch. Fresh installations still disable all enhancements. Affected users have confirmed the 1.4.1 RTX30/40 repairs; other hardware combinations require individual testing.
 
 ## Download and Run
 
-1. Download **Veyra-1.3.0-win64-portable.zip** from [Releases](https://github.com/Likely7/Veyra-NRVideo/releases). The Source code archives are for developers.
+1. Download **Veyra-1.4.1-win64-portable.zip** from [Releases](https://github.com/Likely7/Veyra-NRVideo/releases). The Source code archives are for developers.
 2. Extract the entire archive into a writable directory and run **Veyra.exe**. No SDK, Python, or development tools are needed.
    NR, upscaling and internal frame generation start disabled. Enable them as needed; importing old preferences restores their switches.
 3. Use a current GPU driver. NVIDIA NR, DLSS, RTX Video SR, and NVENC require compatible NVIDIA RTX hardware; this version was primarily tested on an RTX 5070.
@@ -123,7 +131,7 @@ You may replace DLLs while Veyra is closed. NVIDIA components belong in `runtime
 
 In Professional mode, select the NVIDIA original, community RTX40/50, or **RTX30 compatibility · Experimental** runtime, then enable NR. Switching briefly interrupts playback; failed changes restore the previous configuration. Community variants are included separately in `runtime/experimental/nr-community/` and `nr-ampere/`; both have Authenticode status `HashMismatch`.
 
-All three runtime paths were tested on RTX5070; a user reported the RTX40/50 variant working on RTX4060. **RTX30 hardware performance, quality and stability remain unverified.** Start with realtime NR and SR/FG disabled. This option does not unlock DLSS frame generation.
+All three runtime paths were tested on RTX5070. Affected users report the 1.4.1 RTX30/40 repairs working; performance and image quality depend on the GPU, content and settings. NR runtime selection is separate from DLSS frame generation. A dedicated FG compatibility layer provides up to 6X on RTX30/40.
 
 ### OBS Streaming and Recording
 
@@ -143,7 +151,7 @@ NR and DLSS frame generation are **community-experimental integrations**, not NV
 
 ## Development and License
 
-[Build Instructions](docs/BUILD.md) · [Runtime Components](docs/RUNTIME_COMPONENTS_1.3.0.md) · [Third-Party Notices](THIRD_PARTY_NOTICES.md)
+[Build Instructions](docs/BUILD.md) · [Runtime Components](docs/RUNTIME_COMPONENTS_1.4.1.md) · [Third-Party Notices](THIRD_PARTY_NOTICES.md)
 
 Original Veyra source is [GPLv3](LICENSE); the combined streaming program also falls under [AGPLv3 and the upstream OpenSSL exception](licenses/remoteplay/CHIAKI_AGPL3_OPENSSL.txt). Application source matches the release tag. The RemotePlay-source and FFmpeg-source assets provide dependency source and are not needed to run the player. SDKs, models, and runtimes are excluded from this source repository. Release components retain their separate licenses and experimental distribution boundaries.
 

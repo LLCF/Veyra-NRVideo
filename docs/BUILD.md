@@ -2,7 +2,13 @@
 
 普通用户下载Release免安装包即可。以下用于开发者构建，不需要把SDK提交到Git。
 
-## Current local candidate / 当前本地候选（2026-09-15）
+## Current release / 当前版本（2026-09-18）
+
+Version 1.4.1 merges the post-1.4.0 player, scheduling, RTX30/40 FG and export repairs plus the AverMedia initialization repair. The release build uses `out/build/scheduling-audit-20260918`, RemotePlay ON and `C:/veyra-deps/ffmpeg-ps5-dav1d-installed`. See [release execution](RELEASE_1.4.1_EXECUTION.md), [corresponding source instructions](REMOTEPLAY_BUILD_1.4.1.md) and [runtime identities](RUNTIME_COMPONENTS_1.4.1.md).
+
+NVENC requires **nv-codec-headers tag n13.0.19.0**, staged at `third_party_local/nvidia/nv-codec-headers-13.0`, or an equivalent path supplied as `VEYRA_NVENC_HEADERS_ROOT`. The API structures must match this ABI; changing only a runtime version number is not an ABI fallback. Do not stage a newer header revision under this name.
+
+## Previous 1.3.0 build reference
 
 Version 1.3.0 integrates the repairs through `14b6ee0`. The release build uses `out/build/audio-continuity-repair-20260915`, RemotePlay **ON**, and `C:/veyra-deps/ffmpeg-ps5-dav1d-installed` (PS5 slice patch retained, dav1d enabled). Full machine-specific build arguments are recorded in [audio repair §6](CAPTURE_AUDIO_WAVEFORM_REPAIR_PLAN_2026-09-15.md#6-用户要求先修已知缺陷后的实施2026-09-15); use equivalent paths on your machine. See [1.3.0 source instructions](REMOTEPLAY_BUILD_1.3.0.md) and [runtime identities](RUNTIME_COMPONENTS_1.3.0.md).
 

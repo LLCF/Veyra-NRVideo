@@ -129,6 +129,9 @@ if (Test-Path -LiteralPath $ffmpegLocalBuild) {
   Copy-Payload $ffmpegLocalBuild 'licenses/FFMPEG-VEYRA-BUILD.json'
 }
 Copy-Payload (Join-Path $resolvedRoot 'assets/icons/lucide/LICENSE') 'licenses/LUCIDE-LICENSE.txt'
+foreach ($name in @('RTX40MFG_LICENSE.txt','HDE_LICENSE.txt')) {
+  Copy-Payload (Join-Path $resolvedRoot "src/ngx/compat/$name") "licenses/$name"
+}
 Copy-Payload (Join-Path $resolvedRoot 'third_party_local/nvidia/DLSS_repo/LICENSE.txt') 'licenses/NVIDIA_RTX_SDK_LICENSE.txt'
 Copy-Payload (Join-Path $resolvedRoot 'third_party_local/nvidia/RTX_Video_SDK_1.1.0/NVIDIA_RTX_Video_SDK_License.pdf') 'licenses/NVIDIA_RTX_VIDEO_SDK_LICENSE.pdf'
 Copy-Payload (Join-Path $resolvedRoot 'third_party_local/nvidia/Optical_Flow_SDK_5.0.7/LicenseAgreement.pdf') 'licenses/NVIDIA_OPTICAL_FLOW_SDK_LICENSE.pdf'

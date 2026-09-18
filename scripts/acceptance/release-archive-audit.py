@@ -35,9 +35,12 @@ for archive in archives:
                 assert PurePosixPath(e['path']).suffix.lower() not in {'.h', '.hpp', '.cpp', '.c', '.obj', '.lib', '.pdb', '.log', '.mp4', '.zip', '.onnx', '.pth', '.addon64'}
                 assert PurePosixPath(e['path']).name not in {'last-applied.v1', 'ui-preferences.v1', 'presets.v1', 'veyra.ini'}
             runtime = []
-            for folder in ['runtime/experimental/', 'runtime_local/intel/experimental/']:
+            for folder in ['runtime/experimental/', 'runtime_local/intel/experimental/',
+                           'runtime_local/amd/fidelityfx/']:
                 runtime += json.loads(z.read(prefix + folder + 'release-runtime-manifest.json').decode('utf-8-sig'))['files']
-            assert len(runtime) == 8 and sum(e['authenticode'] == 'HashMismatch' for e in runtime) == 2
+            assert len(runtime) == 11 and sum(e['authenticode'] == 'HashMismatch' for e in runtime) == 2
+            for notice in ['RTX40MFG_LICENSE.txt', 'HDE_LICENSE.txt']:
+                assert prefix + 'licenses/' + notice in names
             for e in runtime:
                 assert hashlib.sha256(z.read(prefix + e['path'])).hexdigest() == e['sha256'].lower()
             build = json.loads(z.read(prefix + 'licenses/FFMPEG-VEYRA-BUILD.json').decode('utf-8-sig'))

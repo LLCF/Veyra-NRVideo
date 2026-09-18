@@ -1,5 +1,13 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-18 1.4.1 合并与发布验收
+
+用户确认最新测试包“测试好了都可用”，明确授权汇总 1.4.0 后全部修复、合并 main 并发布 1.4.1。该反馈更新此前 RTX30/40 待实卡确认状态，但不代表所有型号、驱动和画质场景均已覆盖。
+
+集中修复提交 `89f4f7f`，通过 `1a0671b` 合并；圆刚分支 `c566dda` 通过 `1efbcbc` 合并。其他色彩、采集解码、MKV/export 分支已经在 main 历史内。main 合并前和实测 r4 源码均已建立 checkpoint；圆刚工作区未提交的独立诊断工具保留原处。版本、双语 README、完整更新说明、组件说明与开源许可证打包同步更新。
+
+正式构建 `cmd.exe /c out\build\3060-incremental.cmd` exit0，日志 `out/logs/release-1.4.1-build.log`；EXE FileVersion/ProductVersion 均 1.4.1，SHA256 `99EDAF165D742E8D677A71286149B26F2F6C53CFA030440FB06E915F90B43B20`。`scripts/gates/delivery.ps1 -Root . -BuildDirectory out/build/scheduling-audit-20260918` PASS，74.90 秒，结果 `logs/delivery/ccccf48711ca4544835b226163872bd3/result.json`。实际发布资产、专项回归与解压包验证见 `docs/RELEASE_1.4.1_EXECUTION.md`。
+
 ## 2026-09-18 RTX3060 开启 DLSS 补帧卡死，r4 候选
 
 依据用户 `Desktop/logs/`：Create 成功、正式 Evaluate `0xBAD00002 / 0xC0000005` 后子进程停在 stage3。修正全局 Blackwell 架构伪装及全部69个 fatbin 改写，按固定上游只重建25个注册程序和精确匹配的字体程序，保留真实架构；补齐描述符长度、CUDA 函数预检和 D3D12 LUID 匹配。失败探测子进程直接退出，绕过异常运行库的清理挂死，保留错误和播放器恢复。
