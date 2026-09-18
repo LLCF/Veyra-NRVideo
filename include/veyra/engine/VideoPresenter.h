@@ -71,6 +71,9 @@ private:
     unsigned lastBuffer_=0;bool hasPresented_=false;
     HWND window_=nullptr;
     std::chrono::steady_clock::time_point lastResize_{};
+    unsigned viewWidth_=0,viewHeight_=0;
+    HMONITOR bufferMonitor_=nullptr;
+    unsigned monitorWidth_=0,monitorHeight_=0;
     std::chrono::steady_clock::time_point nextCostLog_{};
     std::chrono::steady_clock::time_point lastXessFrame_{};
     pipeline::FrameIdentity lastXessIdentity_{};

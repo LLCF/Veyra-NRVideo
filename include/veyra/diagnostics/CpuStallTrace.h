@@ -11,8 +11,8 @@ namespace veyra::diagnostics {
 class CpuStallTrace {
     using Clock = std::chrono::steady_clock;
 public:
-    explicit CpuStallTrace(const char* component, uint64_t frame = 0)
-        : component_(component), frame_(frame) {}
+    explicit CpuStallTrace(const char* component, uint64_t frame = 0, double thresholdMs = 80.0)
+        : component_(component), frame_(frame), thresholdMs_(thresholdMs) {}
     void mark(const char* stage) {
         const auto now = Clock::now();
         if (count_ < samples_.size()) samples_[count_++] = {stage, ms(now - last_)};
@@ -20,7 +20,7 @@ public:
     }
     ~CpuStallTrace() {
         const auto total = ms(Clock::now() - start_);
-        if (total < 80.0) return;
+        if (total < thresholdMs_) return;
         mark("tail");
         std::string detail;
         for (size_t i = 0; i < count_; ++i)
@@ -32,8 +32,9 @@ private:
     struct Sample { const char* name; double ms; };
     const char* component_;
     uint64_t frame_;
+    double thresholdMs_;
     Clock::time_point start_ = Clock::now(), last_ = start_;
-    std::array<Sample, 12> samples_{};
+    std::array<Sample, 32> samples_{};
     size_t count_ = 0;
 };
 }

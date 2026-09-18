@@ -2,12 +2,33 @@
 #include "veyra/engine/TimingWindow.h"
 #include "veyra/engine/FgRecoveryBudget.h"
 #include "veyra/engine/LivePairLatency.h"
+#include "veyra/engine/PreviewFrameReadiness.h"
+#include "veyra/engine/PresentationGeometry.h"
 #include <iostream>
 #include <memory>
 #include <atomic>
 int main(){
     using Scheduler=veyra::engine::LiveGpuScheduler;using State=Scheduler::State;
     int failures=0;auto check=[&](bool pass,const char* text){std::cout<<(pass?"PASS ":"FAIL ")<<text<<'\n';failures+=!pass;};
+    {
+        using namespace veyra;
+        using R=engine::PreviewFrameReadiness;
+        pipeline::BatchFrame generated;generated.kind=pipeline::FrameKind::Generated;generated.validity=pipeline::GenerationValidity::Pending;
+        unsigned polls=0;auto pending=[&]{++polls;return false;};
+        check(engine::previewFrameReadiness(generated,false,true,pending)==R::Expired&&polls==0,"expired pending generation never waits on GPU readiness");
+        check(engine::previewFrameReadiness(generated,true,false,pending)==R::Suppressed&&polls==0,"old history generation never waits on GPU readiness");
+        check(engine::previewFrameReadiness(generated,false,false,pending)==R::Pending&&polls==1,"current unexpired generation keeps its producer fence");
+        check(engine::previewFrameReadiness(generated,false,false,[&]{generated.validity=pipeline::GenerationValidity::Disabled;return true;})==R::Invalid,"provider-disabled output is never presented");
+        pipeline::BatchFrame real;
+        check(engine::previewFrameReadiness(real,true,true,pending)==R::Pending&&polls==2,"original never bypasses its producer fence or expires with generated output");
+        check(engine::previewFrameReadiness(real,true,true,[]{return true;})==R::Ready,"ready original survives expiration and history suppression");
+        const auto fit=engine::presentationRegion(1920,1080,1000,1000,2560,1440,{});
+        check(fit.left==0&&fit.right==2560&&fit.top==314&&fit.bottom==1124,"retained wide buffer uses square client letterbox mapping");
+        const auto zoom=engine::presentationRegion(1920,1080,1000,1000,2560,1440,{2,.5f,.5f});
+        check(zoom.left==0&&zoom.right==2560&&zoom.top==0&&zoom.bottom==1440,"zoom region clips to retained buffer");
+        const auto outside=engine::presentationRegion(1920,1080,1000,1000,2560,1440,{1,3,.5f});
+        check(outside.left==outside.right,"offscreen image cannot invent an out-of-bounds provider rectangle");
+    }
     Scheduler scheduler;unsigned finished=0,secondRan=0,firstSteps=0;bool gpuReady=false;
     const auto owner=std::this_thread::get_id();bool sameOwner=true;
     auto lease=std::make_shared<int>(1);std::weak_ptr<int> weak=lease;

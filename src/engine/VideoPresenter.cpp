@@ -1,4 +1,5 @@
 #include "veyra/engine/VideoPresenter.h"
+#include "veyra/engine/PresentationGeometry.h"
 #include "veyra/pipeline/EnhanceGraph.h"
 #include "veyra/gfx/D3D12DeviceContext.h"
 #include "veyra/gfx/CommandSlotRing.h"
@@ -6,6 +7,7 @@
 namespace veyra::engine {
 bool VideoPresenter::open(gfx::D3D12DeviceContext& ctx,HWND window,pipeline::EnhanceGraph& graph,bool captureCompatible) {
     close();
+    viewWidth_=viewHeight_=0;bufferMonitor_=nullptr;monitorWidth_=monitorHeight_=0;
     ++generation_;
     Status st=Status::Ok;
     if(graph.fgEnabled()&&!graph.xessEnabled()&&!graph.fsrEnabled()){
@@ -22,6 +24,15 @@ bool VideoPresenter::open(gfx::D3D12DeviceContext& ctx,HWND window,pipeline::Enh
     gfx::PresentSink::Desc d;d.targetWindow=window;d.width=std::max(1L,rc.right);d.height=std::max(1L,rc.bottom);d.vsync=false;
     d.waitable=!GetEnvironmentVariableW(L"VEYRA_TEST_LEGACY_SWAPCHAIN",nullptr,0);
     d.hdr=graph.hdrOutput();d.hdr10=graph.hdr10Output();d.xess=graph.xessEnabled();d.fsr=graph.fsrEnabled();d.renderWidth=graph.workWidth();d.renderHeight=graph.workHeight();d.captureCompatible=captureCompatible;d.fgMultiplier=graph.fgMultiplier();lastXessFrame_={};lastXessIdentity_={};xessWasEnabled_=false;lastFsrFrame_={};lastFsrIdentity_={};fsrWasEnabled_=false;
+    if(d.xess){
+        bufferMonitor_=MonitorFromWindow(window,MONITOR_DEFAULTTONEAREST);
+        MONITORINFO monitor{sizeof(monitor)};
+        if(GetMonitorInfoW(bufferMonitor_,&monitor)){
+            monitorWidth_=monitor.rcMonitor.right-monitor.rcMonitor.left;monitorHeight_=monitor.rcMonitor.bottom-monitor.rcMonitor.top;
+            d.width=std::max(d.width,monitorWidth_);d.height=std::max(d.height,monitorHeight_);
+        }
+        veyra::log::info("present",std::format("XeSS retained buffers {}x{} client={}x{}; window scaling avoids provider rebuild",d.width,d.height,rc.right,rc.bottom));
+    }
     if(!sink_.initialize(ctx.device(),queue,d,st))return false;
     std::vector<uint8_t> vs,ps;
     // SRV layout: 0..1 video frames, 2..11 generated frames (2 parities x 5
@@ -45,9 +56,24 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
     const auto now=std::chrono::steady_clock::now();
     bool resized=false;
     const auto deferUntil=uint64_t(uintptr_t(GetPropW(window_,L"Veyra.ResizeDeferUntil")));
-    if((unsigned(rc.right)!=sink_.width()||unsigned(rc.bottom)!=sink_.height())&&GetTickCount64()>=deferUntil&&now-lastResize_>=std::chrono::milliseconds(100)) {
+    if(viewWidth_!=unsigned(rc.right)||viewHeight_!=unsigned(rc.bottom)){
+        viewWidth_=rc.right;viewHeight_=rc.bottom;xessWasEnabled_=fsrWasEnabled_=false;
+    }
+    unsigned targetWidth=rc.right,targetHeight=rc.bottom;
+    if(sink_.xess()){
+        const auto monitor=MonitorFromWindow(window_,MONITOR_DEFAULTTONEAREST);
+        if(monitor!=bufferMonitor_){
+            bufferMonitor_=monitor;MONITORINFO info{sizeof(info)};
+            if(GetMonitorInfoW(monitor,&info)){monitorWidth_=info.rcMonitor.right-info.rcMonitor.left;monitorHeight_=info.rcMonitor.bottom-info.rcMonitor.top;}
+        }
+        // Never shrink the provider's working set on ordinary window changes.
+        // Grow only when the client or a new display needs more output pixels.
+        targetWidth=std::max({targetWidth,sink_.width(),monitorWidth_});
+        targetHeight=std::max({targetHeight,sink_.height(),monitorHeight_});
+    }
+    if((targetWidth!=sink_.width()||targetHeight!=sink_.height())&&GetTickCount64()>=deferUntil&&now-lastResize_>=std::chrono::milliseconds(100)) {
         resized=true;
-        if(!ring.drainQueue())return false;sink_.resize(rc.right,rc.bottom);
+        if(!ring.drainQueue())return false;sink_.resize(targetWidth,targetHeight);
         // A capture hook may temporarily retain a DXGI buffer. Keep the old
         // valid buffers and let DXGI scale them until a later resize succeeds.
         if(!sink_.currentBackBuffer()||FAILED(ctx.device()->GetDeviceRemovedReason()))return false;
@@ -96,23 +122,13 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
     // exact `view == PreviewView{}` guard disabled generation forever after
     // any wheel zoom or drag, even when the user zoomed back out. The rect is
     // clipped to the window and aligned to even coordinates for the providers.
-    const float winW=float(sink_.bufferWidth()),winH=float(sink_.bufferHeight());
-    const float imgW=float(graph.workWidth()),imgH=float(graph.workHeight());
-    const float viewZoom=view.zoom>0.0f?view.zoom:1.0f;
-    const float viewFit=std::min(winW/imgW,winH/imgH)*viewZoom;
-    const float imageLeft=winW*0.5f-view.centerX*imgW*viewFit;
-    const float imageTop=winH*0.5f-view.centerY*imgH*viewFit;
-    LONG fgLeft=std::max(0L,LONG(imageLeft))&~1L;
-    LONG fgTop=std::max(0L,LONG(imageTop))&~1L;
-    LONG fgRight=std::min(LONG(winW+0.5f),LONG(imageLeft+imgW*viewFit+0.5f))&~1L;
-    LONG fgBottom=std::min(LONG(winH+0.5f),LONG(imageTop+imgH*viewFit+0.5f))&~1L;
-    fgRight=std::max(fgLeft+2L,fgRight);fgBottom=std::max(fgTop+2L,fgBottom);
-    const RECT fgRect{fgLeft,fgTop,fgRight,fgBottom};
+    const RECT fgRect=presentationRegion(graph.workWidth(),graph.workHeight(),rc.right,rc.bottom,sink_.bufferWidth(),sink_.bufferHeight(),view);
+    const bool regionVisible=fgRect.right>fgRect.left&&fgRect.bottom>fgRect.top;
     if(auto* xess=sink_.xess()){
         if(GetEnvironmentVariableW(L"VEYRA_TEST_XESS_PRESENT_FAILURE",nullptr,0)>0){
             veyra::log::warn("backend-test","Injected XeSS tagging failure with recorded commands");xessFailed_=true;return false;
         }
-        const bool enabled=!generated&&!comparison&&graph.presentMotionValid(slot)&&identity.sourceFrameId!=lastXessIdentity_.sourceFrameId&&!xessGenerationSuppressed_;
+        const bool enabled=regionVisible&&!generated&&!comparison&&graph.presentMotionValid(slot)&&identity.sourceFrameId!=lastXessIdentity_.sourceFrameId&&!xessGenerationSuppressed_;
         const bool reset=!xessWasEnabled_||identity.epoch!=lastXessIdentity_.epoch||identity.settingsRevision!=lastXessIdentity_.settingsRevision||graph.motionPreviousSource(slot)!=lastXessIdentity_.sourceFrameId;
         const float elapsed=lastXessFrame_==std::chrono::steady_clock::time_point{}?0.0f:float(std::chrono::duration<double,std::milli>(now-lastXessFrame_).count());
         auto* motion=graph.presentMotion(slot);
@@ -143,7 +159,7 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
         lastXessFrame_=now;lastXessIdentity_=identity;xessWasEnabled_=enabled;
     }
     if(auto* fsr=sink_.fsr()){
-        const bool enabled=!generated&&!comparison&&graph.presentMotionValid(slot)&&identity.sourceFrameId!=lastFsrIdentity_.sourceFrameId;
+        const bool enabled=regionVisible&&!generated&&!comparison&&graph.presentMotionValid(slot)&&identity.sourceFrameId!=lastFsrIdentity_.sourceFrameId;
         const bool reset=!fsrWasEnabled_||identity.epoch!=lastFsrIdentity_.epoch||identity.settingsRevision!=lastFsrIdentity_.settingsRevision||graph.motionPreviousSource(slot)!=lastFsrIdentity_.sourceFrameId;
         const float elapsed=lastFsrFrame_==std::chrono::steady_clock::time_point{}?0.0f:float(std::chrono::duration<double,std::milli>(now-lastFsrFrame_).count());
         // The AMD presenter degrades inside the provider (generation off, plain

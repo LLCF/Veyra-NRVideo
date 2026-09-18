@@ -1,5 +1,17 @@
 # Veyra 工作记录
 
+## 2026-09-18 长帧修复与追加实测
+
+用户要求实际修复，继续 `codex/frame-pacing-20260918`，基线 `c7464bb`，存档 `checkpoint/pre-stall-repair-20260918`。两项实现：XeSS 保留至少显示器尺寸的缓冲，普通缩放不再触发提供方重建，颜色区域按 client/buffer 几何映射并重置插值历史；实时预览先跳过过期/被抑制生成帧，再检查 GPU 就绪，原帧 fence 和 completion watcher 的资源持有保留。没有更改采集格式、NR 档位、请求倍率、运行库或导出行为。源文件、全部命令、日志、拒绝的实验与边界见 [修复报告](FRAME_STALL_REPAIR_2026-09-18.md)。
+
+VC-007PRO 4K30 NV12 / RTX5070 / 616.56：XeSS2X 原生 NR 三次缩放从基线丢 9 帧变为连续三轮零丢帧；100ms 级 ResizeBuffers 路径不再调用。保留较大缓冲有成本，中位回调到原帧 Present 返回相对缩放基线多约 2–4ms，不能称为全面降低延迟。XeSS4X 实时 NR 三次缩放亦零丢帧。DLSS4X 与 XeSS2X 后续各 120 秒，3597 输入、零采集丢帧，中位 40.206/48.736ms；这是软件返回时间，不是物理扫描延迟。DLSS 人为 80ms 阻塞恢复、暂停/恢复、2X→6X→4X 均通过。
+
+未隐瞒的残留：第一轮 DLSS 正式窗丢 10 帧，单次 CPU 尾部 387.874ms、原帧回调到返回 424.911ms，随后 120 秒未重现，新增细分统计/状态/日志计时但未声称修好。启动第 304 帧约 49ms 尖峰在 XeSS2X/4X、DLSS4X 均重现，已定位 NR Evaluate 调用本身（49.060/49.802/48.491ms），不是命令槽等待，内部原因未确定。粉丝原 HDR/ASUS 卡约 1.4 秒呈现阻塞未重现，不能将缩放修复冒充该问题根治。
+
+构建五目标成功，最终 `build-verified.log` exit0；末次仅将 CPU 诊断容量增至32，避免6X子帧标记截断，实卡结果在这一纯诊断容量调整之前取得。早期 min/max 宏编译失败已通过测试目标 NOMINMAX 修正。56 项单测、实际 GPU 几何读回通过；所有本轮完成的真机测试 exit0，NR/DLSSG Create0x1 seh0，XeSS Create/Init/XeLL0，计数持续增长且无运行错误。通过只表示各自检查，不等于没有长帧。未跑全发布/导出门禁，HDR、多屏、30/40 实卡、扫描与 XeSS 插值画质未执行。收尾无 Veyra 测试进程，任务临时目录为空，main 工作区干净。
+
+构建 `E:/项目/Veyra/build/frame-pacing-20260918`；实测/CSV/原始日志 `E:/项目/Veyra/tests/frame-stall-repair-20260918`；构建和分析 `E:/项目/Veyra/logs/frame-stall-repair-20260918`；临时 `E:/项目/Veyra/tmp/frame-stall-repair-20260918`。保留失败实验作为必要证据，没有新包或解压副本。未合并 main、推送或发布，SDK/运行库未入 Git。下一项：用当前分段诊断构建在反馈者原 HDR 配置抓长停顿，结合已定位 NR 调用继续处理未解决的长帧。
+
 ## 2026-09-18 DLSS / XeSS 两侧偶发长帧排查
 
 用户要求两边排查。沿用隔离分支 `codex/frame-pacing-20260918`，基线 `23cc720`，存档 `checkpoint/pre-stall-investigation-20260918`。本轮只加诊断与实测入口，未改调度策略或输入格式。逐项证据、修改文件、命令、真实返回码及限制见 [长帧调查](FRAME_STALL_INVESTIGATION_2026-09-18.md)。

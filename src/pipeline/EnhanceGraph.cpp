@@ -8,6 +8,7 @@
 // ring (NR evaluates on a fresh list - snippet constraint).
 #include "veyra/pipeline/EnhanceGraph.h"
 #include "veyra/engine/ColorLut.h"
+#include "veyra/diagnostics/CpuStallTrace.h"
 
 #include <algorithm>
 #include <bit>
@@ -1256,6 +1257,7 @@ bool EnhanceGraph::createViews()
 // ---------------------------------------------------------------------------
 bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, FrameOutputs& out, uint64_t sourceFrameId, const ColorDescription* color, const HardwareSurfaceInput* hardwareSurface, bool retainReferences, const FgAdmission& admitFg)
 {
+    diagnostics::CpuStallTrace cpuTrace("graph-cpu-stall",sourceFrameId,30.0);
     failedBackend_=engine::FailedBackend::Infrastructure;
     out = FrameOutputs{};
     out.ptsMs = ptsMs;
@@ -1317,6 +1319,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
         return true;
     }
     uint32_t slot = 0;
+    cpuTrace.mark("validate");
     if (uploadFences_[parity] && !context_.waitForFenceValue(uploadFences_[parity])) return false;
     // Presentation returns the shared output to COMMON before this parity
     // can be written again. Direct graph callers also need the GPU dependency.
@@ -1336,6 +1339,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
     ID3D12Resource* nv12Texture = nullptr;
     ID3D12GraphicsCommandList* list = ring_.acquireNext(slot, st);
     if (list == nullptr) { veyra::log::error("graph", "ring acquire"); return false; }
+    cpuTrace.mark("acquire");
     gpuTimer_.frame({epoch_,desc_.settingsRevision,realFrameIndex_+1},context_.fence());gpuTimer_.mark(list,GpuStage::Color);
 
     // Both CPU source layouts feed the same bounded scene/cadence history.
@@ -1512,6 +1516,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
         tracker_.transition(list, chromaTex_.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     }
     if (desc_.stageMark) desc_.stageMark("upload");
+    cpuTrace.mark("upload");
 
     // 2. YUV -> RGBA16F.
     if(colorActive_&&colorDirty_)uploadColorTables(list);
@@ -1539,6 +1544,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
     }
     gpuTimer_.mark(list,GpuStage::Color,true);
     if (desc_.stageMark) desc_.stageMark("yuv");
+    cpuTrace.mark("color");
 
     // Guidance from original source-space color before SR/NR. Queue waits are GPU-side.
     bool haveFlow = false;
@@ -1581,7 +1587,9 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
             if(!amdOf_){
             gpuTimer_.mark(list,GpuStage::Flow);
             if(!ring_.submitAndSignal(slot))return false;
+            cpuTrace.mark("flowPrepare");
             haveFlow=nvof_->execute(ring_.lastSignaledValue(),st);
+            cpuTrace.mark("nvofExecute");
             if(!haveFlow) { ++metrics_.nvofFrameFailures; mvecSource_="zero-motion-fallback (NVOF execute failed)"; }
             else {
                 ++metrics_.nvofExecuteCount;
@@ -1615,6 +1623,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
     }
 
     // 3. SR into workRgba (or 1:1 blit bypass).
+    cpuTrace.mark("flowFinish");
     if(haveFlow){
         auto adapt=[&](ID3D12Resource* output,uint32_t w,uint32_t h,uint32_t descriptor){
             tracker_.transition(list,output,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -1692,6 +1701,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
         tracker_.transition(list, workRgba_.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     }
     if (desc_.stageMark) desc_.stageMark("sr");
+    cpuTrace.mark("sr");
     return true;};
     if(!desc_.nrBeforeSr&&!runSr())return false;
     if(desc_.nrBeforeSr&&retainReferences){
@@ -1724,11 +1734,13 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
         tracker_.uavBarrier(list, proxyTex_.Get());
         tracker_.transition(list, proxyTex_.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         if (desc_.stageMark) desc_.stageMark("encode");
+        cpuTrace.mark("nrPrepare");
 
         // 4b. NR evaluate on a FRESH list (snippet constraint).
         if (!ring_.submitAndSignal(slot)) { veyra::log::error("graph", "submit before nr"); return false; }
         ID3D12GraphicsCommandList* nlist = ring_.acquireNext(slot, st);
         if (nlist == nullptr) { veyra::log::error("graph", "acquire nr list"); return false; }
+        cpuTrace.mark("nrAcquire");
         {
             namespace p = ngx::dlssnr;
             ngx::ParameterBlock pb(ngxParams_);
@@ -1764,12 +1776,14 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
             }
             gpuTimer_.mark(nlist,GpuStage::Nr);
             uint64_t er = 0; uint32_t es = 0;
+            cpuTrace.mark("nrParameters");
             if (!nrAdapter_->snippetEvaluateFeature(nlist, nrHandle_, ngxParams_, er, es) ||
                 er != static_cast<uint64_t>(NVSDK_NGX_Result_Success)) {
                 diagnostic.stage="NR Evaluate";diagnostic.ngx=er;diagnostic.seh=es;Logger::diagnosticContext(diagnostic);veyra::log::error("graph", std::format("NR evaluate failed 0x{:X} seh={}", er, es));
                 failedBackend_=engine::FailedBackend::Nr;
                 return false;
             }
+            cpuTrace.mark("nrEvaluate");
             gpuTimer_.mark(nlist,GpuStage::Nr,true);
             ++metrics_.nrEvaluateCount;
             if(haveFlow)++metrics_.nrMotionFrames;
@@ -1795,6 +1809,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
         list = nlist; // continue recording on the NR list
     }
     if (desc_.stageMark) desc_.stageMark("nr");
+    cpuTrace.mark("nr");
 
     if(nrEnabled_&&nrHandle_){
         gpuTimer_.mark(list,GpuStage::Residual);
@@ -1887,7 +1902,9 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
         fe.mvecScaleY=(haveFlow||desc_.fgMotionProbe)?-1.0f/static_cast<float>(workH_):1.0f;
         if(sub==1)gpuTimer_.mark(flist,GpuStage::FgBatch);
         const auto timingStage=static_cast<GpuStage>(unsigned(GpuStage::Fg1)+sub-1);gpuTimer_.mark(flist,timingStage);
+        cpuTrace.mark("fgPrepare");
         if(!fgBackend_->evaluate(flist,ngxParams_,fe,st)){failedBackend_=engine::FailedBackend::Fg;return false;}
+        cpuTrace.mark("fgEvaluate");
         ++out.fgEvaluated;
         gpuTimer_.mark(flist,timingStage,true);if(sub==desc_.fgMultiplier-1)gpuTimer_.mark(flist,GpuStage::FgBatch,true);
         tracker_.uavBarrier(flist,genFrame_[generatedSlot].Get());
