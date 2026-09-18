@@ -5,6 +5,7 @@ param(
     [Parameter(Mandatory)][string]$DependencyCache,
     [Parameter(Mandatory)][string]$TempDirectory,
     [string[]]$Targets=@('veyra'),
+    [string]$DisplayVersion,
     [switch]$ConfigureOnly
 )
 $ErrorActionPreference='Stop'
@@ -25,6 +26,7 @@ try {
     $cmake=Join-Path $vs 'Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe'
     $ninja=Join-Path $vs 'Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe'
     $argsList=@('-S',$Root,'-B',$BuildDirectory,'-G','Ninja','-DCMAKE_BUILD_TYPE=Release',"-DCMAKE_MAKE_PROGRAM=$ninja",'-DVEYRA_ENABLE_EXPERIMENTAL_DLSSNR=ON','-DVEYRA_ENABLE_REMOTEPLAY=ON')
+    if($DisplayVersion){$argsList+="-DVEYRA_DISPLAY_VERSION=$DisplayVersion"}
     foreach($line in $cache){
         if($line -match '^(VEYRA_[A-Z0-9_]+_ROOT|VEYRA_RP_CHIAKI_SOURCE_DIR|VEYRA_RP_CHIAKI_VERIFY_DIR|CMAKE_PREFIX_PATH|PROTOC|Protobuf_PROTOC_EXECUTABLE|PKG_CONFIG_EXECUTABLE):[^=]+=(.+)$'){
             $argsList+="-D$($matches[1])=$($matches[2])"

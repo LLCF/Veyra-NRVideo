@@ -1525,9 +1525,10 @@ case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.
     hdrTop+=24;
     add(L"BUTTON",L"RTX Video HDR",230,BS_AUTOCHECKBOX|WS_TABSTOP,0,12,hdrTop,-1,32);
     SetPropW(item(230),L"veyra.tip",HANDLE(L"将 SDR 视频转换成 HDR；预览需要 Windows HDR 显示，导出不受显示模式影响。原生 HDR 不重复转换。"));
+    add(L"STATIC",L"等待预览状态",1145,SS_NOPREFIX,0,12,hdrTop+36,-1,52);
     const wchar_t* hdrLabels[]={L"对比度",L"饱和度",L"中间灰",L"峰值亮度"};
     const int hdrMin[]={0,0,10,400},hdrMax[]={200,200,100,2000};
-    for(int i=0;i<4;++i){const int y=hdrTop+40+i*58;
+    for(int i=0;i<4;++i){const int y=hdrTop+96+i*58;
         add(L"STATIC",hdrLabels[i],1141+i,0,0,12,y,160,24);
         add(L"STATIC",L"",1131+i,SS_RIGHT,0,182,y,-1,24);
         auto slider=add(TRACKBAR_CLASSW,L"",631+i,TBS_HORZ|TBS_NOTICKS|WS_TABSTOP,0,12,y+26,-1,24);
@@ -1577,7 +1578,14 @@ case WM_TIMER:{auto s=controller->snapshot();syncProtection(enhancementEnabled?s
     if(!s.backendWarning.empty())message(s.backendWarning);
     else if(!displayedBackendWarning.empty())message(L"设置已应用");
     displayedBackendWarning=s.backendWarning;
-}setText(item(400),o.str());return 0;}
+}setText(item(400),o.str());
+    const wchar_t* hdrStatus=s.failed?L"播放失败，HDR 预览不可用":
+        s.transport==engine::TransportState::Opening?L"等待首帧，HDR 状态待确认":
+        s.applying?L"正在应用设置，HDR 状态待确认":
+        !s.running&&!s.frames?L"未打开媒体，HDR 设置待应用":
+        s.videoHdrStatus.empty()?L"等待预览状态":s.videoHdrStatus.c_str();
+    putText(1145,hdrStatus);
+    return 0;}
 case WM_DESTROY:KillTimer(h,1);DeleteObject(font);window=nullptr;body=nullptr;items.clear();return 0;
 }return DefWindowProcW(h,msg,wp,lp);}
 }

@@ -385,7 +385,7 @@ bool EnhanceGraph::createResources()
     if(srEnabled_&&desc_.videoSrQuality==engine::kVideoSrFsr){
         fsrSrDepth_=makeTexture(context_.device(),srcW_,srcH_,DXGI_FORMAT_R32_FLOAT,false);
         if(!fsrSrDepth_)return false;
-        fsrSrDepthPitch_=(size_t(srcW_)*sizeof(float)+255)&~size_t(255);
+        fsrSrDepthPitch_=size_t(srcW_)*sizeof(float);
         upFsrSrDepth_=makeUploadBuffer(context_.device(),fsrSrDepthPitch_*srcH_);
         if(!upFsrSrDepth_)return false;
     }
@@ -790,7 +790,6 @@ HMODULE module = fgCompatibility_ ? fgCompatibility_->provider() : nullptr;
 
 bool EnhanceGraph::initFsrSr()
 {
-    fsrSrResetPending_=true;
     if (!fsrSrRequested()) return true;
     if (desc_.noFeatures) {
         veyra::log::warn("fsr-sr", "feature-disabled configuration: AMD FSR upscaling skipped");
@@ -813,12 +812,6 @@ bool EnhanceGraph::initFsrSr()
         veyra::log::error("fsr-sr", "AMD FSR upscaling unavailable; the engine will disable the stage");
         failedBackend_=engine::FailedBackend::None;
         return true;
-    }
-    if(fsrSrBackend_->experimental411()){
-        if(ring_.slotCount()>6){veyra::log::error("fsr-sr","experimental provider supports at most six caller command slots");return false;}
-        fsr41Input_=makeTexture(context_.device(),srcW_,srcH_,DXGI_FORMAT_R11G11B10_FLOAT,true);
-        fsr41Output_=makeTexture(context_.device(),workW_,workH_,DXGI_FORMAT_R11G11B10_FLOAT,true);
-        if(!fsr41Input_||!fsr41Output_)return false;
     }
     failedBackend_=engine::FailedBackend::None;
     veyra::log::info("fsr-sr", std::format("selected render={}x{} output={}x{} provider={}",srcW_,srcH_,workW_,workH_,
@@ -1096,7 +1089,7 @@ bool EnhanceGraph::createComputePasses()
     if((desc_.rgbInput||desc_.yuy2Input||desc_.packedInput)&&(!rgbPass_.loadShader(rgbShader,cs)||!rgbPass_.create(context_.device(),cs,12,1,1,8+kColorGradeConstantCount,4)))return false;
     if (!encPass_.loadShader("ParityEncode.dxil", cs) || !encPass_.create(context_.device(), cs, 8, 1, 1)) return false;
     if (!decPass_.loadShader("ParityDecode.dxil", cs) || !decPass_.create(context_.device(), cs, 8)) return false;
-    if (!blitPass_.loadShader("ScaleBlit.dxil", cs) || !blitPass_.create(context_.device(), cs, 23, 1, 1)) return false;
+    if (!blitPass_.loadShader("ScaleBlit.dxil", cs) || !blitPass_.create(context_.device(), cs, 21, 1, 1)) return false;
     // Nv12Upload stays: frame-time CopyTextureRegion is poisoned by the
     // injected layer (SEH in NGX evaluate, r33-final3 evidence); the compute
     // upload is the proven frame-path ingestion on this system.
@@ -1193,8 +1186,6 @@ bool EnhanceGraph::createViews()
     if (viewsTex) stagedSrv(residualRgba_.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT,blitPass_,18);
     if(videoHdrInput_&&viewsUav)makeUav(context_.device(),videoHdrInput_.Get(),DXGI_FORMAT_R8G8B8A8_UNORM,cpu(blitPass_,19));
     if(videoHdrOutput_&&viewsTex)stagedSrv(videoHdrOutput_.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT,blitPass_,20);
-    if(fsr41Input_&&viewsUav)makeUav(context_.device(),fsr41Input_.Get(),DXGI_FORMAT_R11G11B10_FLOAT,cpu(blitPass_,21));
-    if(fsr41Output_&&viewsTex)stagedSrv(fsr41Output_.Get(),DXGI_FORMAT_R11G11B10_FLOAT,blitPass_,22);
     if (viewsTex) stagedSrv(srcRgba_.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, blitPass_, 0);
     // Colour-grade tables: four SRVs at the extra table's fixed register base.
     if(colorActive_){
@@ -1638,9 +1629,6 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
     out.batch.batchId=realFrameIndex_+1;out.batch.identity={epoch_,desc_.settingsRevision,sourceFrameId};
     out.batch.a100ns=static_cast<int64_t>(std::llround(prevPtsMs_*10000));
     out.batch.b100ns=static_cast<int64_t>(std::llround(ptsMs*10000));gpuTimer_.identity(out.batch.identity);
-    // A reset frame can have no flow and skip FSR. Retain the reset until an
-    // actual dispatch, including gaps caused by failed motion estimation.
-    if(reset||!haveFlow)fsrSrResetPending_=true;
     auto runSr=[&]()->bool{
     if(srEnabled_&&fsrSrEnabled()&&haveFlow){
         // AMD FSR upscaling: FidelityFX effect, render-extent color + guidance
@@ -1652,33 +1640,13 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
         tracker_.transition(list,srcRgba_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         tracker_.transition(list,flowTex_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         tracker_.transition(list,fsrSrDepth_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        auto* fsrColor=desc_.nrBeforeSr?residualRgba_.Get():srcRgba_.Get();
-        tracker_.transition(list,fsrColor,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        auto* fsrOutput=workRgba_.Get();
-        if(fsr41Input_){
-            tracker_.transition(list,fsr41Input_.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            const float c[8]={uintBits(srcW_),uintBits(srcH_),uintBits(srcW_),uintBits(srcH_),0,0,0,0};
-            blitPass_.bind(list,c,gpuHandleOf(blitPass_,desc_.nrBeforeSr?18:0).ptr,gpuHandleOf(blitPass_,21).ptr);
-            list->Dispatch((srcW_+15)/16,(srcH_+15)/16,1);tracker_.uavBarrier(list,fsr41Input_.Get());
-            tracker_.transition(list,fsr41Input_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-            fsrColor=fsr41Input_.Get();fsrOutput=fsr41Output_.Get();
-        }
-        tracker_.transition(list,fsrOutput,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        if(!fsrSrBackend_->evaluate(list,fsrColor,flowTex_.Get(),fsrSrDepth_.Get(),fsrOutput,
-                                    srcW_,srcH_,workW_,workH_,fsrSrResetPending_,float(deltaMs),slot)){
+        tracker_.transition(list,workRgba_.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if(!fsrSrBackend_->evaluate(list,srcRgba_.Get(),flowTex_.Get(),fsrSrDepth_.Get(),workRgba_.Get(),
+                                    srcW_,srcH_,workW_,workH_,reset,float(deltaMs))){
             failedBackend_=engine::FailedBackend::Sr;
             return false;
         }
-        fsrSrResetPending_=false;
         ++metrics_.srEvaluateCount;gpuTimer_.mark(list,GpuStage::Sr,true);
-        if(fsr41Output_){
-            tracker_.uavBarrier(list,fsr41Output_.Get());
-            tracker_.transition(list,fsr41Output_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-            tracker_.transition(list,workRgba_.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            const float c[8]={uintBits(workW_),uintBits(workH_),uintBits(workW_),uintBits(workH_),0,0,0,0};
-            blitPass_.bind(list,c,gpuHandleOf(blitPass_,22).ptr,gpuHandleOf(blitPass_,1).ptr);
-            list->Dispatch((workW_+15)/16,(workH_+15)/16,1);
-        }
         tracker_.uavBarrier(list,workRgba_.Get());
         tracker_.transition(list,workRgba_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     } else if(srEnabled_&&videoSrBackend_){
@@ -2085,7 +2053,6 @@ void EnhanceGraph::shutdown()
     for(auto& motion:presentMotion_)motion.Reset();
     if(fsrSrBackend_){fsrSrBackend_->release();fsrSrBackend_.reset();}
     fsrSrDepth_.Reset();
-    fsr41Input_.Reset();fsr41Output_.Reset();
     upFsrSrDepth_.Reset();
     if (fgBackend_) fgBackend_->release();
     if(videoSrBackend_){videoSrBackend_->release();videoSrBackend_.reset();}

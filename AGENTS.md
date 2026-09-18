@@ -1,5 +1,11 @@
 # Veyra 项目 Agent 执行规则
 
+> 2026-09-18 当前用户授权制作 1.4.2beta 内测群便携包，包含 FSR4 回退及保留的 RTX Video HDR。允许携带已核验的 RTX Video SDK 1.1.0 TrueHDR 原件（SHA256 9A80575F247190C05FE80EAC0C4BAA1D0D4D932348F26808310B5EC4BF9EEB4B，3955752 bytes，1.1.0.0，Valid），其余组件沿用 1.4.1 身份，逐文件 manifest 及许可证随包提供。仅本地交付用户自行发群；无 GitHub 推送、Release 或 Agent 代发消息授权。
+
+> 2026-09-18 最新用户决定：停止并回退 NVIDIA FSR 4.1 实验，撤销其 UI、provider 接入及测试/打包入口；不继续画质修复。保留 RTX 超分、原有官方 FSR 和独立 RTX Video HDR 改动。本条覆盖下方 FSR4 本地试验授权；历史研究仅供追溯，不是待办。旧实验预设的 mode 6 读取时迁移到 RTX Video SR 高档，其他设置保留。
+
+> 2026-09-18 用户追加授权：FSR 4.1 增加可保存的界面选择，随本地测试包携带独立 INT8 provider，方便直接试用。该本地实验入口取代上一阶段仅环境变量入口的限制；不代表画质验收或公开发布授权。
+
 > 2026-09-18 当前授权：先更新项目文档，在 `codex/video-hdr-20260918` 隔离实施 RTX Video HDR，再验证 NVIDIA FSR 4.1.1 INT8 研究 provider。此决定扩展 09-16 的 NVIDIA FSR4 观察范围，允许本地构建/接入/测试，不代表正式支持或发布授权。存档 `checkpoint/pre-video-hdr-fsr41-20260918`；当前事实见 `docs/CURRENT_STATUS.md` 与 `docs/VIDEO_HDR_FSR41_EXECUTION_PLAN_2026-09-18.md`。旧计划中“尚未发布/尚未实现”的历史语句不覆盖 1.4.1 发布记录。
 
 ## 本机产物目录规则（2026-09-18 用户决定）

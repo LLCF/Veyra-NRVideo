@@ -36,6 +36,7 @@ struct PlayerSnapshot {
     std::wstring backendWarning;
     std::wstring sourceNotice;
     std::wstring colorStatus;
+    std::wstring videoHdrStatus;
     sink::CaptureAudioState captureAudio;
     unsigned audioInputChannels=0,audioOutputChannels=0;
     std::vector<media::AudioTrack> audioTracks;

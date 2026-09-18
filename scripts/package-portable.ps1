@@ -67,8 +67,12 @@ if ($LocalVideoHdr) {
   if (-not $Label) { throw 'Local HDR package requires an explicit test label.' }
   $runtimeFiles += @{ Name='nvngx_truehdr.dll'; Folder='runtime/experimental'; Source='third_party_local/nvidia/RTX_Video_SDK_1.1.0/bin/Windows/x64/rel/nvngx_truehdr.dll'; Hash='9A80575F247190C05FE80EAC0C4BAA1D0D4D932348F26808310B5EC4BF9EEB4B'; Size=3955752; Version='1.1.0.0'; Category='official-rtx-video-sdk-1.1.0-local-evaluation'; Experimental=$true }
 }
+function Runtime-Source($Item) {
+  if ([IO.Path]::IsPathRooted($Item.Source)) { return $Item.Source }
+  return Join-Path $resolvedDependencies $Item.Source
+}
 $records = foreach ($item in $runtimeFiles) {
-  $source = Join-Path $resolvedDependencies $item.Source
+  $source = Runtime-Source $item
   $file = Get-Item -LiteralPath $source
   $hash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
   $sig = Get-AuthenticodeSignature -LiteralPath $source
@@ -158,11 +162,9 @@ if ([version]$Version -ge [version]'1.3.1') {
 Copy-Payload (Join-Path $resolvedDependencies 'third_party_local/intel/xess-3.0.2/LICENSE.txt') 'licenses/INTEL_XESS_LICENSE.txt'
 Copy-Payload (Join-Path $resolvedDependencies 'third_party_local/intel/xess-3.0.2/third-party-programs.txt') 'licenses/INTEL_THIRD_PARTY_PROGRAMS.txt'
 Copy-Payload (Join-Path $resolvedDependencies 'third_party_local/amd/FidelityFX-SDK/LICENSE.txt') 'licenses/AMD_FIDELITYFX_LICENSE.txt'
-foreach ($item in $runtimeFiles) { Copy-Payload (Join-Path $resolvedDependencies $item.Source) "$($item.Folder)/$($item.Name)" }
+foreach ($item in $runtimeFiles) { Copy-Payload (Runtime-Source $item) "$($item.Folder)/$($item.Name)" }
 if ($LocalVideoHdr) {
-  Copy-Payload (Join-Path $resolvedRoot 'docs/LOCAL_HDR_FSR41_TEST_2026-09-18.md') 'LOCAL_TEST.md'
-  Copy-Payload (Join-Path $resolvedRoot 'scripts/fsr41/README.md') 'docs/FSR41_EXPERIMENT.md'
-  Copy-Payload (Join-Path $resolvedRoot 'scripts/fsr41/LICENSE.txt') 'licenses/FSR41-PROVIDER-LICENSE.txt'
+  Copy-Payload (Join-Path $resolvedRoot "docs/RELEASE_NOTES_$Version.md") 'LOCAL_TEST.md'
 }
 $manifestFolders = @('runtime/experimental','runtime_local/intel/experimental')
 if ([version]$Version -ge [version]'1.3.1') { $manifestFolders += 'runtime_local/amd/fidelityfx' }

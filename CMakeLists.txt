@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(veyra VERSION 1.4.1 LANGUAGES CXX RC)
+project(veyra VERSION 1.4.2 LANGUAGES CXX RC)
 # Shown in the EXE's version resource and in the package name. CMake versions
 # must be numeric, so the beta marker lives here instead.
-set(VEYRA_DISPLAY_VERSION "1.4.1" CACHE STRING "Human-readable version string")
+set(VEYRA_DISPLAY_VERSION "1.4.2beta" CACHE STRING "Human-readable version string")
 # The cache keeps the first value it ever saw, so a release that bumps
 # project(VERSION) used to ship an EXE still stamped with the previous display
 # string. Re-align it whenever the cached label does not start with the project
@@ -786,10 +786,6 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
   target_link_libraries(veyra_multichannel_tests PRIVATE veyra_engine)
   add_executable(veyra_hdr_enhancement_tests tests/integration/HdrEnhancementTests.cpp)
   add_executable(veyra_video_hdr_tests tests/integration/VideoHdrTests.cpp)
-  add_executable(veyra_fsr41_video_tests tests/integration/Fsr41VideoTests.cpp)
-  target_compile_features(veyra_fsr41_video_tests PRIVATE cxx_std_20)
-  target_compile_definitions(veyra_fsr41_video_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-  target_link_libraries(veyra_fsr41_video_tests PRIVATE veyra_engine)
   target_compile_features(veyra_video_hdr_tests PRIVATE cxx_std_20)
   target_compile_definitions(veyra_video_hdr_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   target_link_libraries(veyra_video_hdr_tests PRIVATE veyra_engine)

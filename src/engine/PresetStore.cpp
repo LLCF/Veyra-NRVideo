@@ -24,6 +24,8 @@ bool PresetStore::parse(const std::string& data,std::vector<UserPreset>& out,std
         if(version>=2){int enabled;if(!(in>>enabled>>s.protection.featherPixels)||enabled<0||enabled>1)return false;s.protection.enabled=enabled!=0;
             for(auto& q:s.protection.regions)if(!(in>>q.left>>q.top>>q.right>>q.bottom))return false;}
         if(version>=3&&!(in>>s.videoSrQuality))return false;
+        // Retired local FSR4 mode: keep the preset, use RTX Video SR high.
+        if(version==20&&s.videoSrQuality==6)s.videoSrQuality=3;
         if(version>=4){int backend;if(!(in>>backend)||backend<0||backend>(version>=13?2:(version>=6&&version<=7?2:1)))return false;
             // Before v8, 1 meant removed FRUC and 2 meant XeSS. New writes use v10.
             s.frameGenerationBackend=version<8

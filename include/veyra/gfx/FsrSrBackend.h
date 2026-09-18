@@ -38,12 +38,10 @@ public:
     // as UAV); `motion` is render-extent pixel motion, `depth` render extent.
     bool evaluate(ID3D12GraphicsCommandList* list, ID3D12Resource* color, ID3D12Resource* motion,
                   ID3D12Resource* depth, ID3D12Resource* output, uint32_t renderWidth, uint32_t renderHeight,
-                  uint32_t upscaleWidth, uint32_t upscaleHeight, bool reset, float frameTimeMs,
-                  uint32_t commandSlot = UINT32_MAX);
+                  uint32_t upscaleWidth, uint32_t upscaleHeight, bool reset, float frameTimeMs);
 
     void release();
     bool created() const;
-    bool experimental411() const;
     uint64_t evaluateCount() const;
     uint64_t failureCount() const;
     const char* providerVersion() const;

@@ -4,6 +4,36 @@
 #include <fstream>
 #include <sstream>
 namespace {
+bool retiredSrMode(const std::filesystem::path& path) {
+ using namespace veyra::engine;
+ for(unsigned mode:{5u,6u,7u}) {
+  std::ostringstream fixture;
+  fixture<<"VEYRA_PRESETS 20\n\"retired\" 1\n\"retired\" 1 1 1 -1 0 0 0 1 1 1 1 1 0 1 1 0 1 0";
+  fixture<<" 0 0";
+  for(int region=0;region<4;++region)fixture<<" 0 0 0 0";
+  fixture<<' '<<mode<<" 0 1 0 0 1 137 0 1 0 0 0 60 0 0 ";
+  writeColorSettings(fixture,{}, "");
+  fixture<<" 1 100 100 50 1000\n";
+  {std::ofstream file(path);file<<fixture.str();}
+  PresetStore store(path);
+  if(mode==7) {
+   if(store.load()||store.put(L"must not overwrite",{}))return false;
+   std::ifstream file(path);std::string unchanged((std::istreambuf_iterator<char>(file)),{});
+   if(unchanged!=fixture.str())return false;
+   continue;
+  }
+  if(!store.load())return false;
+  const auto value=store.defaultSettings();
+  if(value.videoSrQuality!=(mode==6?3u:mode)||!value.sr||value.nr||
+     value.audioOffsetMs!=137||value.exportBitrateMbps!=60||
+     !value.videoHdr.enabled||value.videoHdr.peakNits!=1000)return false;
+  if(!store.save())return false;
+  PresetStore reloaded(path);
+  if(!reloaded.load()||reloaded.defaultSettings()!=value)return false;
+ }
+ std::cout<<"retired SR migration and unknown mode preservation=1\n";
+ return true;
+}
 bool legacyBackends(const std::filesystem::path& path) {
  using namespace veyra::engine;
  unsigned checks=0;
@@ -139,6 +169,6 @@ ok=ok&&b.entries().size()==1&&b.defaultSettings()==s;
 {std::ofstream f(p);f<<"VEYRA_PRESETS 99\ncorrupt mediaPath executable must reject";}PresetStore c(p);const bool corruptLoaded=c.load();const bool corruptPut=c.put(L"override",{});std::ifstream f(p);std::string data((std::istreambuf_iterator<char>(f)),{});
  const bool corruptPreserved=data=="VEYRA_PRESETS 99\ncorrupt mediaPath executable must reject";
  ok=ok&&!corruptLoaded&&!corruptPut&&corruptPreserved;
- f.close();ok=legacyBackends(p)&&ok;
+ f.close();ok=legacyBackends(p)&&ok;ok=retiredSrMode(p)&&ok;
  
  std::cout<<"preset roundtrip, all fields, duplicate, rename-default, delete, validation, unknown schema, corrupt-preservation="<<ok<<'\n';return ok?0:1;}

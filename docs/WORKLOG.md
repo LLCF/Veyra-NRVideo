@@ -1,5 +1,69 @@
 # Veyra 工作记录
 
+## 2026-09-18 可关闭帧同步实施方案
+
+用户要求功能可完全关闭、提供多个选项，本轮新增 `docs/FRAME_PACING_EXECUTION_PLAN_2026-09-18.md` 并更新 CURRENT_STATUS。方案明确默认关闭、低排队/均匀呈现/Reflex 实验三种开启模式，显示同步独立选择；关闭撤销新增等待和 Reflex 配置，保留基础音画同步、资源安全与补帧必要依赖。30/40 的 6X 选择保留，Reflex 必须通过直接 NGX 实测后才开放，不以黑盒限帧冒充。
+
+核对当前 UiPreferenceStore 的 UI v5、PresetStore v20、AppShell 保存路径、EnhancementSettings 的现有 lowLatency 含义，以及研究记录中的呈现链路。新增偏好规划走独立 PresentationSettings 与 UI v6，不随画质预设变化。RTSS 前沿同步的定义依据此前搜索摘要，论坛正文 403，未核验其实现源码许可；文档已说明证据边界。
+
+本轮只改三份文档，保留当前工作树已有改动；无构建、Create/Evaluate、Reflex、呈现录制或实卡测试，没有新增外部产物，没有改变现有测试包。`git diff --check -- docs/FRAME_PACING_EXECUTION_PLAN_2026-09-18.md docs/CURRENT_STATUS.md docs/WORKLOG.md` 返回 0；新增未跟踪方案另用 `git diff --no-index --check -- /dev/null docs/FRAME_PACING_EXECUTION_PLAN_2026-09-18.md` 检查，返回 1 表示存在新增内容，无空白错误；两项仅有 Git LF/CRLF 转换提示。下一步施工先保存当前实际源码状态，再录制关闭基线，不凭 FPS 数字直接认定根因。
+
+## 2026-09-18 帧同步技术与当前呈现链路研究
+
+用户反馈帧率乱跳，要求研究 NVIDIA 帧同步技术。本轮只读审计 1.4.2beta 工作树并新增 `docs/FRAME_PACING_RESEARCH_2026-09-18.md`，没有修改播放代码、内测 ZIP、版本、main 或运行组件。通过 `rg`/`Get-Content` 核对 PresentSink、VideoPresenter、EngineController、LiveGpuScheduler、PresentationScheduler 与 FrameRateWindow；通过 `Invoke-WebRequest` 实际读取 NVIDIA DLSS4/G-SYNC/Reflex/FrameView、NVAPI 与 Streamline 官方资料。
+
+确认：已有 PTS 软件 pacing；自有交换链固定关闭 VSync，未接显示反馈或 Reflex；显示提交 FPS 为 1 秒事件窗口而非面板扫描率。同步文件读取/图提交与呈现调度共用 CPU 线程，有阻塞后连续提交到期帧的结构风险，但没有新用户逐帧证据，不能定为本次根因。方案顺序为测量间隔、解除呈现阻塞、集成显示背压/同步策略、最后评估 Reflex，保持直接 NGX 和 30/40 的 6X 选择。
+
+检查：`git diff --check -- docs/FRAME_PACING_RESEARCH_2026-09-18.md docs/WORKLOG.md`。本轮没有构建、Create/Evaluate 或显示节奏实测，没有生成外部产物。下一步取得反馈机器信息并对照 Veyra trace 与 PresentMon/FrameView 呈现事件，区分统计波动、计算欠速、提交突发与显示刷新失配。
+
+## 2026-09-18 1.4.2beta 内测包
+
+用户要求制作内测群测试包。在 `codex/fsr41-nvidia-20260918` 的当前工作树打包，包含上述 FSR4 回退与保留的 RTX Video HDR；main 未改，没有 push、GitHub Release 或代发群消息。版本资源为 `1.4.2beta`。本轮修改 CMakeLists、build-isolated/package-portable 脚本、AGENTS、CURRENT_STATUS、WORKLOG，并新增 1.4.2 更新说明、运行组件和 RemotePlay 构建说明。群/赞助二维码保持原地址及 width=220。
+
+命令（工作目录为本隔离区，TEMP/TMP 仅对子进程设为 `E:/项目/Veyra/tmp/1.4.2beta`）：
+
+- `./scripts/build-isolated.ps1 -Root . -BuildDirectory E:/项目/Veyra/build/fsr41-nvidia-20260918 -DependencyCache E:/项目/Veyra/build/video-hdr-20260918/CMakeCache.txt -TempDirectory E:/项目/Veyra/tmp/1.4.2beta -DisplayVersion 1.4.2beta -Targets veyra`：exit0。
+- `./scripts/package-portable.ps1 -Root . -Version 1.4.2 -Label beta -OutputDirectory E:/项目/Veyra/test-packages/1.4.2beta -BuildDirectory E:/项目/Veyra/build/fsr41-nvidia-20260918 -DependencyRoot 'C:/Users/123/Desktop/Veyra DLSS Video Player' -LocalVideoHdr`：exit0。
+- `E:/项目/Veyra/tmp/1.4.2beta/verify-package.ps1`：最终压缩包解压后，113 文件大小/哈希、12 运行组件签名和 manifest、版本与禁入文件检查通过；系统 PATH 下独立运行三项短测通过，日志 `E:/项目/Veyra/logs/1.4.2beta/verify-final.log`。
+- RTX SR 高档 + HDR 请求在 SDR 显示器上正常 SDR 预览；NR + DLSS SR + 6X：172 实帧、845 生成帧、failed=false，exit0。两张 3840x2160 截图非黑图，像素均值分别 14.63/14.86，范围 249.33/206.33；目视确认场景内容。
+- HEVC HDR 导出 30 源帧/30 输出帧/0 补尾帧；TrueHDR Create/Evaluate/Release `result=0x1 seh=0`；`ffprobe -v error -show_entries stream=codec_name,profile,pix_fmt,color_space,color_transfer,color_primaries,nb_frames -of json <tests>/visible/hdr-export.mp4`：Main10、yuv420p10le、BT.2020/PQ、30 帧、E-AC3 音轨。`ffmpeg -v error -i <同文件> -map 0:v:0 -frames:v 30 -f null -` exit0，无解码错误。此为研发验收，未恢复产品导出结束扫描。
+
+复测过程如实记录：第一次影片开头截图为黑场，不能算画面验收；第二次复用了截图路径，覆盖确认使自动截图未完成，exit1。临时重编码的 AAC MP4 同时出现 `audio-track decoder rejected stream=1 code=-22`，此现象未定位修复，不能据此宣称 AAC 已验收。最终改用原片 120 秒处的无重编码 MKV 片段及全新截图路径，三项通过。原始日志保留，不将失败改写为通过。
+
+交付 ZIP：`E:/项目/Veyra/test-packages/1.4.2beta/Veyra-1.4.2beta-win64-portable.zip`，467038490 bytes，SHA256 `AA43BB7CC2A84FF258D4B586AE91BFF839A499A72739CC4EAA96CE7673337F1D`。含官方 TrueHDR 1.1.0 原件、许可证与逐文件 manifest；无 FSR4 INT8 实验 provider、个人配置、日志或测试媒体。审计在同目录 package-audit.json。
+
+对应源码交付使用 `E:/项目/Veyra/tmp/1.4.2beta/package-source.ps1`：从当前已跟踪工作树及明确新增文档快照生成 `Veyra-1.4.2beta-source.zip`，不直接归档尚含 FSR4 实验的 HEAD。携带沿用的 1.4.1 FFmpeg patched tree 和 RemotePlay 对应源码 ZIP；source-manifest 记录基准提交、未提交状态和所有文件 SHA256，生成后逐文件读取压缩包校验。源码包最终大小/哈希以旁侧 .sha256 和 `logs/1.4.2beta/source-package.json` 为准。
+
+产物归属：build 沿用 `build/fsr41-nvidia-20260918`；本轮 logs/tests/tmp/test-packages/verify 均用 `1.4.2beta` 子目录。保留最终包、源码、构建、截图和必要日志；交付前删除本轮便携 staging 与解压验证副本。硬件仅 RTX5070/616.56，未执行实际 HDR 屏幕、RTX30/40 HDR、采集卡和 PS5 验收。下一步由内测用户验证实际 HDR 显示及设备组合。
+
+## 2026-09-18 用户终止 FSR4 并完成回退
+
+最新请求取代此前画质修复目标：停止 FSR4 实验。隔离分支仍为 `codex/fsr41-nvidia-20260918`，main 未改。按 HDR 里程碑 `3477ed2` 恢复原有 FSR 后端和处理图，删除 FSR4 UI/mode 6、环境变量加载、INT8 格式转换、专用集成测试及 scripts/fsr41 构建工具；撤掉打包参数。保留 RTX Video HDR、实际预览状态提示、DependencyRoot 和本地 HDR 打包支持。没有继续 FSR4 算法开发、打包、合并、推送或发布。
+
+设置兼容：PresetStore 对测试版 v20 的 mode 6 迁移到 RTX Video SR 高档（3），其余参数不变；当前写入仍拒绝 6，未知值 7 仍拒绝且保护原文件。新增迁移/往返/未知值保留回归，防止撤回实验选项导致全部预设丢失。旧预设名称保持原样。
+
+修改范围：CMakeLists、THIRD_PARTY_NOTICES；SettingsWindow/AppShell；EnhancementSettings/BackendRecovery/EngineController/PresetStore/VideoExportJob；FsrSrBackend/EnhanceGraph；quality_probe、相关单元测试；package-portable；AGENTS、当前状态、方案和历史实验记录。与 3477ed2 对照，FSR 后端、图、导出、CLI 与合同测试源码已恢复一致；独立 HDR 状态和预设迁移是保留的代码差异。没有新增 SDK、DLL、模型到 Git。
+
+实际验证：
+
+- `./scripts/build-isolated.ps1 -Root . -BuildDirectory E:/项目/Veyra/build/fsr41-nvidia-20260918 -DependencyCache E:/项目/Veyra/build/video-hdr-20260918/CMakeCache.txt -TempDirectory E:/项目/Veyra/tmp/fsr41-nvidia-20260918 -Targets veyra,veyra_repair_contract_tests,veyra_repair_preset_tests`：exit 0，GUI 和两测试目标重建通过。
+- `veyra_repair_contract_tests.exe`：205 checks，0 failures。
+- `veyra_repair_preset_tests.exe E:/项目/Veyra/tests/fsr41-rollback-20260918/presets.txt`：66 历史迁移用例、退役 SR 迁移、全部字段往返及损坏文件保护通过。
+- `veyra.exe --smoke-seconds 8 --no-nr --no-fg --video-sr 3 <用户 Money.Heist MKV>`：RTX Video SR quality=3，1920x1080→3840x2160，Create `op=0 result=0x1 seh=0`；130 实帧，failed=false，25fps，exit 0；日志无 ERROR。逐帧成功 Evaluate 默认不单独打印，不冒充逐帧返回码审计或画质验收。
+- 代码/构建脚本搜索无 FSR41 provider 入口；`git diff --check` 通过。测试后无残留 Veyra 测试进程。
+
+证据目录：`E:/项目/Veyra/logs/fsr41-nvidia-20260918/` 中 `rollback-build.log`、`rollback-contracts.log`、`rollback-presets.log`、`rollback-rtx-sr.log`。临时文件仅用 `E:/项目/Veyra/tmp/fsr41-nvidia-20260918`；预设测试文件在上述 tests 目录。当前可用 GUI：`E:/项目/Veyra/build/fsr41-nvidia-20260918/veyra.exe`（目录沿用旧名，程序已回退）。
+
+历史候选 provider 和 `E:/项目/Veyra/test-packages/fsr41-ui-20260918` 未被覆盖，不能作为新版运行；保留为失败实验记录。取消前的研究证据见 FSR41_QUALITY_REPAIR 文首。HDR 显示/导出和 RTX30/40 本轮未重新执行，不扩大历史验收范围。FSR4 任务到此结束，无自动续修任务。
+
+## 2026-09-18 用户否决 FSR4 画质；停止构建并核对 HDR 预览
+
+用户反馈「明显变糊、细节丢失」，明确要求不再构建。本轮按 [画质修复记录](FSR41_QUALITY_REPAIR_2026-09-18.md) 将 FSR4 画质状态改为失败，不把此前 dispatch/非空图像通过当成质量验收。确认上游中间 tensor、scratch、shader 行距和 dispatch 固定于 1080p 输出工作类，Veyra 4K 请求只改变 PRE/POST，尺寸合同尚未正确适配。上游 HEAD 仍为 88635b9，没有现成更新解决此问题。不能断言所有模糊均由尺寸造成。
+
+执行 `tools/image_check/compare_sr.ps1` 对已有 media-baseline/media-fsr4 同帧 1080p 图片：MAE 0.40/255，蓝通道梯度比 0.974；只能作为线索。源码修改 `FsrSrBackend.cpp` 增加非 1080p 固定布局诊断；`EngineController.h/.cpp` 与 `SettingsWindow.cpp` 增加开关旁的真实 HDR 预览状态，SDR 预览明确显示转换未运行。没有修改 provider 算法，也没有完成 FSR4 画质修复。
+
+`git diff --check` 检查源码和文档；未编译、未执行新 Create/Evaluate 或 UI 运行验证、未打包、未提交/合并/推送。保留此前 UI 请求产生的改动与 `E:/项目/Veyra/test-packages/fsr41-ui-20260918` 失败复现包；既有日志/图像路径和后续修复步骤见专项记录。本轮无新构建/测试产物。下一步：统一模型尺寸布局后再做动态细节保留 A/B。
+
 ## 2026-09-18 FSR4 NVIDIA 接入、本地影片验证与测试包
 
 从 HDR 里程碑 `3477ed2` 建立分支 `codex/fsr41-nvidia-20260918`，工作区 `E:/项目/Veyra/worktrees/fsr41-nvidia-20260918`。main 保持存档 `0e3d4ac`；没有 push、Release 或合并 main。

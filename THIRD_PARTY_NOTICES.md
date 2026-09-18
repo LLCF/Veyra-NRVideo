@@ -315,27 +315,6 @@ This runtime retains the NVIDIA RTX Video SDK license; it is not relicensed unde
 Veyra's GPL. SDK/license and runtime remain external. This change does not publish
 or grant redistribution of a new runtime pack.
 
-## FSR 4.1.1 INT8 research provider (local integration, 2026-09-18)
-
-Source: https://github.com/int3rrobang/fsr4-int8-reverse-engineering
-Commit: `88635b94083965a7c3b5f64e099808b8ba2ce576`, MIT.
-Copyright and license retained in `scripts/fsr41/LICENSE.txt`.
-`scripts/fsr41/provider-veyra.patch` adapts upstream
-`bench/provider411/{provider.h,provider.cpp,frame.cpp,ffx_api_impl.cpp}`:
-six caller-selected fence-retired descriptor/CBV slots; reset on the caller
-command list with immutable clear descriptors; owned-resource destruction;
-explicit exposure instead of approximate auto-exposure. Build/provenance and
-limitations are recorded in `scripts/fsr41/README.md`.
-
-The original upstream checkout, AMD official data, extracted containers/weights,
-generated shader arrays and compiled provider remain outside Veyra Git. Local
-data source is FidelityFX SDK 2.3.0 commit
-`60f4ea81909200d8542eca14dccb2628b763a9a3`, upscaler 4.1.1.2740, SHA256
-`D0DCCCC74A43C44BA435B7A369B456E0970D8A4464E4BD683119B374F2C9FB46`.
-AMD's `docs/license.md` explicitly lists this upscaler DLL in its MIT exception.
-This does not relicense unrelated SDK files or NVIDIA/Intel runtimes. The
-provider is an experimental implementation, not AMD support for NVIDIA.
-
 ## dav1d (1.3.0 AV1 playback)
 
 FFmpeg dynamically links dav1d 1.5.4 from the pinned local vcpkg build. The portable package includes its complete aggregated copyright/license text in `licenses/DAV1D-COPYRIGHT.txt` and provenance in `licenses/DAV1D-SPDX.json`. The FFmpeg corresponding-source ZIP includes dav1d source and its vcpkg port. Upstream: https://code.videolan.org/videolan/dav1d . License set recorded by the build: Apache-2.0, BSD-2-Clause, ISC and MIT; retain all notices supplied with the source.

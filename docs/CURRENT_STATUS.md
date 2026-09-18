@@ -16,14 +16,18 @@
 
 ## 本轮开发
 
-用户授权先更新文档，再实施 RTX Video HDR 和 NVIDIA FSR 4.1.1 实验接入。按 [施工方案](VIDEO_HDR_FSR41_EXECUTION_PLAN_2026-09-18.md) 推进。
+帧同步已形成[可完全关闭的实施方案](FRAME_PACING_EXECUTION_PLAN_2026-09-18.md)：默认关闭，规划低排队、均匀呈现和经验证后开放的 Reflex 实验模式，独立保存显示同步偏好。当前仅文档，尚未施工或证明性能收益，未加入现有 1.4.2beta 测试包。
+
+RTX Video HDR 独立改动保留。用户已明确终止 NVIDIA FSR 4.1 实验并要求回退，不再执行此前 FSR4 施工和画质修复计划。
+
+**最新决定：FSR4 画质不接受，已撤掉实验入口和接入。** 原有 DLSS SR、RTX Video SR、官方 AMD FSR 保留；旧实验预设 mode 6 读取时转为 RTX Video SR 高档，保留其他参数。HDR 在 SDR 显示器预览不执行转换，保留开关旁的真实状态提示。回退构建与检查结果见 WORKLOG。
 
 - 存档提交 `0e3d4ac`，标签 `checkpoint/pre-video-hdr-fsr41-20260918`。
 - 隔离分支 `codex/video-hdr-20260918`；工作区 `E:/项目/Veyra/worktrees/video-hdr-20260918`。
 - RTX Video HDR 已接入共享图、设置和 Main10 导出；RTX 5070 / 616.56 上 Create/Evaluate、2X/4X/6X、NR+SR+6X、原生 HDR 回归、HDR 导出与缺库 SDR 回退通过。显示器 HDR 当前未开启，实际 HDR 显示、采集卡、PS5 与 RTX 30/40 未执行。
 - HDR 里程碑提交 `3477ed2`；后续隔离分支 `codex/fsr41-nvidia-20260918`，同名外部工作区。
-- NVIDIA FSR 4.1.1 INT8 provider 已完成六槽生命周期、同队列 reset、GPU 格式转换和共享图接入；RTX 5070 实际 dispatch、两次独立持续处理、奇数尺寸 D3D12 debug、影片对照及 NR+HDR+DLSS 6X 通过。它仍是显式环境变量开启的研究入口：固定 960x540 模型中间工作类、零 jitter、估计运动/常量深度；不宣称画质更好或 30/40 实卡通过。
+- NVIDIA FSR 4.1.1 INT8 的 UI、环境变量接入、后端适配、专用测试及构建/打包脚本已回退到 HDR 里程碑前的 FSR 实现。旧日志和外部研究产物只作失败实验记录，不作为当前可用功能。
 - HDR 参数页在 1280x800 窗口已目视检查，滑块数值即时更新。全部测试、限制及本地包说明见 [本地测试记录](LOCAL_HDR_FSR41_TEST_2026-09-18.md)。
-- 本轮无 push、Release 或新增运行库发布授权。
+- 用户授权本地 `1.4.2beta` 内测群包，新增已核验的官方 TrueHDR 原件；未授权 GitHub push/Release 或 Agent 代发。便携包路径、哈希及解压后实测见 WORKLOG。实际 HDR 屏幕和 RTX30/40 HDR 仍待内测。
 
 所有新产物放 `E:/项目/Veyra/`，源码/文档留在隔离工作区；逐项结果以 [WORKLOG](WORKLOG.md) 为准。
