@@ -53,6 +53,30 @@ def analyze(directory):
         lines = log_text.splitlines()
         result["wholeRunSlowEvents"] = [line for line in lines if "slow=true" in line or re.search(r"\[[\w-]*stall\]", line)]
         result["wholeRunErrors"] = [line for line in lines if "[ERROR" in line]
+        result["allocatorNegotiation"] = [line for line in lines if "[capture-buffer]" in line]
+        measuring = False
+        originals = []
+        invalid_ready = 0
+        for line in lines:
+            if "[capture-comparison] measurement-start" in line:
+                measuring = True
+            elif "[capture-comparison] measurement-end" in line:
+                measuring = False
+            elif measuring and "[capture-present-sample]" in line and "generated=false" in line:
+                fields = {k: int(v) for k, v in re.findall(r"(arrival|ready|begin|end)=([0-9]+)", line)}
+                if len(fields) != 4 or not 0 < fields["arrival"] <= fields["ready"] <= fields["begin"] <= fields["end"]:
+                    invalid_ready += 1
+                    continue
+                originals.append({
+                    "callbackToObservedReadyMs": (fields["ready"] - fields["arrival"]) / 10000,
+                    "observedReadyToPresentBeginMs": (fields["begin"] - fields["ready"]) / 10000,
+                    "presentCallMs": (fields["end"] - fields["begin"]) / 10000,
+                    "callbackToPresentEndMs": (fields["end"] - fields["arrival"]) / 10000})
+        if originals or invalid_ready:
+            result["originalFrameTrace"] = {"count": len(originals), "invalidReadyCount": invalid_ready}
+            for key in originals[0] if originals else []:
+                values = [row[key] for row in originals]
+                result["originalFrameTrace"][key] = {"p50": median(values), "p95": percentile(values, .95), "max": max(values)}
     return result
 
 

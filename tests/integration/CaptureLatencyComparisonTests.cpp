@@ -11,17 +11,24 @@
 int wmain(int argc, wchar_t** argv) {
     using namespace veyra::engine;
     using Clock = std::chrono::steady_clock;
-    if (argc != 3 && argc != 7) return 2;
-    const std::wstring backend = argc == 7 ? argv[3] : L"dlss";
-    const unsigned multiplier = argc == 7 ? _wtoi(argv[4]) : 4;
-    const bool native = argc == 7 && std::wstring_view(argv[5]) == L"native";
-    const bool resize = argc == 7 && std::wstring_view(argv[6]) == L"resize";
+    if (argc != 3 && argc != 7 && argc != 8 && argc != 9) return 2;
+    const std::wstring backend = argc >= 7 ? argv[3] : L"dlss";
+    const unsigned multiplier = argc >= 7 ? _wtoi(argv[4]) : 4;
+    const bool native = argc >= 7 && std::wstring_view(argv[5]) == L"native";
+    const bool resize = argc >= 7 && std::wstring_view(argv[6]) == L"resize";
+    const std::wstring_view profile = argc >= 8 ? argv[7] : L"4k30";
+    const unsigned bufferMode = argc == 9 ? _wtoi(argv[8]) : 0;
+    if (bufferMode > 2) return 2;
+    if (profile != L"4k30" && profile != L"1440p60") return 2;
+    const unsigned width = profile == L"1440p60" ? 2560 : 3840;
+    const unsigned height = profile == L"1440p60" ? 1440 : 2160;
+    const double fps = profile == L"1440p60" ? 60.0 : 30.0;
     if ((backend != L"dlss" && backend != L"xess") || (multiplier != 2 && multiplier != 4)) return 2;
     const int seconds = _wtoi(argv[2]);
     if (seconds < 3 || seconds > 120) return 2;
     const std::filesystem::path dir = argv[1];
     std::filesystem::create_directories(dir);
-    SetEnvironmentVariableW(L"VEYRA_VERBOSE_FRAME_LOGS", L"0");
+    SetEnvironmentVariableW(L"VEYRA_VERBOSE_FRAME_LOGS", GetEnvironmentVariableW(L"VEYRA_TEST_CAPTURE_TRACE",nullptr,0) ? L"1" : L"0");
     veyra::Logger::instance().openFile((dir / L"engine.log").wstring());
     veyra::Logger::instance().setConsoleEnabled(false);
     if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) return 2;
@@ -29,10 +36,14 @@ int wmain(int argc, wchar_t** argv) {
     const auto device = std::find_if(devices.begin(), devices.end(), [](const auto& d) { return d.name == L"VC-007PRO"; });
     if (device == devices.end()) { std::cout << "FAIL VC-007PRO missing" << std::endl; return 3; }
     const auto formats = veyra::source::CaptureCardSource::formatsByPath(device->path);
-    const auto format = std::find_if(formats.begin(), formats.end(), [](const auto& f) {
-        return f.width == 3840 && f.height == 2160 && std::abs(f.fps - 30) < .01 && f.label.find(L"NV12") != std::wstring::npos;
+    const auto format = std::find_if(formats.begin(), formats.end(), [&](const auto& f) {
+        return f.width == width && f.height == height && std::abs(f.fps - fps) < .1 && f.label.find(L"NV12") != std::wstring::npos;
     });
-    if (format == formats.end()) { std::cout << "FAIL 4K30 NV12 missing" << std::endl; return 3; }
+    if (format == formats.end()) {
+        std::cout << "FAIL requested NV12 format missing: " << width << 'x' << height << '@' << fps << std::endl;
+        for (const auto& f : formats) std::wcout << f.index << L" " << f.label << std::endl;
+        return 3;
+    }
     const auto audios = veyra::source::CaptureCardSource::deviceDetails(true);
     const auto audio = std::find_if(audios.begin(), audios.end(), [](const auto& a) {
         return a.wasapi && a.name.find(L"HDMI (VC-007PRO)") != std::wstring::npos;
@@ -46,9 +57,9 @@ int wmain(int argc, wchar_t** argv) {
     MONITORINFOEXW monitor{}; monitor.cbSize = sizeof(monitor);
     GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &monitor);
     DEVMODEW dm{}; dm.dmSize = sizeof(dm); EnumDisplaySettingsW(monitor.szDevice, ENUM_CURRENT_SETTINGS, &dm);
-    std::cout << "capture=VC-007PRO input=3840x2160 fps=" << format->fps << " NV12 formatIndex=" << format->index
-        << " audio=WASAPI-muted NR=" << (native ? "native4K" : "realtime1080") << " FG=" << (backend == L"xess" ? "XeSS" : "DLSS") << multiplier
-        << " resize=" << resize << " SR=off sync=default-off window=1280x760 display="
+    std::cout << "capture=VC-007PRO input=" << width << 'x' << height << " fps=" << format->fps << " NV12 formatIndex=" << format->index
+        << " audio=WASAPI-muted NR=" << (native ? "native" : "realtime1080") << " FG=" << (backend == L"xess" ? "XeSS" : "DLSS") << multiplier
+        << " bufferMode=" << bufferMode << " resize=" << resize << " SR=off sync=default-off window=1280x760 display="
         << dm.dmPelsWidth << 'x' << dm.dmPelsHeight << '@' << dm.dmDisplayFrequency << std::endl;
     int failures = 0;
     auto check = [&](bool ok, const char* label) { std::cout << (ok ? "PASS " : "FAIL ") << label << std::endl; failures += !ok; };
@@ -57,6 +68,7 @@ int wmain(int argc, wchar_t** argv) {
         EngineController engine;
         engine.setVolume(0, true);
         EnhancementSettings settings; settings.nr = true; settings.sr = false; settings.multiplier = multiplier;
+        settings.captureBuffer = static_cast<veyra::source::CaptureBufferMode>(bufferMode);
         settings.frameGenerationBackend = backend == L"xess" ? FrameGenerationBackend::XeSS : FrameGenerationBackend::Dlss;
         if (native) settings.nrPolicy = veyra::pipeline::NrSizePolicy::Native;
         engine.open(window, path, PlayerOptions::from(settings));
@@ -83,6 +95,7 @@ int wmain(int argc, wchar_t** argv) {
             csv << "wall,frames,received,dropped,generated,nr,fg,multiplier,limited,callbackFps,submitFps,ageMs,ageP95,readAgeMs,realPresented,generatedPresented,fgSkipped,fgExpired,slotWaits,readyMeanMs,deadlineMeanMs,presentMeanMs,colorMeanMs,flowMeanMs,nrMeanMs,residualMeanMs,fgMeanMs,graphMeanMs\n";
             const auto first = engine.snapshot();
             auto last = first;
+            veyra::log::info("capture-comparison", "measurement-start");
             const auto start = Clock::now();
             bool active = true;
             unsigned resizeStep = 0;
@@ -110,12 +123,16 @@ int wmain(int argc, wchar_t** argv) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
             const double elapsed = std::chrono::duration<double>(Clock::now() - start).count();
+            veyra::log::info("capture-comparison", "measurement-end");
             std::cout << "elapsed=" << elapsed << " receivedDelta=" << last.captureReceived - first.captureReceived
                 << " droppedDelta=" << last.captureDropped - first.captureDropped << " nrDelta=" << last.nrEvaluated - first.nrEvaluated
                 << " generatedDelta=" << last.generated - first.generated << " realPresentedDelta="
                 << last.metrics.flow.counters.realPresented - first.metrics.flow.counters.realPresented << std::endl;
             check(!last.failed && elapsed >= seconds && last.frames > first.frames + 10, "full measurement");
             check(active && last.nrEvaluated > first.nrEvaluated && last.generated > first.generated, "NR and requested FG continuously active");
+            const double measuredFps = double(last.captureReceived - first.captureReceived) / elapsed;
+            std::cout << "measuredCallbackFps=" << measuredFps << std::endl;
+            check(std::abs(measuredFps - fps) < fps * .05, "actual callback rate matches requested capture rate");
         }
         engine.stop(); check(wait([&](const auto&) { return engine.idle(); }, 15000), "clean stop");
     }
