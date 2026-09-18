@@ -1,5 +1,11 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-18 仅项目产物清理完成
+
+用户授权“清理项目的即可”。执行 `out/tmp/cleanup-project-20260918.ps1`，仅清理既定第一批 B：旧 `out/releases`、`out/format-matrix`、8 个旧 build 子目录、`C:/veyra-test-packages` 与 `C:/veyra-releases/1.4.1-verify`，共 12 个目录、32,788,183,466 字节逻辑文件。删除前验证绝对路径边界、无重解析点、无 Git 跟踪文件及无活动 Veyra/构建进程；先复制并核对 SHA-256，保留 1,478 份日志、脚本、清单及图片记录，37,294,081 字节。
+
+脚本 exit0；C 盘可用空间 83,503,620,096 → 116,270,673,920 字节，观测增加约 30.52 GiB。当前 `scheduling-audit-20260918/veyra.exe` 和三个 1.4.1 发布 ZIP 前后 SHA-256 一致，源码、SDK/runtime、依赖、当前构建、最终包及验收证据路径仍存在。未清其他应用缓存、整项目 ZIP、私人素材、分支或 worktree。记录在 `out/cleanup-audit-20260918/project-cleanup-result.json`、`project-cleanup-deleted.csv`、`preserved-project-records.csv`，保留文件在同目录 `preserved-project-records/`。未改运行代码，本轮无构建或 RTX 执行；不以文件检查替代运行验证。桌面清单已标明实际清理结果。
+
 ## 2026-09-18 圆刚与 Smooth Motion 收尾、磁盘清理审计
 
 用户决定圆刚方案结束，Smooth Motion 已确认可用。圆刚 worktree 原有未提交诊断工具（`CMakeLists.txt`、`tools/avermedia_probe/main.cpp`）独立提交 `8819ca8`，标签 `checkpoint/avermedia-closed-20260918`；未合入 main。Smooth Motion 历史实验 `27c17eb` 标记为 `checkpoint/smooth-motion-closed-20260918`，普通版现行策略保持。两份对应说明文档补充收尾状态，不扩大实卡验收结论。
