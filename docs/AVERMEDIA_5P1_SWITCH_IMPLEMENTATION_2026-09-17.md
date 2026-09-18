@@ -307,3 +307,50 @@ delivery 短测：PASS（logs\delivery\ac2283ab2a9d4f9e90738120ad79aada\result.j
 往上找到第一个含 `runtime_local` 的目录，于是两个会话**共用同一份 UI 设置/预设**：门禁里的
 `--smoke-color` 因此出现一次假失败（共享状态漂移），改成"只硬链接运行库、不共享状态文件"后复跑
 PASS。隔离工作区可以共享二进制依赖，**不能共享状态**。
+
+---
+
+## 附录 D：第二次真机日志（5.1.log）与修复
+
+### D1 这次进步很大：卡被认出来了
+
+```
+[capture-audio-vendor] device tree: instance="USB\VID_07CA&PID_2553&MI_02\9&249B832B&0&0002" friendly="Live Gamer Ultra 2.1-Audio"
+[capture-audio-vendor] device tree: instance="USB\VID_07CA&PID_2553&MI_00\9&249B832B&0&0000" friendly="Live Gamer Ultra 2.1-Video"
+[capture-audio-vendor] using device-tree audio function instance="USB\VID_07CA&PID_2553&MI_02\..." for selected device="HDMI/Line In (Live Gamer Ultra 2.1-Audio)"
+[capture-audio-vendor] non-PCM switch unavailable ... componentFound=1 dllsLoaded=1 detail="card not reached: getAudioFormat ret=5"
+```
+
+设备树兜底生效（r2 的修复方向正确），组件也加载了，但 SDK 没能跟卡说上话。
+
+### D2 反汇编给出的两条线索
+
+1. **名字**：`DeviceOpenerParam::getDeviceSwitchParam` 里有 `-Audio` / `-Video` 两个常量——它把
+   名字里的 `-Audio` 换成 `-Video` 去找 UVC 设备。我们当时传的是 DirectShow 端点名
+   `HDMI/Line In (Live Gamer Ultra 2.1-Audio)`，换完变成
+   `HDMI/Line In (Live Gamer Ultra 2.1-Video)`，而真实视频功能叫 `Live Gamer Ultra 2.1-Video`
+   —— **对不上**。现在改用设备树里的 `Live Gamer Ultra 2.1-Audio`。
+2. **路径**：同类函数找的是 `\\?\` 前缀与 `#{` 分隔符；我们传的真实接口路径
+   `\\?\usb#vid_07ca&pid_2553&mi_02#...#{...}\global` 同时具备这两者，**方向是对的**。
+
+### D3 本轮修复
+
+1. **接上厂商自己的日志**（`DeviceOpener::SetLogHandler`，带 SEH/异常兜底）：下次失败日志里会出现
+   `vendor: DeviceOpener::OpenDevice, SDK setDevice ret: N` 这类行，直接指出是哪一步被拒。
+   本机用真实组件验证过：这些行确实进了 Veyra 日志（`vendor: DeviceOpener::OpenDevice, devicePath: ...`
+   `vendor: DeviceOpener::OpenDevice, SDK setDevice ret: 4`）。
+2. **补上 `initialize()` 之后的 1 秒等待**：厂商插件在初始化后固定 `Sleep(1000)` 才动手，
+   拆除时也是 `closePort → Sleep(1000) → uninitialize`。我方原先初始化完立刻切卡——这是最可疑的
+   失败原因，已按厂商节奏对齐。
+3. **同一次连接内多试一个功能**：音频功能被拒时，自动改用卡的另一个 USB 功能再试一次（不用多跑一趟）。
+4. 名字统一取设备树的 `...-Audio`，并在日志里同时保留 DirectShow 名字以便对照。
+
+### D4 本机验证
+
+```
+veyra_avermedia_switch_tests：PASS（真实组件在场时能读到 vendor: 行，无卡时 getAudioFormat ret=5）
+veyra_iec61937_probe_tests：PASS
+delivery 短测：PASS（logs\delivery\7028a66ae7b24f6581993ac60de9dafc\result.json）
+```
+
+仍未验证：真卡上的实际切换结果。r3 包把能自证的都自证了，剩下这一步只能由带卡的机器回答。

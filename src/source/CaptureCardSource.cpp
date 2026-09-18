@@ -698,6 +698,7 @@ bool CaptureCardSource::configure(const SourceOpenDesc& desc){close();p_->lastAu
 bool CaptureCardSource::applyVendorAudioSwitch(const std::wstring& audioName,const std::wstring& audioPath){
     auto& p=*p_;
     std::wstring name=audioName,path=audioPath;
+    bool applied=false;
     if(!AverMediaAudioSwitch::isAverMediaDevicePath(path)){
         // These cards' DirectShow audio monikers often carry no DevicePath, so
         // the stored path is the class-manager display name
@@ -715,12 +716,33 @@ bool CaptureCardSource::applyVendorAudioSwitch(const std::wstring& audioName,con
                 narrowForLog(name),pathTag(path)));
             return false;
         }
-        if(name.empty())name=chosen->friendlyName;
+        // Use the *device-tree* name, not the DirectShow endpoint name. The
+        // component turns the UVC name into the camera name by replacing
+        // "-Audio" with "-Video"; the DirectShow name here is
+        // "HDMI/Line In (Live Gamer Ultra 2.1-Audio)", which would map to
+        // "HDMI/Line In (Live Gamer Ultra 2.1-Video)" and never match the real
+        // "Live Gamer Ultra 2.1-Video" function.
+        const std::wstring directShowName=name;
+        if(!chosen->friendlyName.empty())name=chosen->friendlyName;
         path=chosen->interfacePath.empty()?chosen->instanceId:chosen->interfacePath;
-        log::info("capture-audio-vendor",std::format("using device-tree audio function instance=\"{}\" for selected device=\"{}\"",
-            narrowForLog(chosen->instanceId),narrowForLog(name)));
+        log::info("capture-audio-vendor",std::format("using device-tree audio function instance=\"{}\" name=\"{}\" (directShowName=\"{}\")",
+            narrowForLog(chosen->instanceId),narrowForLog(name),narrowForLog(directShowName)));
+        // One hedge, no extra round trip: if the audio function is refused, try
+        // the card's other USB function before giving up. The component maps
+        // "-Audio" to "-Video" internally, so both are plausible inputs.
+        applied=p.averMediaSwitch.apply(name,path);
+        if(!applied){
+            for(const auto& function:functions){
+                if(&function==chosen)continue;
+                std::wstring fallbackName=function.friendlyName.empty()?directShowName:function.friendlyName;
+                const std::wstring fallbackPath=function.interfacePath.empty()?function.instanceId:function.interfacePath;
+                log::info("capture-audio-vendor",std::format("retrying switch with function instance=\"{}\" name=\"{}\"",
+                    narrowForLog(function.instanceId),narrowForLog(fallbackName)));
+                if(p.averMediaSwitch.apply(fallbackName,fallbackPath)){applied=true;name=fallbackName;path=fallbackPath;break;}
+            }
+        }
     }
-    const bool applied=p.averMediaSwitch.apply(name,path);
+    else applied=p.averMediaSwitch.apply(name,path);
     const auto& status=p.averMediaSwitch.status();
     if(applied){
         log::info("capture-audio-vendor",std::format("non-PCM switch armed device=\"{}\" component=\"{}\" chipFormat={} nonPcmNow={} monitoring={}",
