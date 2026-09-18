@@ -1,5 +1,11 @@
 # 2026-09-11 继续修复目标模式执行中
 
+## 2026-09-18 外部残留清理与统一产物根目录
+
+用户授权删除上一轮列出的项目外残留，并指定今后产物统一放在 `E:/项目/Veyra/`。执行 `E:/项目/Veyra/tmp/cleanup-external-20260918.ps1` exit0：删除 Downloads 中 9 个 Veyra ZIP、Temp 中 143 个 Veyra 项、7 个 Veyra 崩溃转储、E 盘 1.3.0/1.4.0 旧便携目录，以及旧 RemotePlay 对应源码中间 ZIP 和校验旁文件，共 163 项、6,641,615,214 字节。删除前逐项验证允许的绝对路径、父路径与内容无重解析点、无 Veyra/构建进程；使用 PowerShell LiteralPath 删除，不清理其他软件或系统配置。
+
+当前 EXE、最终三个发布 ZIP 及 LocalAppData/Veyra 用户配置逐文件哈希前后一致，`C:/veyra-deps` 保留。C 盘空闲 144,636,190,720 → 149,903,597,568 字节，E 盘 1,189,589,352,448 → 1,190,966,996,992 字节。明细与结果在 `E:/项目/Veyra/logs/cleanup-external-20260918/{plan.csv,deleted.csv,result.json}`。AGENTS.md 新增统一产物根目录、用途子目录、旧脚本输出参数、进程级 TEMP/TMP、既有依赖迁移验证及系统自动产物边界；未改变应用用户配置路径，未迁移当前构建依赖，未修改运行代码。本轮只做清理及规则更新，不构建、不运行 RTX 测试；通过 git diff --check 后本地提交，无推送或发布。
+
 ## 2026-09-18 仅项目产物清理完成
 
 用户授权“清理项目的即可”。执行 `out/tmp/cleanup-project-20260918.ps1`，仅清理既定第一批 B：旧 `out/releases`、`out/format-matrix`、8 个旧 build 子目录、`C:/veyra-test-packages` 与 `C:/veyra-releases/1.4.1-verify`，共 12 个目录、32,788,183,466 字节逻辑文件。删除前验证绝对路径边界、无重解析点、无 Git 跟踪文件及无活动 Veyra/构建进程；先复制并核对 SHA-256，保留 1,478 份日志、脚本、清单及图片记录，37,294,081 字节。
