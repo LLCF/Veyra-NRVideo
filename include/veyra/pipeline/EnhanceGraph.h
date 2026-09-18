@@ -409,7 +409,9 @@ private:
     std::unique_ptr<ngx::TrueHdrBackend> videoHdrBackend_;
     std::unique_ptr<ngx::DlssFgBackend> fgBackend_;
     std::unique_ptr<gfx::FsrSrBackend> fsrSrBackend_;
+    bool fsrSrResetPending_ = true;
     ComPtr<ID3D12Resource> fsrSrDepth_, upFsrSrDepth_;
+    ComPtr<ID3D12Resource> fsr41Input_, fsr41Output_;
     size_t fsrSrDepthPitch_=0;
     NVSDK_NGX_Parameter* ngxParams_ = nullptr;
     NVSDK_NGX_Handle* nrHandle_ = nullptr;

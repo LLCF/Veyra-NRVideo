@@ -3,12 +3,16 @@ param(
   [Parameter(Mandatory = $true)][ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version,
   [Parameter(Mandatory = $true)][string]$OutputDirectory,
   [string]$BuildDirectory,
+  [string]$DependencyRoot,
+  [switch]$LocalVideoHdr,
   # Suffix used only for the staging/archive name (e.g. "beta" -> Veyra-1.3.1beta-win64-portable).
   # The numeric $Version still names the docs and must match the EXE's numeric parts.
   [string]$Label = ''
 )
 $ErrorActionPreference = 'Stop'
 $resolvedRoot = (Resolve-Path -LiteralPath $Root).Path
+$resolvedDependencies = $resolvedRoot
+if ($DependencyRoot) { $resolvedDependencies = (Resolve-Path -LiteralPath $DependencyRoot).Path }
 $resolvedOutput = [IO.Path]::GetFullPath($OutputDirectory)
 $bin = Join-Path $resolvedRoot 'out/build/x64-release'
 if ($BuildDirectory) { $bin = (Resolve-Path -LiteralPath $BuildDirectory).Path }
@@ -59,8 +63,12 @@ if ([version]$Version -ge [version]'1.3.1') {
 if ([version]$Version -ge [version]'1.1.1') {
   $runtimeFiles += @{ Name='nvngx_dlssnr.dll'; Folder='runtime/experimental/nr-ampere'; Source='runtime_local/nvidia/nr-ampere/nvngx_dlssnr.dll'; Hash='DCC0DC2414AEDEC4A8E084647070383BE068554042587180C20C784D4772D36F'; Signature='HashMismatch'; Size=165840496; Version='310.8.0.0'; Category='user-provided-NeuralScreen-1.8.2-modified-RTX30-experimental-runtime'; Experimental=$true }
 }
+if ($LocalVideoHdr) {
+  if (-not $Label) { throw 'Local HDR package requires an explicit test label.' }
+  $runtimeFiles += @{ Name='nvngx_truehdr.dll'; Folder='runtime/experimental'; Source='third_party_local/nvidia/RTX_Video_SDK_1.1.0/bin/Windows/x64/rel/nvngx_truehdr.dll'; Hash='9A80575F247190C05FE80EAC0C4BAA1D0D4D932348F26808310B5EC4BF9EEB4B'; Size=3955752; Version='1.1.0.0'; Category='official-rtx-video-sdk-1.1.0-local-evaluation'; Experimental=$true }
+}
 $records = foreach ($item in $runtimeFiles) {
-  $source = Join-Path $resolvedRoot $item.Source
+  $source = Join-Path $resolvedDependencies $item.Source
   $file = Get-Item -LiteralPath $source
   $hash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
   $sig = Get-AuthenticodeSignature -LiteralPath $source
@@ -108,7 +116,7 @@ foreach ($name in @('LICENSE','NOTICE','PROVENANCE.md','VEYRA_INTEGRATION.md')) 
 foreach ($notice in Get-ChildItem -LiteralPath (Join-Path $resolvedRoot 'third_party/gpu-dis/licenses') -File) {
   Copy-Payload $notice.FullName "licenses/gpu-dis/licenses/$($notice.Name)"
 }
-Copy-Payload (Join-Path $resolvedRoot 'runtime_local/config/ngx-local.json') 'runtime/config/ngx-local.json'
+Copy-Payload (Join-Path $resolvedDependencies 'runtime_local/config/ngx-local.json') 'runtime/config/ngx-local.json'
 Copy-Payload (Join-Path $ffmpegRoot 'share/ffmpeg/copyright') 'licenses/FFMPEG-COPYRIGHT.txt'
 Copy-Payload (Join-Path $ffmpegRoot 'share/ffmpeg/vcpkg.spdx.json') 'licenses/FFMPEG-SPDX.json'
 if ($applicationFiles -contains 'dav1d.dll') {
@@ -132,14 +140,14 @@ Copy-Payload (Join-Path $resolvedRoot 'assets/icons/lucide/LICENSE') 'licenses/L
 foreach ($name in @('RTX40MFG_LICENSE.txt','HDE_LICENSE.txt')) {
   Copy-Payload (Join-Path $resolvedRoot "src/ngx/compat/$name") "licenses/$name"
 }
-Copy-Payload (Join-Path $resolvedRoot 'third_party_local/nvidia/DLSS_repo/LICENSE.txt') 'licenses/NVIDIA_RTX_SDK_LICENSE.txt'
-Copy-Payload (Join-Path $resolvedRoot 'third_party_local/nvidia/RTX_Video_SDK_1.1.0/NVIDIA_RTX_Video_SDK_License.pdf') 'licenses/NVIDIA_RTX_VIDEO_SDK_LICENSE.pdf'
-Copy-Payload (Join-Path $resolvedRoot 'third_party_local/nvidia/Optical_Flow_SDK_5.0.7/LicenseAgreement.pdf') 'licenses/NVIDIA_OPTICAL_FLOW_SDK_LICENSE.pdf'
+Copy-Payload (Join-Path $resolvedDependencies 'third_party_local/nvidia/DLSS_repo/LICENSE.txt') 'licenses/NVIDIA_RTX_SDK_LICENSE.txt'
+Copy-Payload (Join-Path $resolvedDependencies 'third_party_local/nvidia/RTX_Video_SDK_1.1.0/NVIDIA_RTX_Video_SDK_License.pdf') 'licenses/NVIDIA_RTX_VIDEO_SDK_LICENSE.pdf'
+Copy-Payload (Join-Path $resolvedDependencies 'third_party_local/nvidia/Optical_Flow_SDK_5.0.7/LicenseAgreement.pdf') 'licenses/NVIDIA_OPTICAL_FLOW_SDK_LICENSE.pdf'
 if ([version]$Version -ge [version]'1.3.1') {
   # MIT licence of the FidelityFX SDK that ships the AMD runtime above.
-  $amdLicense = Join-Path $resolvedRoot 'third_party_local/amd/FidelityFX-SDK-2.3.0/docs/license.md'
+  $amdLicense = Join-Path $resolvedDependencies 'third_party_local/amd/FidelityFX-SDK-2.3.0/docs/license.md'
   if (-not (Test-Path -LiteralPath $amdLicense -PathType Leaf)) {
-    $amdLicense = Join-Path $resolvedRoot 'third_party_local/amd/FidelityFX-SDK-2.3.0/Kits/FidelityFX/docs/license.md'
+    $amdLicense = Join-Path $resolvedDependencies 'third_party_local/amd/FidelityFX-SDK-2.3.0/Kits/FidelityFX/docs/license.md'
   }
   if (Test-Path -LiteralPath $amdLicense -PathType Leaf) {
     Copy-Payload $amdLicense 'licenses/AMD-FIDELITYFX-LICENSE.txt'
@@ -147,15 +155,20 @@ if ([version]$Version -ge [version]'1.3.1') {
     throw 'AMD FidelityFX licence text not found in the vendored SDK'
   }
 }
-Copy-Payload (Join-Path $resolvedRoot 'third_party_local/intel/xess-3.0.2/LICENSE.txt') 'licenses/INTEL_XESS_LICENSE.txt'
-Copy-Payload (Join-Path $resolvedRoot 'third_party_local/intel/xess-3.0.2/third-party-programs.txt') 'licenses/INTEL_THIRD_PARTY_PROGRAMS.txt'
-Copy-Payload (Join-Path $resolvedRoot 'third_party_local/amd/FidelityFX-SDK/LICENSE.txt') 'licenses/AMD_FIDELITYFX_LICENSE.txt'
-foreach ($item in $runtimeFiles) { Copy-Payload (Join-Path $resolvedRoot $item.Source) "$($item.Folder)/$($item.Name)" }
+Copy-Payload (Join-Path $resolvedDependencies 'third_party_local/intel/xess-3.0.2/LICENSE.txt') 'licenses/INTEL_XESS_LICENSE.txt'
+Copy-Payload (Join-Path $resolvedDependencies 'third_party_local/intel/xess-3.0.2/third-party-programs.txt') 'licenses/INTEL_THIRD_PARTY_PROGRAMS.txt'
+Copy-Payload (Join-Path $resolvedDependencies 'third_party_local/amd/FidelityFX-SDK/LICENSE.txt') 'licenses/AMD_FIDELITYFX_LICENSE.txt'
+foreach ($item in $runtimeFiles) { Copy-Payload (Join-Path $resolvedDependencies $item.Source) "$($item.Folder)/$($item.Name)" }
+if ($LocalVideoHdr) {
+  Copy-Payload (Join-Path $resolvedRoot 'docs/LOCAL_HDR_FSR41_TEST_2026-09-18.md') 'LOCAL_TEST.md'
+  Copy-Payload (Join-Path $resolvedRoot 'scripts/fsr41/README.md') 'docs/FSR41_EXPERIMENT.md'
+  Copy-Payload (Join-Path $resolvedRoot 'scripts/fsr41/LICENSE.txt') 'licenses/FSR41-PROVIDER-LICENSE.txt'
+}
 $manifestFolders = @('runtime/experimental','runtime_local/intel/experimental')
 if ([version]$Version -ge [version]'1.3.1') { $manifestFolders += 'runtime_local/amd/fidelityfx' }
 foreach ($folder in $manifestFolders) {
   $relative = "$folder/release-runtime-manifest.json"
-  [ordered]@{schema=1;package="Veyra $Version";mode='user-authorized-runtime-pack';enforcedAtRuntime=$false;warning='Community experimental integration; not vendor certification or endorsement.';files=@($records | Where-Object {$_.path.StartsWith("$folder/")})} | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $stage $relative) -Encoding UTF8
+  [ordered]@{schema=1;package="Veyra $Version$Label";mode=$(if($LocalVideoHdr){'local-evaluation-only'}else{'user-authorized-runtime-pack'});enforcedAtRuntime=$false;warning='Community experimental integration; not vendor certification or endorsement.';files=@($records | Where-Object {$_.path.StartsWith("$folder/")})} | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $stage $relative) -Encoding UTF8
   $allowed.Add($relative)
 }
 $payload = @(Get-ChildItem -LiteralPath $stage -Recurse -File)

@@ -70,7 +70,7 @@ FSR 4.1 provider 的官方 DLL、SDK 路径和 SHA-256 在开工时重新登记�
 - 输出使用 RGB10 PQ/BT.2020 或 FP16 scRGB 的一种明确路径；首个产品闭环优先 RGB10/PQ，以匹配已有 HDR10/HEVC 输出。
 - 所有返回值、SEH、资源尺寸/格式、GPU 时间和失败参数进入日志；不照搬样例的逐帧 CPU 阻塞等待。
 
-TrueHDR 每个源帧最多执行一次，结果进入后续 FG。暂停、seek、resize、源切换、显示器 HDR 切换、device lost 和退出必须释放/重建 Feature 与资源。
+TrueHDR 每个源帧最多执行一次，结果进入后续 FG。实际 SDK 没有时序 reset 参数；暂停/seek 复用同一逐帧 Feature，其他历史模块仍按图合同 reset。尺寸、源、输出 HDR 状态及设备生命周期变化时随图释放/重建，退出释放。不能为暂停/seek 的每次刷新引入额外 CPU/GPU 等待。
 
 ### A3. 接入共享 EnhanceGraph
 
@@ -128,7 +128,7 @@ Video HDR 阶段只有在“播放不回退错误、导出可解码、颜色 met
 
 ### B2. Veyra 适配层
 
-新增实验 `Fsr41NvidiaBackend`，复用 `FsrSrBackend` 的 graph 入口和资源生命周期，但不把 4.1 provider 伪装成现有 AMD 3.1 provider：
+在现有 `FsrSrBackend` 内新增显式实验 provider 分支，复用 graph 入口和资源生命周期；由绝对路径、精确版本与调用方槽位 ABI 区分，不另建重复 backend，也不把 4.1 provider 伪装成现有 AMD 3.1 provider：
 
 - provider 路径、版本、哈希和实验状态显式记录。
 - 查询版本后只选择确实为 4.1.1 INT8 的 provider；未知版本拒绝创建。
@@ -171,7 +171,7 @@ FSR 4.1 实验不修改 NVAPI 伪装、DLSS MFG 解锁或现有 FG 调度；这�
 3. 完成 Main10 导出、字幕/OSD、设置保存、回退和专项日志。
 4. 运行 Video HDR 自动门与实机矩阵；未通过项写明，不用旧 HDR 记录替代。
 5. 从 HDR 稳定提交建立 FSR4 实验分支，构建上游 provider smoke。
-6. 接入 Fsr41NvidiaBackend 和独立探针，完成 A/B 与硬件矩阵。
+6. 接入 FsrSrBackend 实验分支和独立探针，完成本机 A/B 并记录硬件矩阵缺项。
 7. 只有两阶段证据齐全后才讨论 UI 默认项、Release runtime 和版本号。
 
 ## 执行记录
@@ -180,4 +180,4 @@ FSR 4.1 实验不修改 NVAPI 伪装、DLSS MFG 解锁或现有 FG 调度；这�
 
 RTX 5070 / 616.56：Create/Evaluate/Release 0x1、SEH 0；HDR 独立、2X/4X/6X、NR+DLSS SR+6X、原生 HDR 回归通过。90 帧导出为 Main10/P010 等价编码、BT.2020/PQ，开发期 ffprobe/解码通过；移走 TrueHDR 后导出 SDR 通过。预设 roundtrip/迁移通过。实际 HDR 显示（当前 Windows HDR 未开启）、跨屏、物理采集、PS5 和 RTX 30/40 未执行，不据离屏测试宣称全链路实卡验收。
 
-FSR provider 已从固定上游提交在外部目录生成/构建，CPU smoke 通过，尚无 GPU 结果。发现三组 CBV/descriptor 的生命周期不能覆盖 Veyra command ring，以及 reset 使用私有队列；B 阶段先修这些合同。命令、数据和路径见 WORKLOG。
+FSR provider 已从固定上游提交在外部目录生成/构建，完成六槽资源与同队列 reset 适配。CPU smoke、RTX 5070 真实影片和合成序列、奇数尺寸、NR+HDR+6X 组合均通过；首次创建耗时 23.7 秒，后续进程约 0.5 秒，不能忽略冷启动成本。画质尚未通过正式开放标准，保持诊断入口；30/40、实际 HDR 显示和完整动态场景矩阵未执行。实际命令和结果见 WORKLOG 与 LOCAL_HDR_FSR41_TEST_2026-09-18.md。

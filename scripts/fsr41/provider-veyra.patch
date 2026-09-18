@@ -1,0 +1,224 @@
+diff --git a/bench/provider411/ffx_api_impl.cpp b/bench/provider411/ffx_api_impl.cpp
+index e8648a1..ca5b0d3 100644
+--- a/bench/provider411/ffx_api_impl.cpp
++++ b/bench/provider411/ffx_api_impl.cpp
+@@ -60,6 +60,7 @@ struct Ffx411Context {
+     uint32_t maxRenderW = 0, maxRenderH = 0, maxUpscaleW = 0, maxUpscaleH = 0;
+     uint32_t createFlags = 0;
+     uint64_t frameIndex = 0;
++    int callerSlot = -1;
+     bool needsReset = true;
+     ffxApiMessage msgFn = nullptr;
+     // P4.1 live constants: previous-frame jitter (for MV jitter cancellation)
+@@ -416,6 +417,13 @@ FFX_API_ENTRY ffxReturnCode_t ffxDestroyContext(ffxContext* context, const ffxAl
+     return FFX_API_RETURN_OK;
+ }
+
++// ABI 1: caller acquires a fence-protected command slot before every dispatch.
++extern "C" __declspec(dllexport) uint32_t veyraFsr411SetSlot(ffxContext* context, uint32_t slot, uint32_t abi) {
++    if (!context || !*context || abi != 1 || slot >= fsr411::Provider::kFrameSlots) return 0;
++    reinterpret_cast<Ffx411Context*>(*context)->callerSlot = int(slot);
++    return 1;
++}
++
+ FFX_API_ENTRY ffxReturnCode_t ffxConfigure(ffxContext* context, const ffxConfigureDescHeader* desc) {
+     if (!desc) return FFX_API_RETURN_ERROR_PARAMETER;
+     if (desc->type == FFX_API_CONFIGURE_DESC_TYPE_GLOBALDEBUG1) {
+@@ -521,15 +529,20 @@ FFX_API_ENTRY ffxReturnCode_t ffxDispatch(ffxContext* context, const ffxDispatch
+     }
+
+     std::string err;
++    const int ring = ctx->callerSlot;
++    ctx->callerSlot = -1;
++    if (ring < 0 || wantAE) {
++        Msg(ctx, L"Veyra provider requires caller slot ABI 1 and explicit exposure=1 (no approximate AE)");
++        return FFX_API_RETURN_ERROR_PARAMETER;
++    }
+     if (getenv("ORACLE_NOZERO")) ctx->needsReset = false;
+     const bool didZero = (d->reset || ctx->needsReset);
+     if (didZero && !getenv("ORACLE_NOZERO")) {
+-        if (!ctx->provider.ZeroFrameState(&err)) {
++        if (!ctx->provider.RecordZeroFrameState(cl, &err)) {
+             return FFX_API_RETURN_ERROR_RUNTIME_ERROR;
+         }
+         ctx->needsReset = false;
+     }
+-    const int ring = (int)(ctx->frameIndex % 3);
+     // P4.1 live constants: the embedded CBVs carry the captured frame's
+     // jitter/scale/exposure; reusing them verbatim breaks every live frame's
+     // temporal feedback (ghosting -> accumulation blowout). Patch this ring's
+diff --git a/bench/provider411/frame.cpp b/bench/provider411/frame.cpp
+index a0f2124..23298fe 100644
+--- a/bench/provider411/frame.cpp
++++ b/bench/provider411/frame.cpp
+@@ -165,7 +165,7 @@ bool Provider::CreateFrameShells(const uint8_t* preCbv, size_t npre,
+     if (!CreateUpload(device_, postCbv, npost, &postCbv1_, err)) return false;
+     if (!SetTensorCbBytes(tensor, ntensor, err)) return false;
+     // Ring heaps (views written per dispatch by BuildFrameHeaps).
+-    for (int r = 0; r < 3; ++r) {
++    for (int r = 0; r < kFrameSlots; ++r) {
+         D3D12_DESCRIPTOR_HEAP_DESC hd = {};
+         hd.NumDescriptors = 31; hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+         hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+@@ -177,7 +177,7 @@ bool Provider::CreateFrameShells(const uint8_t* preCbv, size_t npre,
+     }
+     // P4.1 live-constant rings (upload heaps, CPU-visible) seeded from the
+     // measured exports; per-frame fields patched by PatchFrameCbvs.
+-    for (int r = 0; r < 3; ++r) {
++    for (int r = 0; r < kFrameSlots; ++r) {
+         if (!CreateUpload(device_, preCbv, npre, &framePreCbv_[r], err)) return false;
+         if (!CreateUpload(device_, postCbv, npost, &framePostCbv_[r], err)) return false;
+     }
+@@ -241,7 +241,7 @@ bool Provider::PatchFrameCbvs(int ring, float jx, float jy, float mvx, float mvy
+                               float preExp, float prevPreExp, std::string* err,
+                               uint32_t rw, uint32_t rh,
+                               uint32_t uw, uint32_t uh) {
+-    if (ring < 0 || ring > 2) FSR411_THROW(err, "ring out of range");
++    if (ring < 0 || ring >= kFrameSlots) FSR411_THROW(err, "ring out of range");
+     if (rw == 0 || rh == 0 || uw == 0 || uh == 0) FSR411_THROW(err, "zero render/upscale dims");
+     auto patch = [&](ID3D12Resource* cbv, const int* bases, int nb) {
+         if (!cbv) return false;
+@@ -374,6 +374,50 @@ bool Provider::StageHash(int idx, uint64_t* out, std::string* err) {
+     return true;
+ }
+
++bool Provider::RecordZeroFrameState(ID3D12GraphicsCommandList* cl, std::string* err) {
++    // Immutable descriptors; reset executes in-order on the caller queue.
++    ID3D12Resource* resources[] = {scratch_, histTex_, recTex_, reprojTex_, aeTex_};
++    if (!clearHeap_) {
++        D3D12_DESCRIPTOR_HEAP_DESC hd{};
++        hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
++        hd.NumDescriptors = 5;
++        if (FAILED(device_->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&clearCpuHeap_))))
++            FSR411_THROW(err, "create reset CPU heap");
++        hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
++        if (FAILED(device_->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&clearHeap_))))
++            FSR411_THROW(err, "create reset GPU heap");
++        auto cpu = clearCpuHeap_->GetCPUDescriptorHandleForHeapStart();
++        auto gpuCpu = clearHeap_->GetCPUDescriptorHandleForHeapStart();
++        for (int i = 0; i < 5; ++i) {
++            D3D12_UNORDERED_ACCESS_VIEW_DESC view{};
++            view.Format = resources[i]->GetDesc().Format;
++            view.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
++            if (i == 0) {
++                view.Format = DXGI_FORMAT_R32_TYPELESS;
++                view.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
++                view.Buffer.NumElements = UINT(kScratchSize / 4);
++                view.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
++            }
++            device_->CreateUnorderedAccessView(resources[i], nullptr, &view, cpu);
++            device_->CopyDescriptorsSimple(1, gpuCpu, cpu, hd.Type);
++            cpu.ptr += descriptorSize_; gpuCpu.ptr += descriptorSize_;
++        }
++    }
++    cl->SetDescriptorHeaps(1, &clearHeap_);
++    auto cpu = clearCpuHeap_->GetCPUDescriptorHandleForHeapStart();
++    auto gpu = clearHeap_->GetGPUDescriptorHandleForHeapStart();
++    for (int i = 0; i < 5; ++i) {
++        UAVBarrier(cl, resources[i]);
++        const UINT zeros[4] = {};
++        const float ones[4] = {1, 1, 1, 1};
++        if (i == 4) cl->ClearUnorderedAccessViewFloat(gpu, cpu, resources[i], ones, 0, nullptr);
++        else cl->ClearUnorderedAccessViewUint(gpu, cpu, resources[i], zeros, 0, nullptr);
++        UAVBarrier(cl, resources[i]);
++        cpu.ptr += descriptorSize_; gpu.ptr += descriptorSize_;
++    }
++    return true;
++}
++
+ bool Provider::ZeroFrameState(std::string* err) {
+     // Scratch arena: DEFAULT-heap UAV, contents undefined at create. Any
+     // pass reading a plane before this frame writes it sees VRAM garbage
+@@ -422,7 +466,7 @@ bool Provider::ZeroFrameState(std::string* err) {
+ }
+
+ bool Provider::BuildFrameHeaps(const FrameBindings& b, int ring, std::string* err) {
+-    if (ring < 0 || ring > 2) FSR411_THROW(err, "ring out of range");
++    if (ring < 0 || ring >= kFrameSlots) FSR411_THROW(err, "ring out of range");
+     if (!b.histTex || !b.velTex || !b.depthTex || !b.colorTex || !b.recTex || !b.expoTex ||
+         !b.reprojTex || !b.outTex)
+         FSR411_THROW(err, "null frame binding");
+@@ -521,7 +565,7 @@ bool Provider::RecordAutoExposure(ID3D12GraphicsCommandList* cl, const FrameBind
+ bool Provider::RecordFrameDispatch(ID3D12GraphicsCommandList* cl, const FrameBindings& b,
+                                    int ring, std::vector<PassReport>* reports, std::string* err,
+                                    bool autoExposure) {
+-    if (ring < 0 || ring > 2) FSR411_THROW(err, "ring out of range");
++    if (ring < 0 || ring >= kFrameSlots) FSR411_THROW(err, "ring out of range");
+     if (!BuildFrameHeaps(b, ring, err)) return false;
+     UseFrameHeaps(ring);
+     if (dbgStages_) { if (!TsEnsure(err)) return false; tsSlot_ = 0; }
+diff --git a/bench/provider411/provider.cpp b/bench/provider411/provider.cpp
+index c17e00a..4b6cd83 100644
+--- a/bench/provider411/provider.cpp
++++ b/bench/provider411/provider.cpp
+@@ -32,6 +32,32 @@ void UAVBarrier(ID3D12GraphicsCommandList* cl, ID3D12Resource* res) {
+
+ }  // namespace
+
++Provider::~Provider() {
++    // Fixture arrays alias scratch/initializer; release only their owned entries.
++    for (auto p : preSrv_) if (p && p != initializer_) p->Release();
++    for (auto p : postSrv_) if (p && p != initializer_) p->Release();
++    for (auto p : preUav_) if (p && p != scratch_) p->Release();
++    for (auto p : postUav_) if (p && p != scratch_) p->Release();
++    auto release = [](auto* p) { if (p) p->Release(); };
++    for (auto p : psos_) release(p);
++    for (auto p : framePreHeap_) release(p);
++    for (auto p : framePostHeap_) release(p);
++    for (auto p : framePreCbv_) release(p);
++    for (auto p : framePostCbv_) release(p);
++    for (auto p : dbgRb_) release(p);
++    release(rootEpi_); release(rootCompute_); release(rootNoCbv_);
++    release(rootPost_); release(rootPre_); release(rootUtil_);
++    release(scratch_); release(initializer_); release(tensorCb_); release(heap_);
++    release(preHeap_); release(postHeap_); release(preCbv1_); release(postCbv1_);
++    release(histTex_); release(recTex_); release(reprojTex_); release(expoOnesTex_);
++    release(aePSO_); release(aeTex_); release(aeHeap_);
++    release(clearHeap_); release(clearCpuHeap_);
++    release(immList_); release(alloc_); release(fence_);
++    release(tsHeap_); release(tsResolve_);
++    if (fenceEvent_) CloseHandle(fenceEvent_);
++    // device_ and queue_ are borrowed from Ffx411Context.
++}
++
+ bool Provider::Init(ID3D12Device* device, const Config& cfg, std::string* err) {
+     device_ = device;
+     cfg_ = cfg;
+diff --git a/bench/provider411/provider.h b/bench/provider411/provider.h
+index 8ce6679..787a29f 100644
+--- a/bench/provider411/provider.h
++++ b/bench/provider411/provider.h
+@@ -68,6 +68,9 @@ struct PassReport {
+ // P3; heap slots exist and point at the scratch buffer so PSOs validate.
+ class Provider {
+ public:
++    static constexpr int kFrameSlots = 6;
++    ~Provider(); // Caller drains its queue before destroying this provider.
++    bool RecordZeroFrameState(ID3D12GraphicsCommandList* cl, std::string* err);
+     // Creates root signatures + common resources (scratch arena, t18, CBV).
+     bool Init(ID3D12Device* device, const Config& cfg, std::string* err);
+     // Creates the compute PSO for every pass in pass_table.h.
+@@ -244,8 +247,10 @@ private:
+     ID3D12Resource* recTex_ = nullptr;     // 1920x1080 RGBA8 recurrent (t4/u6)
+     ID3D12Resource* reprojTex_ = nullptr;  // 1920x1080 RGBA16F reproj (u3/t9)
+     ID3D12Resource* expoOnesTex_ = nullptr;// 2x1 R32F exposure=1.0 fallback
+-    ID3D12DescriptorHeap* framePreHeap_[3] = {};
+-    ID3D12DescriptorHeap* framePostHeap_[3] = {};
++    ID3D12DescriptorHeap* framePreHeap_[kFrameSlots] = {};
++    ID3D12DescriptorHeap* framePostHeap_[kFrameSlots] = {};
++    ID3D12DescriptorHeap* clearHeap_ = nullptr;
++    ID3D12DescriptorHeap* clearCpuHeap_ = nullptr;
+     ID3D12DescriptorHeap* activePreHeap_ = nullptr;   // default: fixture heaps
+     ID3D12DescriptorHeap* activePostHeap_ = nullptr;
+     // P4.1 live constants: ring-tripled upload CBVs (3x pre 35584 B + 3x post
+@@ -263,8 +268,8 @@ private:
+     // row5 = rh,preExp,prevPreExp,0). Tensor CB (960x540 working) and
+     // middle-pass dispatches stay fixed: scratch planes are working-res
+     // sized for the 1080p class, independent of the render preset.
+-    ID3D12Resource* framePreCbv_[3] = {};
+-    ID3D12Resource* framePostCbv_[3] = {};
++    ID3D12Resource* framePreCbv_[kFrameSlots] = {};
++    ID3D12Resource* framePostCbv_[kFrameSlots] = {};
+     ID3D12Resource* activePreCbv_ = nullptr;   // null = P3 fixture buffer
+     ID3D12Resource* activePostCbv_ = nullptr;
+     // P4.6 approximate auto-exposure (flag-gated): minimal util root sig

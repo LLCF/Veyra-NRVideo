@@ -1,5 +1,30 @@
 # Veyra 工作记录
 
+## 2026-09-18 FSR4 NVIDIA 接入、本地影片验证与测试包
+
+从 HDR 里程碑 `3477ed2` 建立分支 `codex/fsr41-nvidia-20260918`，工作区 `E:/项目/Veyra/worktrees/fsr41-nvidia-20260918`。main 保持存档 `0e3d4ac`；没有 push、Release 或合并 main。
+
+修改：FsrSrBackend 的显式 provider 路径、版本和六槽 ABI；EnhanceGraph 的 R11 输入/输出 GPU 转换、奇数宽度 depth 上传行距、NR-before-SR 输入、无光流帧 pending reset；CMake 与 Fsr41VideoTests；外部 provider 四文件补丁、许可证和重建脚本；package-portable 的 DependencyRoot 和本地 HDR 开关；当前状态、施工方案、测试说明与第三方来源。没有修改 DLSS 30/40 解锁代码；没有把 SDK/权重/DLL 放进 Git。
+
+外部源码固定 `int3rrobang/fsr4-int8-reverse-engineering@88635b94083965a7c3b5f64e099808b8ba2ce576`。`scripts/fsr41/build-provider.ps1` 使用外部源码/构建/临时目录及本机 SDK 参数，以 `-ReuseGenerated` 重建并执行 CPU smoke 通过（provider-repro-script.log）；`git -C <external> apply --reverse --check <worktree>/scripts/fsr41/provider-veyra.patch` 通过。首次完整 codegen 的 16 containers、t18/11 kernels 和 AE 构建日志保留。provider DLL 的 SHA256/大小/未签名记录见 LOCAL_HDR_FSR41_TEST_2026-09-18.md，日志身份检查不阻止用户替换 DLL。
+
+产品构建实际命令：`./scripts/build-isolated.ps1 -Root . -BuildDirectory E:/项目/Veyra/build/fsr41-nvidia-20260918 -DependencyCache E:/项目/Veyra/build/video-hdr-20260918/CMakeCache.txt -TempDirectory E:/项目/Veyra/tmp/fsr41-nvidia-20260918 -Targets veyra,veyra_fsr41_video_tests,veyra_video_hdr_tests`。最终 final-build.log exit 0；中间曾把身份日志插入 dispatch 作用域、误用 packet.color，编译指出错误后修正为初始化阶段和 packet.colorInfo。patched FFmpeg 保持，未更换系统驱动。
+
+日志根 `E:/项目/Veyra/logs/fsr41-nvidia-20260918`，测试根 `E:/项目/Veyra/tests/fsr41-nvidia-20260918`，所有子进程 TEMP/TMP 指向 `E:/项目/Veyra/tmp/fsr41-nvidia-20260918`。实际命令/结果（RTX 5070 / 616.56）：
+
+- `veyra_fsr41_video_tests.exe <provider> 12000 1280 720 1920 1080`：12000/11675，53.24 秒，pass=1（gpu-sustained1.log）。
+- 同探针 `<provider> 3600 1920 1080 3840 2160`：3600/3502，23.39 秒，pass=1（gpu-sustained2-4k.log）。两次分别启动，不宣称十分钟稳定性。
+- `VEYRA_FSR_TEST_DEBUG=1` 与 `<provider> 90 1279 719 1919 1079`：pass=1，debugErrors=0（gpu-odd-debug.log）。普通缩放与 FSR3 合成对照分别通过（gpu-baseline.log、gpu-fsr3.log）。
+- 由用户 MKV 第 120 秒附近生成 3 秒 720p 私有测试片（FFmpeg libx264 CRF16，仅开发素材），同探针 `{baseline|fsr3|provider} 60 1280 720 1920 1080 ../media.mp4`：全部 pass=1，SR 分别 0/58/58（media-*.log）。目视同帧 PNG 内容与几何正常；不能据单帧宣称动态质量提升。系统 FFmpeg 仅制作素材，产品仍链接 patched FFmpeg。
+- `VEYRA_FSR41_PROVIDER=<provider>` + `veyra_video_hdr_tests.exe 6 1 5`：TrueHDR/NR/FG 返回成功，NR12/SR10/生成批次10、peak390.673 nit、parameterChange0.368853（gpu-hdr-nr-fsr4-fg6.log）。最终复测首次因为既有 video-hdr.jxr 拒绝覆盖而 exit5（final-combination.log）；在全新 final-combination 目录复测 exit0（final-combination-fresh-output.log），不删除失败记录。
+- `veyra.exe --video-hdr --no-nr --no-fg --smoke-seconds 180 --smoke-view professional <media>`：Computer Use 在 1280x800 窗口检查参数页，四项标签/滑块无重叠，中灰44->59即时更新。当前 Windows HDR 未启用，屏幕内容仍为 SDR 回退，未声称屏幕 HDR 通过。
+
+FSR4 初次 Create 耗时23.7秒，后续独立进程约0.5秒。中间模型固定960x540，视频输入零jitter/估计光流/常量depth，棋盘有边缘/调性差异。保持显式实验入口，provider 不放入本地便携包。硬件矩阵、完整动态画质、实际 HDR 显示/跨屏、物理采集和 PS5 未执行；单次测试均小于300秒。本次使用针对性回归，未运行仍有旧产物路径假设的通用 delivery.ps1。
+
+打包命令：`./scripts/package-portable.ps1 -Root . -DependencyRoot 'C:/Users/123/Desktop/Veyra DLSS Video Player' -Version 1.4.1 -BuildDirectory E:/项目/Veyra/build/fsr41-nvidia-20260918 -OutputDirectory E:/项目/Veyra/test-packages/hdr-fsr41-20260918 -Label '-video-hdr-test' -LocalVideoHdr`，exit0。包 `Veyra-1.4.1-video-hdr-test-win64-portable.zip` 为467052957字节，SHA256 `19BDF78CA0F32822DC9A3477939C2173CF078486477E6EDCDAE18D4AE2F46C2A`。含 TrueHDR 1.1.0 原件及 NVIDIA SDK 许可证、逐文件 runtime manifest；本地评估，不上传。运行包内 Veyra 同参数8秒 smoke exit0；114个 package-manifest 文件哈希一致，forbiddenFiles=0。短测产生的单个 app 日志移回本任务 logs；没有额外解压副本或中间包要保留。
+
+文档已先刷新后按真实结果更新；全部实现和必要记录留在隔离区，最终提交后检查工作区干净。下一步仅为用户在 HDR 显示器及 RTX30/40 上的实际体验验收，FSR4 的正式开放仍需动态画质证据。
+
 ## 2026-09-18 Video HDR 共享图实现与 RTX 5070 验证
 
 新增 TrueHdrBackend、VideoHdrSettings、VideoHdrTests 与 build-isolated.ps1；更新 EnhanceGraph 的输入/工作/输出 HDR 合同、共享 graph/恢复/状态、Presenter SDR 对比白位、设置页与 schema 20、Main10 导出、CMake/资源脚本和导出探针。TrueHDR 在 SDR NR/SR/调色后、FG 前执行，原生 HDR 跳过；默认关闭。数值调整不重建图，开关按现有生命周期重建。新 DLL 仅在外部构建目录，未入 Git。
