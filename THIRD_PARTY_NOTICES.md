@@ -301,6 +301,20 @@ Veyra 的差异（非上游代码）：输入不是 AVFrame，而是 Veyra 自�
 MP4 封装路径。MFT 本身属于 Windows 与显卡驱动，不随包分发。FFmpeg 采用
 LGPL-2.1-or-later，与 Veyra 的 GPLv3 兼容；上游作者归属见上。
 
+## RTX Video HDR (local integration, 2026-09-18)
+
+`src/ngx/TrueHdrBackend.cpp` independently implements the NVIDIA RTX Video SDK
+1.1.0 D3D12 parameter contract. Parameter defaults and behavior were compared with
+rigaya/NVEnc, MIT, commit `4cb3101f451e3f932334c994323e743808502995`:
+https://github.com/rigaya/NVEnc/tree/4cb3101f451e3f932334c994323e743808502995 .
+No NVEnc CUDA implementation or NVIDIA SDK source is vendored here.
+
+Local runtime: `nvngx_truehdr.dll`, 1.1.0.0, 3955752 bytes, NVIDIA Authenticode
+Valid, SHA256 `9A80575F247190C05FE80EAC0C4BAA1D0D4D932348F26808310B5EC4BF9EEB4B`.
+This runtime retains the NVIDIA RTX Video SDK license; it is not relicensed under
+Veyra's GPL. SDK/license and runtime remain external. This change does not publish
+or grant redistribution of a new runtime pack.
+
 ## dav1d (1.3.0 AV1 playback)
 
 FFmpeg dynamically links dav1d 1.5.4 from the pinned local vcpkg build. The portable package includes its complete aggregated copyright/license text in `licenses/DAV1D-COPYRIGHT.txt` and provenance in `licenses/DAV1D-SPDX.json`. The FFmpeg corresponding-source ZIP includes dav1d source and its vcpkg port. Upstream: https://code.videolan.org/videolan/dav1d . License set recorded by the build: Apache-2.0, BSD-2-Clause, ISC and MIT; retain all notices supplied with the source.

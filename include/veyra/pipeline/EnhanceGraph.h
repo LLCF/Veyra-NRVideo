@@ -48,6 +48,7 @@ namespace veyra::ngx {
 class NgxCoreHost;
 class DlssSrBackend;
 class VideoSrBackend;
+class TrueHdrBackend;
 class DlssFgBackend;
 class FgCompatibilitySession;
 class DlssNrRuntimeAdapter;
@@ -83,6 +84,9 @@ struct EnhanceGraphDesc {
     unsigned captureBitDepth = 8; // SDR P010/P016 storage, independent of HDR transfer.
     bool wideYuvInput() const { return hdrInput || captureBitDepth > 8; }
     bool hdrOutput = false;      // HDR-preserving output: scRGB without FG; RGB10/PQ with FG.
+    engine::VideoHdrSettings videoHdr;
+    bool hdrWorking() const {return hdrInput&&hdrOutput;}
+    bool convertVideoHdr() const {return videoHdr.enabled&&!hdrInput&&hdrOutput;}
     bool highQualityPresentation = false; // PS5 ordinary scaling, no AI SR
     bool rgbInput = false;       // allocate direct RGBA ingestion before NGX creation
     bool yuy2Input = false;      // packed Y0 U Y1 V -> linear FP16; never subsample to NV12
@@ -233,6 +237,7 @@ public:
     bool nrEnabled() const { return nrEnabled_; }
     bool fgEnabled() const { return fgEnabled_; }
     bool hdrOutput() const { return desc_.hdrOutput; }
+    bool videoHdrActive() const {return desc_.convertVideoHdr();}
     bool hdr10Output() const { return desc_.hdrOutput && desc_.enableFg; }
     DXGI_FORMAT outputFormat() const { return hdr10Output()?DXGI_FORMAT_R10G10B10A2_UNORM:desc_.hdrOutput?DXGI_FORMAT_R16G16B16A16_FLOAT:DXGI_FORMAT_R8G8B8A8_UNORM; }
     bool highQualityPresentation() const { return desc_.highQualityPresentation; }
@@ -338,6 +343,7 @@ private:
     size_t rgbPitch_=0;
     ComPtr<ID3D12Resource> workRgba_;
     ComPtr<ID3D12Resource> videoSrInput_,videoSrOutput_;
+    ComPtr<ID3D12Resource> videoHdrInput_,videoHdrOutput_;
     ComPtr<ID3D12Resource> nrInput_,residualRgba_,nrFlow_,baseFlow_;
     ComPtr<ID3D12Resource> presentMotion_[2];
     bool presentMotionValid_[2]={};
@@ -400,6 +406,7 @@ private:
     std::unique_ptr<guidance::AmdOpticalFlow> amdOf_;
     std::unique_ptr<guidance::GpuDisOpticalFlow> gpuDis_;
     std::unique_ptr<ngx::VideoSrBackend> videoSrBackend_;
+    std::unique_ptr<ngx::TrueHdrBackend> videoHdrBackend_;
     std::unique_ptr<ngx::DlssFgBackend> fgBackend_;
     std::unique_ptr<gfx::FsrSrBackend> fsrSrBackend_;
     ComPtr<ID3D12Resource> fsrSrDepth_, upFsrSrDepth_;

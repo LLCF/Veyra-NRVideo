@@ -912,6 +912,9 @@ void populate(engine::EnhancementSettings s){
     send(508,CB_SETCURSEL,int(engine::exportBitrateIndex(s.exportBitrateMbps)),0);
     send(218,CB_SETCURSEL,int(s.nrRuntime));
     check(219,s.captureCompatible?BST_CHECKED:BST_UNCHECKED);check(220,s.lowLatency?BST_CHECKED:BST_UNCHECKED);
+    check(230,enhancementEnabled&&s.videoHdr.enabled?BST_CHECKED:BST_UNCHECKED);
+    const unsigned hdrValues[]={s.videoHdr.contrast,s.videoHdr.saturation,s.videoHdr.middleGray,s.videoHdr.peakNits};
+    for(int i=0;i<4;++i){send(631+i,TBM_SETPOS,TRUE,hdrValues[i]);putText(1131+i,(std::to_wstring(hdrValues[i])+(i==3?L" nit":L"")).c_str());}
     send(204,CB_SETCURSEL,int(s.flow),0);send(205,CB_SETCURSEL,int(s.content),0);
     send(209,CB_SETCURSEL,int(s.opticalFlowBackend),0);
     check(215,s.amdFlowHalfResolution?BST_CHECKED:BST_UNCHECKED);
@@ -968,6 +971,10 @@ bool liveField(int id){
         case 208:{s.frameGenerationBackend=static_cast<engine::FrameGenerationBackend>(send(id,CB_GETCURSEL));if(engine::presentSinkFrameGeneration(s.frameGenerationBackend)){const int choices=multiplierChoiceCount(s.frameGenerationBackend);const size_t index=size_t(std::clamp(choices-1,1,int(engine::kFgMultiplierChoiceCount)-1));s.multiplier=std::min(s.multiplier,engine::kFgMultiplierChoices[index]);}break;}
         case 209:s.opticalFlowBackend=static_cast<engine::OpticalFlowBackend>(send(id,CB_GETCURSEL));break;
         case 220:s.lowLatency=checked(id)==BST_CHECKED;break;
+        case 631:s.videoHdr.contrast=unsigned(send(id,TBM_GETPOS));break;
+        case 632:s.videoHdr.saturation=unsigned(send(id,TBM_GETPOS));break;
+        case 633:s.videoHdr.middleGray=unsigned(send(id,TBM_GETPOS));break;
+        case 634:s.videoHdr.peakNits=unsigned(send(id,TBM_GETPOS));break;
         case 215:s.amdFlowHalfResolution=checked(id)==BST_CHECKED;break;
         case 216:s.audioSync=static_cast<engine::AudioSyncMode>(send(id,CB_GETCURSEL));break;
         case 217:{wchar_t value[32]{};GetWindowTextW(item(id),value,32);wchar_t* end=nullptr;const auto parsed=wcstol(value,&end,10);if(end==value||*end||parsed<-250||parsed>250){message(L"声音偏移须为 -250 至 250 ms");return false;}s.audioOffsetMs=int(parsed);break;}
@@ -1105,6 +1112,8 @@ void combo(int id,int group,int y,std::initializer_list<const wchar_t*> names){a
 LRESULT CALLBACK proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
     if(msg==WM_COMMAND&&LOWORD(wp)==221&&HIWORD(wp)==BN_CLICKED){smoothMotionHelpExpanded=!smoothMotionHelpExpanded;putText(221,smoothMotionHelpExpanded?L"Smooth Motion · 收起说明 ▴":L"Smooth Motion · 开启方法 ▾");arrange();return 0;}
     if(msg==WM_COMMAND&&!populating&&LOWORD(wp)==220&&HIWORD(wp)==BN_CLICKED){liveField(220);return 0;}
+    if(msg==WM_COMMAND&&!populating&&LOWORD(wp)==230&&HIWORD(wp)==BN_CLICKED){SendMessageW(GetParent(window),WM_APP+44,230,checked(230));return 0;}
+    if(msg==WM_HSCROLL&&!populating&&lp){const auto id=GetDlgCtrlID(reinterpret_cast<HWND>(lp));if(id>=631&&id<=634){liveField(id);return 0;}}
     if(msg==WM_COMMAND&&!populating&&LOWORD(wp)==219&&HIWORD(wp)==BN_CLICKED){liveField(219);return 0;}
     if(msg==WM_COMMAND&&!populating&&LOWORD(wp)==218&&HIWORD(wp)==CBN_SELCHANGE){liveField(218);return 0;}
     if(msg==WM_COMMAND&&!populating&&((LOWORD(wp)==216&&HIWORD(wp)==CBN_SELCHANGE)||(LOWORD(wp)==217&&HIWORD(wp)==EN_CHANGE))){liveField(LOWORD(wp));return 0;}
@@ -1512,6 +1521,18 @@ case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.
     SendMessageW(featherSlider,TBM_SETPOS,TRUE,12);
     SetPropW(item(222),L"veyra.tip",HANDLE(L"剔除区边缘的过渡宽度，单位是工作分辨率像素。0 就是硬边；4K 上 12 px 约等于画面高度的 0.5%，越大边缘越柔和。"));
     for(const auto& entry:items)if(auto help=settingHelp(GetDlgCtrlID(entry.h)))SetPropW(entry.h,L"veyra.tip",HANDLE(help));
+    int hdrTop=0;for(const auto& entry:items)if(entry.page==0)hdrTop=std::max(hdrTop,entry.y+entry.height);
+    hdrTop+=24;
+    add(L"BUTTON",L"RTX Video HDR",230,BS_AUTOCHECKBOX|WS_TABSTOP,0,12,hdrTop,-1,32);
+    SetPropW(item(230),L"veyra.tip",HANDLE(L"将 SDR 视频转换成 HDR；预览需要 Windows HDR 显示，导出不受显示模式影响。原生 HDR 不重复转换。"));
+    const wchar_t* hdrLabels[]={L"对比度",L"饱和度",L"中间灰",L"峰值亮度"};
+    const int hdrMin[]={0,0,10,400},hdrMax[]={200,200,100,2000};
+    for(int i=0;i<4;++i){const int y=hdrTop+40+i*58;
+        add(L"STATIC",hdrLabels[i],1141+i,0,0,12,y,160,24);
+        add(L"STATIC",L"",1131+i,SS_RIGHT,0,182,y,-1,24);
+        auto slider=add(TRACKBAR_CLASSW,L"",631+i,TBS_HORZ|TBS_NOTICKS|WS_TABSTOP,0,12,y+26,-1,24);
+        SendMessageW(slider,TBM_SETRANGE,TRUE,MAKELPARAM(hdrMin[i],hdrMax[i]));
+    }
     loadStore();populate(controller->snapshot().desired);message(store.error());SetTimer(h,1,250,nullptr);arrange();
     // Layout evidence for UI work: VEYRA_DUMP_SETTINGS_LAYOUT=1 prints the
     // resolved position of every control once, in DIP units.

@@ -2,11 +2,12 @@
 #include "veyra/engine/EnhancementSettings.h"
 
 namespace veyra::engine {
-enum class FailedBackend { None, Infrastructure, OpticalFlow, NgxCore, Nr, Sr, Fg };
+enum class FailedBackend { None, Infrastructure, OpticalFlow, NgxCore, Nr, Sr, Fg, VideoHdr };
 inline bool disableUnsupportedNvidiaEffects(EnhancementSettings& settings,bool nvidia){
     if(nvidia)return false;
     const auto before=settings;
     settings.nr=false;
+    settings.videoHdr.enabled=false;
     // AMD FSR upscaling is vendor neutral and must survive the NVIDIA-only
     // normalization; every other SR backend is NGX-only.
     settings.sr=settings.videoSrQuality==kVideoSrFsr;
@@ -20,6 +21,7 @@ inline const wchar_t* backendFailureName(FailedBackend backend) {
     case FailedBackend::Nr:return L"NR";
     case FailedBackend::Sr:return L"超分";
     case FailedBackend::Fg:return L"帧生成";
+    case FailedBackend::VideoHdr:return L"RTX Video HDR";
     default:return L"GPU / 输入 / 显示资源";
     }
 }
@@ -28,10 +30,12 @@ inline const wchar_t* backendFailureName(FailedBackend backend) {
 inline bool disableFailedBackend(EnhancementSettings& settings,FailedBackend backend){
     const auto before=settings;
     switch(backend){
+    case FailedBackend::VideoHdr:settings.videoHdr.enabled=false;break;
     case FailedBackend::Nr:settings.nr=false;break;
     case FailedBackend::Sr:settings.sr=false;break;
     case FailedBackend::Fg:settings.multiplier=1;break;
     case FailedBackend::NgxCore:
+        settings.videoHdr.enabled=false;
         settings.nr=settings.sr=false;
         if(settings.frameGenerationBackend==FrameGenerationBackend::Dlss)settings.multiplier=1;
         break;

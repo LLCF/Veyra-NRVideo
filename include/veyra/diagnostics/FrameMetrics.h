@@ -5,7 +5,7 @@
 #include "veyra/pipeline/FrameBatch.h"
 #include "veyra/pipeline/ResolutionPlan.h"
 namespace veyra::diagnostics {
-enum class GpuStage { Color, Sr, Flow, Nr, Residual, Fg1, Fg2, Fg3, Fg4, Fg5, FgBatch, Blit, Count };
+enum class GpuStage { Color, Sr, Flow, Nr, Residual, Fg1, Fg2, Fg3, Fg4, Fg5, FgBatch, Blit, VideoHdr, Count };
 static_assert(unsigned(GpuStage::Fg5)-unsigned(GpuStage::Fg1)==4);
 static_assert(unsigned(GpuStage::FgBatch)>unsigned(GpuStage::Fg5));
 enum class SampleState { NotExecuted, Pending, Measured, Unavailable };

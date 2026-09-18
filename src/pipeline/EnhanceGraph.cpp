@@ -31,6 +31,7 @@
 #include "veyra/ngx/DlssNrRuntimeAdapter.h"
 #include "veyra/ngx/DlssSrBackend.h"
 #include "veyra/ngx/VideoSrBackend.h"
+#include "veyra/ngx/TrueHdrBackend.h"
 #include "veyra/ngx/NgxCoreHost.h"
 #include "veyra/ngx/NgxParameters.h"
 #include "veyra/ngx/NvOfSession.h"
@@ -286,7 +287,7 @@ bool EnhanceGraph::initialize(const EnhanceGraphDesc& desc)
     diagnostics::DiagnosticEvent initDiagnostic;initDiagnostic.stage="initialize";initDiagnostic.identity={epoch_+1,desc.settingsRevision,0};initDiagnostic.resolution.source={srcW_,srcH_};initDiagnostic.resolution.base=initDiagnostic.resolution.fg=initDiagnostic.resolution.output={workW_,workH_};initDiagnostic.resolution.nr={nrW_,nrH_};initDiagnostic.resolution.flow={nvofW_,nvofH_};initDiagnostic.flowApplied=std::to_string(unsigned(desc.flowQuality));initDiagnostic.runtimeHash="unverified-user-replaceable";Logger::diagnosticContext(initDiagnostic);
     veyra::log::info("resolution",std::format("source={}x{} base={}x{} nr={}x{} flow={}x{} fg={}x{} output={}x{}",srcW_,srcH_,workW_,workH_,nrW_,nrH_,nvofW_,nvofH_,workW_,workH_,workW_,workH_));
     veyra::log::info("pipeline-order",desc.nrBeforeSr?"NR -> residual(source) -> SR -> FG (experimental preview)":"SR -> NR -> residual -> FG");
-    if(desc.hdrOutput&&!desc.hdrInput){veyra::log::error("hdr","HDR output requires an explicit HDR input contract");return false;}
+    if(!desc.videoHdr.valid()||(desc.hdrOutput&&!desc.hdrInput&&!desc.convertVideoHdr())){veyra::log::error("hdr","HDR output requires native HDR input or explicit Video HDR conversion");return false;}
     srEnabled_ = desc.enableSr && (srcW_ != workW_ || srcH_ != workH_);
     nrEnabled_ = desc.enableNr && !desc.noFeatures && !desc.noNgx;
     fgEnabled_ = desc.enableFg && !desc.noNgx && !desc.stillImage && desc.frameGenerationBackend!=engine::FrameGenerationBackend::XeSS
@@ -371,6 +372,11 @@ bool EnhanceGraph::createResources()
         }
     }
     srcRgba_ = makeTexture(context_.device(), srcW_, srcH_, DXGI_FORMAT_R16G16B16A16_FLOAT, true);
+    if(desc_.convertVideoHdr()){
+        videoHdrInput_=makeTexture(context_.device(),workW_,workH_,DXGI_FORMAT_R8G8B8A8_UNORM,true);
+        videoHdrOutput_=makeTexture(context_.device(),workW_,workH_,DXGI_FORMAT_R16G16B16A16_FLOAT,true);
+        if(!videoHdrInput_||!videoHdrOutput_)return false;
+    }
     if(srEnabled_&&desc_.videoSrQuality&&desc_.videoSrQuality!=engine::kVideoSrFsr){videoSrInput_=makeTexture(context_.device(),srcW_,srcH_,DXGI_FORMAT_R8G8B8A8_UNORM,true);videoSrOutput_=makeTexture(context_.device(),workW_,workH_,DXGI_FORMAT_R8G8B8A8_UNORM,true);if(!videoSrInput_||!videoSrOutput_)return false;}
     // FSR upscaling needs a render-extent depth; Veyra has no source-resolution
     // depth source, so this is the same explicit constant far depth the
@@ -789,7 +795,7 @@ bool EnhanceGraph::initFsrSr()
         veyra::log::warn("fsr-sr", "feature-disabled configuration: AMD FSR upscaling skipped");
         return true;
     }
-    if (desc_.hdrOutput) {
+    if (desc_.hdrWorking()) {
         // The working color here is linear FP16 with Veyra's own HDR contract;
         // feeding that to the FSR HDR path without a verified transfer contract
         // would be a guess. Refuse the stage instead of shipping a wrong image.
@@ -816,13 +822,14 @@ bool EnhanceGraph::initFsrSr()
 bool EnhanceGraph::initNgxFeatures()
 {
     failedBackend_=engine::FailedBackend::NgxCore;
-    if (desc_.noNgx || desc_.noFeatures || (!nrEnabled_&&!srEnabled_&&!fgEnabled_)) {
+    if(desc_.convertVideoHdr()&&(desc_.noNgx||desc_.noFeatures)){failedBackend_=engine::FailedBackend::VideoHdr;return false;}
+    if (desc_.noNgx || desc_.noFeatures || (!nrEnabled_&&!srEnabled_&&!fgEnabled_&&!desc_.convertVideoHdr())) {
         veyra::log::info("graph", "NGX core/features skipped by disabled-feature configuration");
         return true;
     }
     // FSR upscaling is a FidelityFX effect: a session whose only feature is
     // FSR SR must not require (or fail on) the NGX core.
-    const bool needNgxCore = nrEnabled_ || fgEnabled_ ||
+    const bool needNgxCore = nrEnabled_ || fgEnabled_ || desc_.convertVideoHdr() ||
         (srEnabled_ && desc_.videoSrQuality!=engine::kVideoSrFsr);
     if (!needNgxCore) {
         veyra::log::info("graph", "NGX core skipped: AMD FSR upscaling is the only enabled stage");
@@ -952,6 +959,14 @@ bool EnhanceGraph::initNgxFeatures()
     if (ngxParams_ == nullptr) return false;
 
     srBackend_ = std::make_unique<ngx::DlssSrBackend>();
+    if(desc_.convertVideoHdr()){
+        auto* list=ring_.acquire(0,st);if(!list)return false;
+        failedBackend_=engine::FailedBackend::VideoHdr;
+        videoHdrBackend_=std::make_unique<ngx::TrueHdrBackend>();
+        if(!videoHdrBackend_->create(*coreHost_,list,desc_.runtimeAbsPath))return false;
+        failedBackend_=engine::FailedBackend::Infrastructure;
+        if(!ring_.submitAndSignal(0)||!ring_.waitIdle())return false;
+    }
 
     // NR feature create (8.5 create parameter contract).
     if(nrEnabled_) {
@@ -1074,14 +1089,14 @@ bool EnhanceGraph::createComputePasses()
     if((desc_.rgbInput||desc_.yuy2Input||desc_.packedInput)&&(!rgbPass_.loadShader(rgbShader,cs)||!rgbPass_.create(context_.device(),cs,12,1,1,8+kColorGradeConstantCount,4)))return false;
     if (!encPass_.loadShader("ParityEncode.dxil", cs) || !encPass_.create(context_.device(), cs, 8, 1, 1)) return false;
     if (!decPass_.loadShader("ParityDecode.dxil", cs) || !decPass_.create(context_.device(), cs, 8)) return false;
-    if (!blitPass_.loadShader("ScaleBlit.dxil", cs) || !blitPass_.create(context_.device(), cs, 19, 1, 1)) return false;
+    if (!blitPass_.loadShader("ScaleBlit.dxil", cs) || !blitPass_.create(context_.device(), cs, 21, 1, 1)) return false;
     // Nv12Upload stays: frame-time CopyTextureRegion is poisoned by the
     // injected layer (SEH in NGX evaluate, r33-final3 evidence); the compute
     // upload is the proven frame-path ingestion on this system.
     if (!uploadPass_.loadShader("Nv12Upload.dxil", cs) || !uploadPass_.create(context_.device(), cs, 4, 1, 2)) return false;
     if (!densifyPass_.loadShader("NvofDensify.dxil", cs) ||
         !densifyPass_.create(context_.device(), cs, 7, 5, 2)) return false;
-    if(desc_.hdrOutput&&videoSrInput_&&(!hdrVideoSrPass_.loadShader("HdrVideoSrRestore.dxil",cs)||!hdrVideoSrPass_.create(context_.device(),cs,7,3,1)))return false;
+    if(desc_.hdrWorking()&&videoSrInput_&&(!hdrVideoSrPass_.loadShader("HdrVideoSrRestore.dxil",cs)||!hdrVideoSrPass_.create(context_.device(),cs,7,3,1)))return false;
     if (!stager_.initialize(context_.device(), 80)) {
         veyra::log::error("graph", "descriptor stager init failed");
         return false;
@@ -1133,7 +1148,7 @@ bool EnhanceGraph::createViews()
     stagedSrv(flowTex_.Get(),DXGI_FORMAT_R16G16_FLOAT,flowAdaptPass_,0);
     makeUav(context_.device(),nrFlow_.Get(),DXGI_FORMAT_R16G16_FLOAT,cpu(flowAdaptPass_,1));
     makeUav(context_.device(),baseFlow_.Get(),DXGI_FORMAT_R16G16_FLOAT,cpu(flowAdaptPass_,2));
-    if(desc_.hdrOutput&&videoSrInput_){
+    if(desc_.hdrWorking()&&videoSrInput_){
         stagedSrv(srcRgba_.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT,hdrVideoSrPass_,0);
         stagedSrv(videoSrInput_.Get(),DXGI_FORMAT_R8G8B8A8_UNORM,hdrVideoSrPass_,1);
         stagedSrv(videoSrOutput_.Get(),DXGI_FORMAT_R8G8B8A8_UNORM,hdrVideoSrPass_,2);
@@ -1169,6 +1184,8 @@ bool EnhanceGraph::createViews()
     if(videoSrInput_&&viewsUav)makeUav(context_.device(),videoSrInput_.Get(),DXGI_FORMAT_R8G8B8A8_UNORM,cpu(blitPass_,16));
     if(videoSrOutput_&&viewsTex)stagedSrv(videoSrOutput_.Get(),DXGI_FORMAT_R8G8B8A8_UNORM,blitPass_,17);
     if (viewsTex) stagedSrv(residualRgba_.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT,blitPass_,18);
+    if(videoHdrInput_&&viewsUav)makeUav(context_.device(),videoHdrInput_.Get(),DXGI_FORMAT_R8G8B8A8_UNORM,cpu(blitPass_,19));
+    if(videoHdrOutput_&&viewsTex)stagedSrv(videoHdrOutput_.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT,blitPass_,20);
     if (viewsTex) stagedSrv(srcRgba_.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, blitPass_, 0);
     // Colour-grade tables: four SRVs at the extra table's fixed register base.
     if(colorActive_){
@@ -1271,7 +1288,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
         veyra::log::info("hdr-route",std::format("input={} range={} matrix=BT2020-NCL primaries=BT2020 decode={} working={} output={} toneMap={} hdrReferenceWhiteNits=203 hlgReferencePeakNits=1000; SDR workingTransfer field is unused for PQ/HLG",
             resolved.transfer==TransferFunction::HLG?"HLG":"PQ",resolved.range==ColorRange::Full?"full":"limited",
             resolved.transfer==TransferFunction::HLG?"inverse-OETF+OOTF-gamma1.2":"ST2084-EOTF-absolute-nits",
-            desc_.hdrOutput?"linear-BT709-scRGB-1=80nits":"linear-BT709-SDR-relative",
+            desc_.hdrWorking()?"linear-BT709-scRGB-1=80nits":"linear-BT709-SDR-relative",
             hdr10Output()?"PQ-BT2020-RGB10":desc_.hdrOutput?"scRGB-FP16":"sRGB-RGB8",
             desc_.hdrOutput?"none":"BT2390-luminance+neutral-ray-gamut-compression"));
     }
@@ -1509,7 +1526,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
         float constants[12+kColorGradeConstantCount] = { resolved.range==ColorRange::Full?0.0f:1.0f,
             resolved.matrix==YuvMatrix::BT2020NCL?2.0f:resolved.matrix==YuvMatrix::BT601?0.0f:1.0f,
             resolved.transfer==TransferFunction::HLG?5.0f:resolved.transfer==TransferFunction::PQ?4.0f:float(workingTransferCode(resolved)), (nv12Texture?(nv12Texture->GetDesc().Format==DXGI_FORMAT_P010?1.0f:0.0f):(desc_.captureBitDepth==16?2.0f:desc_.wideYuvInput()?1.0f:0.0f)),
-            uintBits(srcW_), uintBits(srcH_), uintBits((desc_.hdrOutput?1u:0u)|(resolved.primaries==ColorPrimaries::BT2020?2u:0u)),
+            uintBits(srcW_), uintBits(srcH_), uintBits((desc_.hdrWorking()?1u:0u)|(resolved.primaries==ColorPrimaries::BT2020?2u:0u)),
             uintBits(resolved.reconstructChroma?std::max(1u,unsigned(resolved.chromaLocation)):0u),toneMapPeakNits_,203.0f,0,0 };
         if(colorActive_)packColorGradeConstants(colorTables_,constants+12);
         yuvPass_.bind(list, constants, gpuHandleOf(yuvPass_, nv12Texture ? 3 + parity * 2 : 0).ptr, gpuHandleOf(yuvPass_, 2).ptr,gpuHandleOf(yuvPass_,8).ptr);
@@ -1537,7 +1554,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
             tracker_.transition(list,nvofInA_.Get(),D3D12_RESOURCE_STATE_COMMON);
         }
         tracker_.transition(list,nvofInB_.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        const float encodedDims[8] = {uintBits(srcW_),uintBits(srcH_),uintBits(nvofW_),uintBits(nvofH_),desc_.hdrOutput?3.0f:1.0f,0,0,0};
+        const float encodedDims[8] = {uintBits(srcW_),uintBits(srcH_),uintBits(nvofW_),uintBits(nvofH_),desc_.hdrWorking()?3.0f:1.0f,0,0,0};
         blitPass_.bind(list,encodedDims,gpuHandleOf(blitPass_,15).ptr,gpuHandleOf(blitPass_,9).ptr);
         list->Dispatch((nvofW_+15)/16,(nvofH_+15)/16,1);
         tracker_.uavBarrier(list,nvofInB_.Get());
@@ -1635,13 +1652,13 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
     } else if(srEnabled_&&videoSrBackend_){
         gpuTimer_.mark(list,GpuStage::Sr);
         tracker_.transition(list,videoSrInput_.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        const float enc[8]={uintBits(srcW_),uintBits(srcH_),uintBits(srcW_),uintBits(srcH_),desc_.hdrOutput?3.0f:1.0f,0,0,0};
+        const float enc[8]={uintBits(srcW_),uintBits(srcH_),uintBits(srcW_),uintBits(srcH_),desc_.hdrWorking()?3.0f:1.0f,0,0,0};
         blitPass_.bind(list,enc,gpuHandleOf(blitPass_,desc_.nrBeforeSr?18:0).ptr,gpuHandleOf(blitPass_,16).ptr);list->Dispatch((srcW_+15)/16,(srcH_+15)/16,1);tracker_.uavBarrier(list,videoSrInput_.Get());
         tracker_.transition(list,videoSrInput_.Get(),D3D12_RESOURCE_STATE_COMMON);tracker_.transition(list,videoSrOutput_.Get(),D3D12_RESOURCE_STATE_COMMON);
         if(!videoSrBackend_->evaluate(list,videoSrInput_.Get(),videoSrOutput_.Get(),desc_.videoSrQuality)){failedBackend_=engine::FailedBackend::Sr;return false;}
         tracker_.uavBarrier(list,videoSrOutput_.Get());tracker_.transition(list,videoSrOutput_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);tracker_.transition(list,workRgba_.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         const float dec[8]={uintBits(workW_),uintBits(workH_),uintBits(workW_),uintBits(workH_),-1,0,0,0};
-        if(desc_.hdrOutput){
+        if(desc_.hdrWorking()){
             tracker_.transition(list,videoSrInput_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             hdrVideoSrPass_.bind(list,dec,gpuHandleOf(hdrVideoSrPass_,desc_.nrBeforeSr?4:0).ptr,gpuHandleOf(hdrVideoSrPass_,3).ptr);
         }else blitPass_.bind(list,dec,gpuHandleOf(blitPass_,17).ptr,gpuHandleOf(blitPass_,1).ptr);list->Dispatch((workW_+15)/16,(workH_+15)/16,1);tracker_.uavBarrier(list,workRgba_.Get());tracker_.transition(list,workRgba_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -1700,7 +1717,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
         list->Dispatch((nrW_+15)/16,(nrH_+15)/16,1);tracker_.uavBarrier(list,nrInput_.Get());tracker_.transition(list,nrInput_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
         tracker_.transition(list, proxyTex_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        const float constants[8] = { 1.0f, 1.0f, 1.0f, desc_.hdrOutput?1.0f:0.0f,
+        const float constants[8] = { 1.0f, 1.0f, 1.0f, desc_.hdrWorking()?1.0f:0.0f,
             uintBits(nrW_), uintBits(nrH_), 0.0f, 0.0f };
         encPass_.bind(list, constants, gpuHandleOf(encPass_, 0).ptr, gpuHandleOf(encPass_, 1).ptr);
         list->Dispatch((nrW_ + 15) / 16, (nrH_ + 15) / 16, 1);
@@ -1768,7 +1785,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
             }
             // 4c. Parity decode.
             tracker_.transition(nlist, finalRgba_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            const float constants[8] = { 1.0f, 1.0f, 1.0f, desc_.hdrOutput?1.0f:0.0f,
+            const float constants[8] = { 1.0f, 1.0f, 1.0f, desc_.hdrWorking()?1.0f:0.0f,
                 uintBits(nrW_), uintBits(nrH_), 0.0f, 0.0f };
             decPass_.bind(nlist, constants, gpuHandleOf(decPass_, 0).ptr, gpuHandleOf(decPass_, 3).ptr);
             nlist->Dispatch((nrW_ + 15) / 16, (nrH_ + 15) / 16, 1);
@@ -1782,16 +1799,31 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
     if(nrEnabled_&&nrHandle_){
         gpuTimer_.mark(list,GpuStage::Residual);
         tracker_.transition(list,residualRgba_.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        const auto& r=desc_.residual;float c[24]={r.total,r.darken,r.brighten,r.color,r.luminance,desc_.protection.enabled?1.0f:0.0f,desc_.protection.featherPixels,desc_.hdrOutput?1.0f:0.0f};
+        const auto& r=desc_.residual;float c[24]={r.total,r.darken,r.brighten,r.color,r.luminance,desc_.protection.enabled?1.0f:0.0f,desc_.protection.featherPixels,desc_.hdrWorking()?1.0f:0.0f};
         for(size_t i=0;i<4;++i){const auto q=desc_.protection.regions[i];c[8+i*4]=q.left;c[9+i*4]=q.top;c[10+i*4]=q.right;c[11+i*4]=q.bottom;}
         residualPass_.bind(list,c,gpuHandleOf(residualPass_,0).ptr,gpuHandleOf(residualPass_,3).ptr);
         list->Dispatch(((desc_.nrBeforeSr?srcW_:workW_)+15)/16,((desc_.nrBeforeSr?srcH_:workH_)+15)/16,1);tracker_.uavBarrier(list,residualRgba_.Get());tracker_.transition(list,residualRgba_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);gpuTimer_.mark(list,GpuStage::Residual,true);
     }
 
     if(desc_.nrBeforeSr&&!runSr())return false;
+    if(videoHdrBackend_){
+        gpuTimer_.mark(list,GpuStage::VideoHdr);
+        tracker_.transition(list,videoHdrInput_.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        const float encode[8]={uintBits(workW_),uintBits(workH_),uintBits(workW_),uintBits(workH_),1,0,0,0};
+        blitPass_.bind(list,encode,gpuHandleOf(blitPass_,2).ptr,gpuHandleOf(blitPass_,19).ptr);
+        list->Dispatch((workW_+15)/16,(workH_+15)/16,1);tracker_.uavBarrier(list,videoHdrInput_.Get());
+        tracker_.transition(list,videoHdrInput_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        tracker_.transition(list,videoHdrOutput_.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if(!videoHdrBackend_->evaluate(list,videoHdrInput_.Get(),videoHdrOutput_.Get(),desc_.videoHdr)){
+            failedBackend_=engine::FailedBackend::VideoHdr;return false;
+        }
+        tracker_.uavBarrier(list,videoHdrOutput_.Get());
+        tracker_.transition(list,videoHdrOutput_.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        gpuTimer_.mark(list,GpuStage::VideoHdr,true);
+    }
     // 5. Working frame -> SDR RGBA8 videoFrame[parity] + NVOF chain.
     {
-        const UINT srcSlot = 2;
+        const UINT srcSlot = videoHdrBackend_?20:2;
         const UINT uavSlot = 3 + parity;
         tracker_.transition(list, (nrEnabled_ && nrHandle_ != nullptr && !desc_.nrBeforeSr) ? residualRgba_.Get() : workRgba_.Get(),
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -1939,6 +1971,8 @@ bool EnhanceGraph::applySettings(const engine::EnhancementSettings& s){
     // The colour master switch changes the graph shape (tables + shader branch)
     // and must rebuild; every other colour field is a live uniform update.
     if(s.color.enabled!=desc_.color.enabled)return false;
+    if(s.videoHdr.enabled!=desc_.videoHdr.enabled)return false;
+    desc_.videoHdr=s.videoHdr;
     // Switching the referenced .cube re-stages a descriptor, which needs the
     // queue drained: treat it as a rebuild (parameters stay live).
     if(s.color.lutNameString()!=desc_.color.lutNameString())return false;
@@ -2022,6 +2056,7 @@ void EnhanceGraph::shutdown()
     upFsrSrDepth_.Reset();
     if (fgBackend_) fgBackend_->release();
     if(videoSrBackend_){videoSrBackend_->release();videoSrBackend_.reset();}
+    videoHdrBackend_.reset();videoHdrInput_.Reset();videoHdrOutput_.Reset();
     if (srBackend_) srBackend_->release();
 
     // NVOF teardown in THREE phases (ownership rule proven by t10-L0-r2):

@@ -176,4 +176,8 @@ FSR 4.1 实验不修改 NVAPI 伪装、DLSS MFG 解锁或现有 FG 调度；这�
 
 ## 执行记录
 
-2026-09-18：已建立存档、隔离分支与 Goal，先刷新文档。尚未修改运行代码、加载 `nvngx_truehdr.dll`、构建 TrueHDR/FSR4 provider 或执行 Create/Evaluate、画质、性能、导出及硬件验证。下一步为 A1/A2。
+2026-09-18：已完成文档刷新及 Video HDR 首轮实现。最终颜色路线选择 RGBA8 SDR -> TrueHDR FP16 scRGB（1=80 nit）-> 既有 HDR sink，非直接 PQ 输出。共用图、live 参数、schema 20 保存、请求/生效状态、SDR 显示回退、HEVC Main10 导出已接入。
+
+RTX 5070 / 616.56：Create/Evaluate/Release 0x1、SEH 0；HDR 独立、2X/4X/6X、NR+DLSS SR+6X、原生 HDR 回归通过。90 帧导出为 Main10/P010 等价编码、BT.2020/PQ，开发期 ffprobe/解码通过；移走 TrueHDR 后导出 SDR 通过。预设 roundtrip/迁移通过。实际 HDR 显示（当前 Windows HDR 未开启）、跨屏、物理采集、PS5 和 RTX 30/40 未执行，不据离屏测试宣称全链路实卡验收。
+
+FSR provider 已从固定上游提交在外部目录生成/构建，CPU smoke 通过，尚无 GPU 结果。发现三组 CBV/descriptor 的生命周期不能覆盖 Veyra command ring，以及 reset 使用私有队列；B 阶段先修这些合同。命令、数据和路径见 WORKLOG。

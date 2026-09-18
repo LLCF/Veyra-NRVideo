@@ -1,4 +1,5 @@
 #pragma once
+#include "veyra/engine/VideoHdrSettings.h"
 #include <cmath>
 #include <array>
 #include <cstdint>
@@ -119,7 +120,8 @@ struct EnhancementSettings {
     // the next sample, so it is a live edit, not a graph rebuild.
     bool captureFlipVertical=false;
     bool forceSdrPreview=false; // display only; retain actual HDR source metadata
-    bool useHdrPreview(bool hdrInput,bool hdrDisplayActive)const{return hdrInput&&hdrDisplayActive&&!forceSdrPreview;}
+    VideoHdrSettings videoHdr;
+    bool useHdrPreview(bool hdrInput,bool hdrDisplayActive)const{return (hdrInput||videoHdr.enabled)&&hdrDisplayActive&&!forceSdrPreview;}
     pipeline::SrTarget srTarget=pipeline::SrTarget::Uhd4K;
     uint32_t videoSrQuality=0; // 0 DLSS SR; 1–4 RTX Video SR
     uint32_t multiplier=1;
@@ -154,6 +156,8 @@ struct EnhancementSettings {
         // master switch changes the graph shape, so it stays in the comparison.
         video.color=other.color;
         video.color.enabled=color.enabled;
+        video.videoHdr=other.videoHdr;
+        video.videoHdr.enabled=videoHdr.enabled;
         return video==other;
     }
     void rejectVideoRequest(const EnhancementSettings& attempted,const EnhancementSettings& previous) {
@@ -165,6 +169,7 @@ struct EnhancementSettings {
         *this=restored;
     }
     std::string validate() const {
+        if(!videoHdr.valid())return "invalid RTX Video HDR parameters";
         auto range=[](float v,float hi){return std::isfinite(v)&&v>=0&&v<=hi;};
         if(auto error=protection.validate();!error.empty())return error;
         if(!revision)return "settingsRevision must be nonzero";

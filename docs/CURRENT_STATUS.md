@@ -20,8 +20,8 @@
 
 - 存档提交 `0e3d4ac`，标签 `checkpoint/pre-video-hdr-fsr41-20260918`。
 - 隔离分支 `codex/video-hdr-20260918`；工作区 `E:/项目/Veyra/worktrees/video-hdr-20260918`。
-- RTX Video HDR 使用官方本地 SDK 1.1.0；新功能尚未通过 Create/Evaluate、颜色及导出验证。
-- NVIDIA FSR 4.1.1 使用固定提交的 INT8 研究 provider，尚未构建验证；不是 AMD 官方 NVIDIA 支持，不默认开放 UI。
+- RTX Video HDR 已接入共享图、设置和 Main10 导出；RTX 5070 / 616.56 上 Create/Evaluate、2X/4X/6X、NR+SR+6X、原生 HDR 回归、HDR 导出与缺库 SDR 回退通过。显示器 HDR 当前未开启，实际 HDR 显示、采集卡、PS5 与 RTX 30/40 未执行。
+- NVIDIA FSR 4.1.1 固定提交的 INT8 研究 provider 已构建，五个导出符号与 CPU 查询通过；GPU 接入尚未执行。上游三槽资源复用及私有队列 reset 需要适配，不默认开放 UI。
 - 本轮无 push、Release 或新增运行库发布授权。
 
 所有新产物放 `E:/项目/Veyra/`，源码/文档留在隔离工作区；逐项结果以 [WORKLOG](WORKLOG.md) 为准。

@@ -72,14 +72,16 @@ bool exportVideo(const std::wstring& input,const std::wstring& output,PlayerOpti
         const double sourceInterval=double(rateDen)/rateNum;
         const auto resolution=pipeline::ResolutionPlan::make({info.width,info.height},options.sr,pipeline::NrSizePolicy::Native,true,options.settings.revision,options.settings.srTarget);
         pipeline::EnhanceGraphDesc gd;gd.hdrInput=gd.hdrOutput=info.color.isHdrPath();
+        gd.videoHdr=options.settings.videoHdr;
+        gd.videoHdr.enabled=gd.videoHdr.enabled&&nvidiaAdapter;
+        gd.hdrOutput=gd.hdrInput||gd.videoHdr.enabled;
         // Plan v5.3: the grade changes the peak and the content light distribution.
         // Recomputing MaxCLL/MaxFALL needs a full pre-pass before the header is
         // written, which this exporter does not do yet, so say so instead of
         // letting the user assume the static metadata tracks the graded output.
-        if(gd.hdrOutput&&options.settings.color.enabled&&!options.settings.color.neutral())
+        if(gd.hdrInput&&gd.hdrOutput&&options.settings.color.enabled&&!options.settings.color.neutral())
             veyra::log::warn("color-export","HDR export with the colour grade active: MaxCLL/MaxFALL are carried over from the source and NOT recomputed for the graded output (marked as not updated)");
         gd.captureBitDepth=info.color.pixelFormat==pipeline::SourcePixelFormat::P010?10:info.color.pixelFormat==pipeline::SourcePixelFormat::P016?16:8;
-        if(gd.hdrOutput&&!hevc){hevc=true;fgNote+=fgNote.empty()?L"HDR 视频自动使用 HEVC Main10 编码":L"；HDR 视频自动使用 HEVC Main10 编码";}
         // Adapter gate mirrors the preview rules (EngineController): DLSS NR,
         // DLSS SR and the NVOF guidance need an NVIDIA device; AMD FSR
         // upscaling is the only vendor-neutral video SR we ship. Requesting an
@@ -96,6 +98,12 @@ bool exportVideo(const std::wstring& input,const std::wstring& output,PlayerOpti
         auto startGraph=[&](bool fg,uint32_t multiplier){
             gd.enableFg=fg;gd.fgMultiplier=fg?multiplier:1;
             if(graph.initialize(gd)&&graph.createViews()){graphReady=true;return;}
+            if(graph.failedBackend()==FailedBackend::VideoHdr||(gd.convertVideoHdr()&&!gd.enableNr&&!gd.enableSr&&!gd.enableFg&&graph.failedBackend()==FailedBackend::NgxCore)){
+                graph.shutdown();
+                gd.videoHdr.enabled=false;gd.hdrOutput=gd.hdrInput;
+                fgNote+=L"；RTX Video HDR 初始化失败，本次保留 SDR（错误码见日志）";
+                if(graph.initialize(gd)&&graph.createViews()){graphReady=true;return;}
+            }
             fgFailure=graph.failedBackend()==FailedBackend::Fg;
             graph.shutdown();
         };
@@ -107,6 +115,7 @@ bool exportVideo(const std::wstring& input,const std::wstring& output,PlayerOpti
             }
         } else startGraph(false,1);
         if(!graphReady){if(failureReason.empty())failureReason=L"增强管线初始化失败，请查看诊断";break;}
+        if(gd.hdrOutput&&!hevc){hevc=true;fgNote+=fgNote.empty()?L"HDR 视频自动使用 HEVC Main10 编码":L"；HDR 视频自动使用 HEVC Main10 编码";}
         if(!fgNote.empty())progress(0,fgNote);
         const AVRational rate=av_mul_q({rateNum,rateDen},{int(options.fg?options.fgMultiplier:1),1});
         constexpr AVRational mediaTimeBase{1,1000000};
@@ -119,7 +128,7 @@ bool exportVideo(const std::wstring& input,const std::wstring& output,PlayerOpti
         // needs a full pre-pass before the header is written), so the source
         // declaration is carried into the 'clli' box verbatim and the graded case
         // is flagged as "not updated" instead of silently changing meaning.
-        if(gd.hdrOutput&&info.color.hdrMaxCllNits>0.0f){
+        if(gd.hdrInput&&gd.hdrOutput&&info.color.hdrMaxCllNits>0.0f){
             if(auto* side=av_packet_side_data_new(&cp->coded_side_data,&cp->nb_coded_side_data,AV_PKT_DATA_CONTENT_LIGHT_LEVEL,sizeof(AVContentLightMetadata),0)){
                 auto* cll=reinterpret_cast<AVContentLightMetadata*>(side->data);
                 cll->MaxCLL=unsigned(info.color.hdrMaxCllNits);

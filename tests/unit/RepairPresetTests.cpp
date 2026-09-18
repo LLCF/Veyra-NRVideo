@@ -42,7 +42,7 @@ bool legacyBackends(const std::filesystem::path& path) {
    if(version>=7&&(value.audioSync!=AudioSyncMode::Manual||value.audioOffsetMs!=137))return false;
    if(!store.put(L"legacy",value,true))return false;
    std::ifstream file(path);std::string magic;int savedVersion=0;file>>magic>>savedVersion;
-   if(magic!="VEYRA_PRESETS"||savedVersion!=19)return false;   // schema v19 adds the per-section colour bypass
+   if(magic!="VEYRA_PRESETS"||savedVersion!=20||value.videoHdr.enabled)return false;
    PresetStore reloaded(path);
    if(!reloaded.load()||reloaded.defaultSettings()!=value)return false;
   }else{
@@ -64,6 +64,7 @@ int main(int argc,char** argv){if(argc!=2)return 2;using namespace veyra::engine
  s.srTarget=veyra::pipeline::SrTarget::Uhd8K;
  s.audioSync=AudioSyncMode::Manual;s.audioOffsetMs=137;
 s.nrRuntime=NrRuntime::Community;s.captureCompatible=true;s.lowLatency=true;s.forceSdrPreview=true;
+s.videoHdr={true,110,80,45,800};
 // Colour grade round-trips through schema v18 (plan P1: named colour presets).
 s.color.temperature=-40;s.color.tint=7.5f;s.color.exposure=1.25f;s.color.contrast=-12.5f;s.color.highlights=18;s.color.shadows=-22;
 s.color.whites=9;s.color.blacks=-4;s.color.vibrance=33;s.color.saturation=-8;
@@ -81,6 +82,7 @@ auto badGrading=s;badGrading.color.grading[2].hue=400;ok=ok&&!b.put(L"invalid gr
 auto badCurve=s;badCurve.color.curves[1].count=3;badCurve.color.curves[1].points[1]={0.6f,0.5f};badCurve.color.curves[1].points[2]={0.2f,0.7f};ok=ok&&!b.put(L"unsorted curve",badCurve);
 auto badLut=s;badLut.color.lutInputSpace=3;ok=ok&&!b.put(L"invalid lut space",badLut);
 auto badExposure=s;badExposure.color.exposure=6;ok=ok&&!b.put(L"invalid exposure",badExposure);
+auto badHdr=s;badHdr.videoHdr.peakNits=2001;ok=ok&&!b.put(L"invalid HDR peak",badHdr);
 ok=ok&&b.entries().size()==1&&b.defaultSettings()==s;
  
  auto badTarget=s;badTarget.srTarget=static_cast<veyra::pipeline::SrTarget>(3);ok=ok&&!b.put(L"invalid target",badTarget);

@@ -127,7 +127,8 @@ add_library(veyra_ngx STATIC
   src/ngx/NgxCoreHost.cpp
   src/ngx/DlssNrRuntimeAdapter.cpp
   src/ngx/DlssSrBackend.cpp
-  src/ngx/VideoSrBackend.cpp
+    src/ngx/VideoSrBackend.cpp
+    src/ngx/TrueHdrBackend.cpp
   src/ngx/DlssFgBackend.cpp
   src/ngx/FgCompatibilitySession.cpp
   src/ngx/compat/hde/hde64.c
@@ -784,6 +785,10 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
   target_compile_definitions(veyra_multichannel_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   target_link_libraries(veyra_multichannel_tests PRIVATE veyra_engine)
   add_executable(veyra_hdr_enhancement_tests tests/integration/HdrEnhancementTests.cpp)
+  add_executable(veyra_video_hdr_tests tests/integration/VideoHdrTests.cpp)
+  target_compile_features(veyra_video_hdr_tests PRIVATE cxx_std_20)
+  target_compile_definitions(veyra_video_hdr_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_link_libraries(veyra_video_hdr_tests PRIVATE veyra_engine)
   target_compile_features(veyra_hdr_enhancement_tests PRIVATE cxx_std_20)
   target_compile_definitions(veyra_hdr_enhancement_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   target_link_libraries(veyra_hdr_enhancement_tests PRIVATE veyra_engine)
@@ -907,6 +912,8 @@ endif()
 
 # Layered child subtitle windows require a modern-Windows compatibility manifest.
 configure_file(apps/veyra/version.rc.in ${CMAKE_CURRENT_BINARY_DIR}/veyra-version.rc @ONLY)
+configure_file(apps/veyra/resource.h ${CMAKE_CURRENT_BINARY_DIR}/veyra-resource.h COPYONLY)
+configure_file(assets/veyra.ico ${CMAKE_CURRENT_BINARY_DIR}/veyra.ico COPYONLY)
 target_sources(veyra PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/veyra-version.rc)
 set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/veyra-version.rc PROPERTIES
   OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/assets/veyra.ico;${CMAKE_CURRENT_SOURCE_DIR}/apps/veyra/resource.h")

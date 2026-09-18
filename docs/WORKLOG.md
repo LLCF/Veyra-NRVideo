@@ -1,5 +1,26 @@
 # Veyra 工作记录
 
+## 2026-09-18 Video HDR 共享图实现与 RTX 5070 验证
+
+新增 TrueHdrBackend、VideoHdrSettings、VideoHdrTests 与 build-isolated.ps1；更新 EnhanceGraph 的输入/工作/输出 HDR 合同、共享 graph/恢复/状态、Presenter SDR 对比白位、设置页与 schema 20、Main10 导出、CMake/资源脚本和导出探针。TrueHDR 在 SDR NR/SR/调色后、FG 前执行，原生 HDR 跳过；默认关闭。数值调整不重建图，开关按现有生命周期重建。新 DLL 仅在外部构建目录，未入 Git。
+
+构建命令：`./scripts/build-isolated.ps1 -Root . -BuildDirectory E:/项目/Veyra/build/video-hdr-20260918 -DependencyCache 'C:/Users/123/Desktop/Veyra DLSS Video Player/out/build/scheduling-audit-20260918/CMakeCache.txt' -TempDirectory E:/项目/Veyra/tmp/video-hdr-20260918 -Targets veyra,veyra_video_hdr_tests,veyra_hdr_enhancement_tests,veyra_export_probe`。MSVC 2022 / SDK 26100，patched FFmpeg 沿用；build-final.log exit 0。中间编译错误（AVFrame 完整类型/测试设置/回读格式）已修正后重建。
+
+硬件 RTX 5070 / 驱动 32.0.16.1656。以下命令均 exit 0，日志目录 `E:/项目/Veyra/logs/video-hdr-20260918/`：
+
+- `veyra_repair_preset_tests.exe <tests>/presets-test.txt`：新参数 roundtrip、边界及 66 个旧格式迁移通过。
+- `veyra_video_hdr_tests.exe 1`：Available=1、NeedsUpdatedDriver=0、最低 550.0；Create/Evaluate/Release=0x1，SEH=0；参数调整后峰值 400 nit、像素变化 0.448683（gpu-hdr-only.log）。
+- `veyra_video_hdr_tests.exe 2` / `4`：生成批次与像素验证通过（gpu-hdr-fg2.log / gpu-hdr-fg4.log）。
+- `veyra_video_hdr_tests.exe 6 1 0`：NR=12、DLSS SR=12、生成批次=10；峰值 397.862 nit（gpu-hdr-nr-sr-fg6.log）。
+- `veyra_hdr_enhancement_tests.exe 2`：原生 HDR 1024 像素合同、高光与增强回归通过（native-hdr-regression.log）。
+- `veyra_export_probe.exe <tests>/sdr-pattern.mp4 <tests>/hdr-export.mp4 --video-hdr`：90 帧导出；ffprobe=HEVC Main10/yuv420p10le/limited/BT2020nc/SMPTE2084/BT2020；开发期 ffmpeg 解码 exit 0。没有加入产品导出后扫描。
+- 临时将构建目录 TrueHDR DLL 移至本任务 tmp，重复导出为 missing-hdr-fallback.mp4：exit 0、SDR 回退；finally 恢复原 DLL（export-missing-hdr.log）。
+- `veyra.exe --video-hdr --smoke-seconds 8 --smoke-view professional <source>`：90 帧，failed=false。当前显示器 HDR 未开启，此次 GUI 是 SDR 显示回退，不证明屏幕 HDR 生效（player-hdr.log）。
+
+测试图与输出在 `E:/项目/Veyra/tests/video-hdr-20260918`，临时目录仅进程 TEMP/TMP 重定向到同任务 tmp。未执行：HDR 显示器实看/跨屏、物理采集/PS5、RTX 30/40。剩余 UI 视觉、更多格式/分辨率和交互需要专项验证。下一步建立 FSR 实验分支并修正 provider 调度合同。没有 push/Release。
+
+FSR 外部预备：上游 `int3rrobang/fsr4-int8-reverse-engineering@88635b94083965a7c3b5f64e099808b8ba2ce576` 在 `E:/项目/Veyra/deps/fsr41-nvidia-20260918`。本地 AMD SDK 2.3.0 / 官方 4.1.1.2740 DLL SHA256 `D0DCCCC74A43C44BA435B7A369B456E0970D8A4464E4BD683119B374F2C9FB46`。`bench/tools/build_411_dll.py --codegen-only`、VS2022 CMake Release 构建与 `ffx411_smoke.exe <provider>` 均 exit 0；产物在 `build/fsr41-provider-20260918`，日志在 `logs/fsr41-nvidia-20260918/provider-{codegen,configure,build}.log`。这只是构建及 CPU API 检查，尚未 GPU dispatch。
+
 ## 2026-09-18 Video HDR / NVIDIA FSR4 隔离施工启动
 
 用户授权存档、隔离、先更新文档并启动目标模式。main 研究文档提交 `0e3d4ac`，附注标签 `checkpoint/pre-video-hdr-fsr41-20260918`；`git worktree add` 建立 `codex/video-hdr-20260918`，路径 `E:/项目/Veyra/worktrees/video-hdr-20260918`，初始工作区干净。Goal 已启动，无推送/发布。

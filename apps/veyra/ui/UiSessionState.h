@@ -12,7 +12,7 @@ struct UiSessionState {
     engine::EnhancementSettings configured;
     // An explicit user toggle creates a settings transaction. Mode changes do
     // not call this function and cannot change enhancement configuration.
-    engine::EnhancementSettings effective()const{auto result=configured;if(!enhanced){result.nr=false;result.sr=false;result.multiplier=1;}return result;}
+    engine::EnhancementSettings effective()const{auto result=configured;if(!enhanced){result.nr=false;result.sr=false;result.multiplier=1;result.videoHdr.enabled=false;}return result;}
 };
 struct WorkspaceGeometry {
     int width,height,header=52,bottom=96,rail=0,inspector=0,diagnostics=0;
