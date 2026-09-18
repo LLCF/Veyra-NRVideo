@@ -1,4 +1,10 @@
-# 2026-09-11 继续修复目标模式执行中
+# Veyra 工作记录
+
+## 2026-09-18 Video HDR / NVIDIA FSR4 隔离施工启动
+
+用户授权存档、隔离、先更新文档并启动目标模式。main 研究文档提交 `0e3d4ac`，附注标签 `checkpoint/pre-video-hdr-fsr41-20260918`；`git worktree add` 建立 `codex/video-hdr-20260918`，路径 `E:/项目/Veyra/worktrees/video-hdr-20260918`，初始工作区干净。Goal 已启动，无推送/发布。
+
+先刷新双语 README 的导出/HDR 状态，新增 CURRENT_STATUS，给历史产品规范/ACTIVE_DELIVERY_PLAN 加当前入口，更新构建路径规则与当前授权。历史证据不冒充本轮测试。新产物预定在 `E:/项目/Veyra/{build,tests,logs,tmp}/video-hdr-20260918`；FSR 实验在相应 `fsr41-nvidia-20260918` 目录。此时尚未执行新后端、构建或 GPU 验证。
 
 ## 2026-09-18 Video HDR 与 NVIDIA FSR 4.1 施工方案
 

@@ -2,7 +2,7 @@
 
 日期：2026-09-18
 
-本方案对应用户决定：先接入 RTX Video HDR，再设法把 FSR 4.1 AI 超分接入 NVIDIA 路径。当前只完成方案，不代表功能已经实现；本轮不加载新运行库、不改驱动、不构建、不发布。
+本方案对应用户决定：先接入 RTX Video HDR，再设法把 FSR 4.1 AI 超分接入 NVIDIA 路径。用户已授权施工、构建和本地测试；不改全局驱动设置、不推送、不发布。当前进度见下方执行记录与 WORKLOG，不由计划推断测试成功。
 
 ## 目标与边界
 
@@ -33,7 +33,7 @@
 1. `codex/video-hdr-20260918`：从当前 main 创建；先完成 Video HDR 最小闭环和导出。
 2. `codex/fsr41-nvidia-20260918`：从 Video HDR 分支的稳定提交创建；只放 FSR 4.1 provider/适配和实验探针。
 
-本轮不自动创建分支。实际开工时先保存 `git status --short --branch`、当前提交和 `git worktree list --porcelain`，分支工作区使用 `E:/项目/Veyra/worktrees/`。所有构建、SDK 副本、日志、测试包和临时目录遵守 AGENTS.md 的 `E:/项目/Veyra/` 规则。
+开工已保存 Git 状态并创建存档 `0e3d4ac` / `checkpoint/pre-video-hdr-fsr41-20260918`，HDR 隔离工作区为 `E:/项目/Veyra/worktrees/video-hdr-20260918`。FSR 分支在 HDR 稳定提交后创建。所有构建、SDK 副本、日志、测试包和临时目录遵守 AGENTS.md 的 `E:/项目/Veyra/` 规则。
 
 Video HDR 现有运行库身份（只读记录，不代表已执行）：
 
@@ -174,6 +174,6 @@ FSR 4.1 实验不修改 NVAPI 伪装、DLSS MFG 解锁或现有 FG 调度；这�
 6. 接入 Fsr41NvidiaBackend 和独立探针，完成 A/B 与硬件矩阵。
 7. 只有两阶段证据齐全后才讨论 UI 默认项、Release runtime 和版本号。
 
-## 当前未执行
+## 执行记录
 
-本方案创建前已检查现有 `EnhanceGraph`、`FsrSrBackend`、`VideoSrBackend`、`VideoPresenter`、`NvencD3D12Encoder`、`VideoExportJob` 和本地 RTX Video SDK。当前没有创建分支，没有修改运行代码，没有加载 `nvngx_truehdr.dll`，没有构建 TrueHDR 或 FSR4 provider，没有执行 Create/Evaluate、画质、性能、导出或硬件验证。下一步开工从第 1 项开始。
+2026-09-18：已建立存档、隔离分支与 Goal，先刷新文档。尚未修改运行代码、加载 `nvngx_truehdr.dll`、构建 TrueHDR/FSR4 provider 或执行 Create/Evaluate、画质、性能、导出及硬件验证。下一步为 A1/A2。

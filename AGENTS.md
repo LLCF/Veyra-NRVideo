@@ -1,5 +1,7 @@
 # Veyra 项目 Agent 执行规则
 
+> 2026-09-18 当前授权：先更新项目文档，在 `codex/video-hdr-20260918` 隔离实施 RTX Video HDR，再验证 NVIDIA FSR 4.1.1 INT8 研究 provider。此决定扩展 09-16 的 NVIDIA FSR4 观察范围，允许本地构建/接入/测试，不代表正式支持或发布授权。存档 `checkpoint/pre-video-hdr-fsr41-20260918`；当前事实见 `docs/CURRENT_STATUS.md` 与 `docs/VIDEO_HDR_FSR41_EXECUTION_PLAN_2026-09-18.md`。旧计划中“尚未发布/尚未实现”的历史语句不覆盖 1.4.1 发布记录。
+
 ## 本机产物目录规则（2026-09-18 用户决定）
 
 - 今后 Agent 创建的 Veyra 构建、测试、下载、打包、解压验证、诊断和临时文件，统一写入 **`E:\项目\Veyra\`**，不得再散落桌面、Downloads、C 盘根目录或系统 Temp，也不再在源码仓库内新建这些产物。源码、受版本控制的脚本和文档仍留在源码仓库；运行库、SDK 和模型仍禁止进入源码 Git。

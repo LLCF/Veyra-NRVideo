@@ -2,6 +2,14 @@
 
 普通用户下载Release免安装包即可。以下用于开发者构建，不需要把SDK提交到Git。
 
+## Current workspace policy / 当前本机目录
+
+2026-09-18 起，本机所有新构建、日志、临时文件和测试包放到 `E:/项目/Veyra/`。当前隔离源码为 `E:/项目/Veyra/worktrees/video-hdr-20260918`，构建为 `E:/项目/Veyra/build/video-hdr-20260918`，进程级 `TEMP`/`TMP` 为 `E:/项目/Veyra/tmp/video-hdr-20260918`。SDK、运行库和既有 patched FFmpeg 继续引用原绝对路径，不进入源码 Git。
+
+下文 `out/`、`logs/` 和 1.3.0 命令是历史参考，不能原样作为本机新任务默认命令。执行脚本须显式传 `-BuildDirectory`、`-LogDirectory`/`-LogPrefix`；脚本仍硬编码产物位置时先修正再运行。隔离 worktree 不含忽略的 SDK，不能依赖 `build.ps1` 自动探测便宣称构建了完整播放器。需显式配置 NGX、FSR、XeSS、NVENC 和 Remote Play 的实际依赖路径，并保留 FFmpeg slice 补丁。
+
+本轮可复现命令与结果随施工记录在 [Video HDR 计划](VIDEO_HDR_FSR41_EXECUTION_PLAN_2026-09-18.md) 和 [WORKLOG](WORKLOG.md)；尚未运行的命令不作为构建成功证据。
+
 ## Current release / 当前版本（2026-09-18）
 
 Version 1.4.1 merges the post-1.4.0 player, scheduling, RTX30/40 FG and export repairs plus the AverMedia initialization repair. The release build uses `out/build/scheduling-audit-20260918`, RemotePlay ON and `C:/veyra-deps/ffmpeg-ps5-dav1d-installed`. See [release execution](RELEASE_1.4.1_EXECUTION.md), [corresponding source instructions](REMOTEPLAY_BUILD_1.4.1.md) and [runtime identities](RUNTIME_COMPONENTS_1.4.1.md).

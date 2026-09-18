@@ -4,6 +4,8 @@
 
 English | [简体中文](README.md)
 
+[Current status and development](docs/CURRENT_STATUS.md) · [Build instructions](docs/BUILD.md). The released version is 1.4.1. RTX Video HDR and experimental NVIDIA FSR 4.1.1 are being developed separately and are not included in that release.
+
 <p align="center">
   <a href="https://github.com/Likely7/Veyra-NRVideo/blob/main/REAMDE%20MP4.mp4">
     <img src="assets/readme-demo.gif" alt="Veyra demo video" width="960">
@@ -163,15 +165,15 @@ Select GPU DIS · FAST in the optical-flow menu to compare results. NVOF remains
 the default. This implementation was substantially slower than NVOF on our RTX
 5070 in a 1080p synthetic test; a performance improvement is not promised.
 
-Video export validates completeness before success and may take extra time to
-finish. Embedded subtitles are not preserved. Avoid simultaneous exports from
+Version 1.4.1 removes export qualification gates and the final frame-by-frame
+scan; encoding and muxing errors are still reported. Embedded subtitles are not preserved. Avoid simultaneous exports from
 multiple instances to the same target file.
 
 In Professional mode, click **Screenshot** in the top toolbar to save the latest processed full-resolution picture under **Pictures / Veyra Screenshots**: PNG for SDR and floating-point JPEG XR (`.jxr`) for HDR output. Use an HDR-capable viewer. Application UI and window zoom are excluded.
 
-## HDR and 5.1 (introduced in 1.2.0, retained in 1.3.0)
+## HDR and 5.1 (current 1.4.1)
 
-These capabilities were introduced in 1.2.0 and are retained in 1.3.0. Individual HDR displays, 5.1 endpoints, and capture cards still require hardware acceptance.
+Native HDR support was introduced in 1.2.0 and is retained in 1.4.1. SDR conversion using RTX Video HDR is a separate development task. Since 1.4.0, supported Dolby/DTS capture streams can be decoded to PCM; this is not compressed bitstream passthrough. Individual HDR displays, 5.1 endpoints, and capture cards still require hardware acceptance.
 
 - Files, P010/P016 capture and PS5 can use explicitly described BT.2020 NCL PQ/HLG input. Windows HDR enables retained HDR output with NR, DLSS SR / RTX Video SR and DLSS / XeSS FG. NR / Video SR use an SDR proxy plus the retained HDR base, with reduced changes near black and compressed highlights. This is not native HDR NR inference. HLG uses a 1000-nit, gamma-1.2 reference conversion.
 - Capture defaults to device color metadata. Manual PQ / HLG is available for devices that omit it, requiring P010/P016. Ten-bit storage alone does not identify HDR. RGB/YUY2 HDR and BT.2020 constant-luminance input are unsupported.

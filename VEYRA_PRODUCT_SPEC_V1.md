@@ -1,6 +1,6 @@
 # Veyra V1 产品与技术规格
 
-> 2026-09-06 用户授权接管修订：当前推进、五分钟短测与用户实卡验收以 `docs/ACTIVE_DELIVERY_PLAN.md` 为准，取代下文旧的严格串行施工/30分钟测试/未接设备阻塞全部交付规则。历史记录不是当前通过证明。
+> 2026-09-18：本文保留 V1 历史基线。当前发布能力、HDR/多声道扩展、最高 6X 及新功能状态见 [CURRENT_STATUS](docs/CURRENT_STATUS.md)。当前任务按 [Video HDR / FSR4 施工方案](docs/VIDEO_HDR_FSR41_EXECUTION_PLAN_2026-09-18.md) 执行；下文旧 SDR 限制、2X 范围和门禁不撤销后续已授权实现。单次测试最多 300 秒，未实测项明确报告。
 
 版本：Launch V1.3（2026-09-06 接管重基线）
 

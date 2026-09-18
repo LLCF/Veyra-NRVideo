@@ -4,6 +4,8 @@
 
 [English](README_EN.md) | 简体中文
 
+[当前状态与开发任务](docs/CURRENT_STATUS.md) · [本机构建](docs/BUILD.md)。正式版为 1.4.1；RTX Video HDR 与 NVIDIA FSR 4.1.1 正在隔离开发，尚未包含在正式版中。
+
 <p align="center">
   <a href="https://github.com/Likely7/Veyra-NRVideo/blob/main/REAMDE%20MP4.mp4">
     <img src="assets/readme-demo.gif" alt="Veyra 演示视频" width="960">
@@ -112,7 +114,7 @@ BUG反馈与新功能
 
 ### 导出与运行组件
 
-在专业模式选择图片保存或视频导出、格式与输出位置。视频导出会在结尾核对完整性，可能需要额外时间，可取消。内嵌字幕暂不保留；不要让多个实例同时导出到同一个目标文件。XeSS 目前仅用于预览；视频导出使用已支持的 DLSS 路径。
+在专业模式选择图片保存或视频导出、格式与输出位置。1.4.1 已取消导出资格门禁和结束逐帧扫描；编码与封装失败仍报告真实错误，可取消任务。内嵌字幕暂不保留；不要让多个实例同时导出到同一个目标文件。XeSS 目前仅用于预览；视频导出使用已支持的 DLSS 路径。
 
 允许自行替换 DLL：退出软件后，NVIDIA 文件放在 `runtime/experimental/`，XeSS / XeLL 放在 `runtime_local/intel/experimental/`，保留文件名。软件不锁定哈希或签名；清单仅记录发布包原件，替换版的接口与硬件兼容性不作保证。卸载整个软件只需退出后删除解压目录。
 
@@ -143,9 +145,9 @@ NR 与 DLSS 帧生成属于 **community experimental / 社区实验集成**，�
 
 Veyra 原有源码采用 [GPLv3](LICENSE)；含串流的组合程序同时适用 [AGPLv3 与上游 OpenSSL 例外](licenses/remoteplay/CHIAKI_AGPL3_OPENSSL.txt)。应用源码对应版本标签，Release 另附串流依赖与 FFmpeg 对应源码包，普通用户无需下载。SDK、模型和运行时不进入源码仓库；Release 组件按各自许可与实验发布范围单独提供。
 
-## HDR 与 5.1（1.2.0 起，1.3.0 保留）
+## HDR 与 5.1（当前 1.4.1）
 
-以下能力在 1.2.0 引入并由 1.3.0 保留。真实 HDR 屏、5.1 扬声器和不同采集卡仍须逐台验收。
+原生 HDR 能力自 1.2.0 引入并保留至 1.4.1；SDR 转 RTX Video HDR 是独立的新开发任务。真实 HDR 屏、5.1 扬声器和不同采集卡仍须逐台验收。1.4.0 起采集 Dolby/DTS 可解码到 PCM，不等于压缩码流直通。
 
 - **HDR 输入 / 增强**：文件、P010/P016 采集与 PS5 HDR；支持明确标记的 BT.2020 NCL / PQ 或 HLG。Windows HDR 开启时，可组合 NR、DLSS SR / RTX Video SR、DLSS / XeSS 补帧。NR / Video SR 使用 SDR 代理和 HDR 基底合成，压缩高光和近黑区域的增强会衰减；不把 SDR 结果逆造为原始 HDR。HLG 使用 1000nit / gamma 1.2 参考转换。
 - **SDR 显示开关**：采集卡面板的“转为 SDR 显示”默认关闭，控制所有实时预览。打开后将 HDR 映射为 SDR，增强照常可用；播放中切换无需重连，可能短暂停顿。关闭后跟随显示器 HDR 状态。截图跟随当前画面，视频导出保持原有 HDR 规则。
