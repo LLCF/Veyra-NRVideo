@@ -36,6 +36,7 @@ public:
         uint32_t width = 1280;
         uint32_t height = 720;
         bool vsync = true;
+        bool waitable = false;
         bool xess = false;
         // AMD FSR frame generation: the provider creates the proxy swapchain.
         bool fsr = false;
@@ -70,6 +71,9 @@ public:
     // Presents the current back buffer. Returns false on device-lost class
     // failures (caller must trigger recovery).
     bool present(Status& status);
+    bool configurePacing(bool enabled,bool vsync);
+    bool presentationReady();
+    bool pacingActive()const{return pacing_;}
 
     void resize(uint32_t width, uint32_t height);
 
@@ -126,6 +130,8 @@ private:
     UINT backBufferIndex_ = 0;
     bool closed_ = false;
     bool shutdownCalled_ = false;
+    HANDLE latencyHandle_=nullptr;
+    bool pacing_=false,capacityAcquired_=false;
 };
 
 } // namespace veyra::gfx

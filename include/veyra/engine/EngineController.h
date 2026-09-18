@@ -7,6 +7,7 @@
 #include <condition_variable>
 #include <functional>
 #include "veyra/engine/EnhancementSettings.h"
+#include "veyra/engine/PresentationSettings.h"
 #include "veyra/diagnostics/FrameMetrics.h"
 #include "veyra/engine/PreviewView.h"
 #include "veyra/sink/CaptureAudioSession.h"
@@ -28,6 +29,9 @@ struct PlayerOptions { bool nr=false,sr=false,fg=false,realtime=true; uint32_t f
 };
 enum class TransportState { Empty, Opening, Playing, Paused, Ended, Stopping, Failed };
 struct PlayerSnapshot {
+    PresentationSettings presentation, presentationEffective;
+    uint64_t presentationRevision=0;
+    std::wstring presentationStatus;
     TransportState transport=TransportState::Empty;
     uint64_t sessionId=0,rejectedRevision=0;float volume=1;bool muted=false,audioAvailable=false;
     std::wstring status=L"请打开视频或图片";
@@ -92,6 +96,7 @@ public:
     ~EngineController();
     bool idle()const;
     bool requestSettings(EnhancementSettings);
+    void requestPresentation(PresentationSettings);
     void open(HWND video,const std::wstring& path,PlayerOptions options);
 #ifdef VEYRA_ENABLE_REMOTEPLAY
     void openRemotePlay(HWND, source::RemotePlayConnectDesc, PlayerOptions);
@@ -118,6 +123,8 @@ private:
     void status(const std::wstring&,bool failed=false);
     mutable std::mutex mutex_;
     PlayerSnapshot snapshot_;
+    PresentationSettings presentation_;
+    uint64_t presentationRevision_=1;
     std::shared_ptr<FrameFlowWindow> activeFlow_;
     std::shared_ptr<source::RemotePlaySessionSource> activeRemote_;
     PreviewView previewView_;

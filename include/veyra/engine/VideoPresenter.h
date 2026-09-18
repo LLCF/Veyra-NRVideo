@@ -4,6 +4,8 @@
 #include "veyra/pipeline/GpuPassUtils.h"
 #include "veyra/engine/PreviewView.h"
 #include "veyra/gfx/CommandSlotRing.h"
+#include "veyra/gfx/ReflexSession.h"
+#include "veyra/engine/PresentationSettings.h"
 #include <chrono>
 namespace veyra::gfx { class D3D12DeviceContext; class CommandSlotRing; }
 namespace veyra::pipeline { class EnhanceGraph; }
@@ -15,6 +17,14 @@ public:
     bool open(gfx::D3D12DeviceContext&, HWND, pipeline::EnhanceGraph&, bool captureCompatible=false);
     bool present(gfx::D3D12DeviceContext&,gfx::CommandSlotRing&,pipeline::EnhanceGraph&,unsigned slot,bool generated,bool referencesValid=true,int comparison=0,bool baseReference=false,float split=.5f,pipeline::FrameIdentity identity={},PreviewView view={});
     void close();
+    PresentationSettings configurePresentation(gfx::D3D12DeviceContext&,PresentationSettings,bool fg,std::wstring& status);
+    bool presentationReady(){return sink_.presentationReady();}
+    uint64_t beginReflex(){return reflex_.begin();}
+    void reflexFrame(uint64_t id){reflexFrame_=id;}
+    bool reflexActive()const{return reflex_.active();}
+    bool reflexDisablePending()const{return reflex_.disablePending();}
+    bool pacingActive()const{return sink_.pacingActive();}
+    uint64_t generation()const{return generation_;}
     // Explicit integration-test capture only; never called by playback/export.
     bool readPresentedFrameForTest(gfx::D3D12DeviceContext&,gfx::CommandSlotRing&,sink::RgbaImage&);
     // Test-only buffer reference for lossless HDR readback. Drains the private
@@ -47,6 +57,8 @@ public:
 std::vector<diagnostics::GpuFrameTiming> takeGpuTimings(ID3D12Fence* fence){gpuTimer_.collect(presentationFence_?presentationFence_.Get():fence);return gpuTimer_.takeCompleted();}
 void recordGpuTimings(){gpuTimer_.recordCompleted();}
 private:
+    gfx::ReflexSession reflex_;
+    uint64_t reflexFrame_=0,generation_=0;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> presentationQueue_;
     Microsoft::WRL::ComPtr<ID3D12Fence> presentationFence_;
     HANDLE presentationEvent_=nullptr;

@@ -119,6 +119,7 @@ bool PresentSink::initialize(ID3D12Device* device, ID3D12CommandQueue* queue,
     // external capture API. Neither mode changes the pixel format.
     scd.SwapEffect = desc.captureCompatible ? DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL : DXGI_SWAP_EFFECT_FLIP_DISCARD;
     scd.Flags = tearingSupported_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
+    if(desc.waitable&&!desc.xess&&!desc.fsr)scd.Flags|=DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
 
     ComPtr<IDXGISwapChain1> swapChain1;
     // Backend switch bookkeeping. A retained AMD proxy and a live XeSS wrapper
@@ -198,8 +199,15 @@ bool PresentSink::initialize(ID3D12Device* device, ID3D12CommandQueue* queue,
         }
     }
     if (!swapChain_) {
-    if (FAILED(factory_->CreateSwapChainForHwnd(queue, hwnd_, &scd, nullptr, nullptr, &swapChain1))) {
-        log::error("present", "CreateSwapChainForHwnd failed");
+    HRESULT created=factory_->CreateSwapChainForHwnd(queue, hwnd_, &scd, nullptr, nullptr, &swapChain1);
+    if(FAILED(created)&&(scd.Flags&DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT)){
+        log::warn("pacing",std::format("waitable swapchain unavailable hr=0x{:X}; retrying baseline",unsigned(created)));
+        scd.Flags&=~DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+        swapChain1.Reset();
+        created=factory_->CreateSwapChainForHwnd(queue,hwnd_,&scd,nullptr,nullptr,&swapChain1);
+    }
+    if (FAILED(created)) {
+        log::error("present",std::format("CreateSwapChainForHwnd failed hr=0x{:X}",unsigned(created)));
         status = Status::WindowFailure;
         return false;
     }
@@ -237,6 +245,10 @@ bool PresentSink::initialize(ID3D12Device* device, ID3D12CommandQueue* queue,
     }
     if(actual.SwapEffect!=scd.SwapEffect)log::warn("present",std::format("swapchain mode negotiated requested={} actual={} (compatible flip model)",unsigned(scd.SwapEffect),unsigned(actual.SwapEffect)));
     swapChainFlags_=actual.Flags;
+    if(actual.Flags&DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT){
+        latencyHandle_=swapChain_->GetFrameLatencyWaitableObject();
+        if(!configurePacing(false,desc.vsync))log::warn("pacing","baseline latency configuration failed; playback remains available");
+    }
     tearingSupported_=tearingSupported_&&(actual.Flags&DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING)!=0;
     log::info("present", std::format("present-sink: window {}x{} swapEffect={} buffers=3 vsync={} tearing={} captureCompatible={} (capture not verified)",
         width_, height_, actual.SwapEffect==DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL?"flip-sequential":"flip-discard", desc_.vsync ? 1 : 0, tearingSupported_ ? 1 : 0, desc.captureCompatible));
@@ -292,6 +304,7 @@ ID3D12Resource* PresentSink::currentBackBuffer(uint32_t* acquiredIndex)
 
 bool PresentSink::present(Status& status)
 {
+    capacityAcquired_=false;
     xessFailed_=false;
     fsrFailed_=false;
     const UINT syncInterval = desc_.vsync ? 1 : 0;
@@ -348,6 +361,21 @@ bool PresentSink::present(Status& status)
     return false;
 }
 
+bool PresentSink::configurePacing(bool enabled,bool vsync){
+    if(xess_||fsr_){pacing_=false;desc_.vsync=false;return !enabled;}
+    const HRESULT hr=latencyHandle_?swapChain_->SetMaximumFrameLatency(enabled?1:3):enabled?E_NOTIMPL:S_OK;
+    log::info("pacing",std::format("DXGI enabled={} maximumLatency={} vsync={} hr=0x{:X}",enabled,enabled?1:3,enabled&&vsync,unsigned(hr)));
+    pacing_=enabled&&SUCCEEDED(hr);desc_.vsync=pacing_&&vsync;capacityAcquired_=false;
+    return SUCCEEDED(hr);
+}
+bool PresentSink::presentationReady(){
+    if(!pacing_||!latencyHandle_||capacityAcquired_)return true;
+    const auto result=WaitForSingleObject(latencyHandle_,0);
+    if(result==WAIT_OBJECT_0)capacityAcquired_=true;
+    if(result==WAIT_FAILED){log::warn("pacing",std::format("DXGI capacity wait failed error={}",GetLastError()));configurePacing(false,false);return true;}
+    return capacityAcquired_;
+}
+
 bool PresentSink::waitForQueueIdle()
 {
     if (queue_ == nullptr || device_ == nullptr) return true;
@@ -399,6 +427,8 @@ void PresentSink::resize(uint32_t width, uint32_t height)
 
 void PresentSink::shutdown()
 {
+    if(latencyHandle_){CloseHandle(latencyHandle_);latencyHandle_=nullptr;}
+    pacing_=false;capacityAcquired_=false;
     // Dependency order (s10, proven by the 0x87D matrix): backbuffers ->
     // swapchain -> window -> factory. The window must OUTLIVE the swapchain:
     // with the D3D12 debug layer active, releasing a flip swapchain whose

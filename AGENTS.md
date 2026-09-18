@@ -1,5 +1,9 @@
 # Veyra 项目 Agent 执行规则
 
+> 2026-09-18 用户授权目标模式实施可关闭帧同步、多模式与实际延迟验收。开工存档 `6e69eeb` / `checkpoint/pre-frame-pacing-20260918`，隔离分支 `codex/frame-pacing-20260918`。按 `docs/FRAME_PACING_EXECUTION_PLAN_2026-09-18.md` 施工，默认关闭、直接 NGX、保留 6X，不推送或发布。报告必须区分进程内排队、系统显示事件与未测量的屏幕端到端延迟。
+
+> 本轮交付状态见 `docs/FRAME_PACING_ACCEPTANCE_2026-09-18.md`：本机软件短测完成，原生 Reflex 仅无补帧路径；FG 下显示回退低排队，XeSS 不叠加外部节奏。不得将软件驻留减少冒充屏幕延迟降低，不得把本机 RTX5070 验收扩展为 30/40、实卡采集、PS5 或 VRR 通过。完整 Reflex+FG 与显示延迟验收仍未完成；现有 beta 包不含本轮改动。
+
 > 2026-09-18 当前用户授权制作 1.4.2beta 内测群便携包，包含 FSR4 回退及保留的 RTX Video HDR。允许携带已核验的 RTX Video SDK 1.1.0 TrueHDR 原件（SHA256 9A80575F247190C05FE80EAC0C4BAA1D0D4D932348F26808310B5EC4BF9EEB4B，3955752 bytes，1.1.0.0，Valid），其余组件沿用 1.4.1 身份，逐文件 manifest 及许可证随包提供。仅本地交付用户自行发群；无 GitHub 推送、Release 或 Agent 代发消息授权。
 
 > 2026-09-18 最新用户决定：停止并回退 NVIDIA FSR 4.1 实验，撤销其 UI、provider 接入及测试/打包入口；不继续画质修复。保留 RTX 超分、原有官方 FSR 和独立 RTX Video HDR 改动。本条覆盖下方 FSR4 本地试验授权；历史研究仅供追溯，不是待办。旧实验预设的 mode 6 读取时迁移到 RTX Video SR 高档，其他设置保留。

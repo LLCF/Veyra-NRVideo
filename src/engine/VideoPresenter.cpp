@@ -6,6 +6,7 @@
 namespace veyra::engine {
 bool VideoPresenter::open(gfx::D3D12DeviceContext& ctx,HWND window,pipeline::EnhanceGraph& graph,bool captureCompatible) {
     close();
+    ++generation_;
     Status st=Status::Ok;
     if(graph.fgEnabled()&&!graph.xessEnabled()&&!graph.fsrEnabled()){
         D3D12_COMMAND_QUEUE_DESC desc{};desc.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -19,6 +20,7 @@ bool VideoPresenter::open(gfx::D3D12DeviceContext& ctx,HWND window,pipeline::Enh
     auto* queue=presentationQueue_?presentationQueue_.Get():ctx.directQueue();
     gpuTimer_.initialize(ctx.device(),queue);window_=window;RECT rc{};GetClientRect(window,&rc);
     gfx::PresentSink::Desc d;d.targetWindow=window;d.width=std::max(1L,rc.right);d.height=std::max(1L,rc.bottom);d.vsync=false;
+    d.waitable=!GetEnvironmentVariableW(L"VEYRA_TEST_LEGACY_SWAPCHAIN",nullptr,0);
     d.hdr=graph.hdrOutput();d.hdr10=graph.hdr10Output();d.xess=graph.xessEnabled();d.fsr=graph.fsrEnabled();d.renderWidth=graph.workWidth();d.renderHeight=graph.workHeight();d.captureCompatible=captureCompatible;d.fgMultiplier=graph.fgMultiplier();lastXessFrame_={};lastXessIdentity_={};xessWasEnabled_=false;lastFsrFrame_={};lastFsrIdentity_={};fsrWasEnabled_=false;
     if(!sink_.initialize(ctx.device(),queue,d,st))return false;
     std::vector<uint8_t> vs,ps;
@@ -153,7 +155,9 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
     if(!ring.submitAndSignal(commandSlot))return false;gpuTimer_.submitted(ring.lastSignaledValue());lastBuffer_=backBufferIndex;hasPresented_=true;
     if(presentationQueue_)graph.presentationSubmitted(slot,fence,ring.lastSignaledValue());
     const auto dxgiStart=std::chrono::steady_clock::now();
+    reflex_.mark(reflexFrame_,3);reflex_.mark(reflexFrame_,4);
     const bool presented=sink_.present(st);
+    reflex_.mark(reflexFrame_,5);reflexFrame_=0;
     const auto presentEnd=std::chrono::steady_clock::now();
     if(presentEnd>=nextCostLog_){
         nextCostLog_=presentEnd+std::chrono::seconds(1);
@@ -171,10 +175,28 @@ bool VideoPresenter::readPresentedFrameForTest(gfx::D3D12DeviceContext& ctx,gfx:
     return SUCCEEDED(sink_.swapChain()->GetBuffer(lastBuffer_,IID_PPV_ARGS(&buffer)))&&sink::readRgba8(ctx,ring,buffer.Get(),image);
 }
 void VideoPresenter::close(){
+    reflex_.close();reflexFrame_=0;
     if(presentationRing_.initialized())presentationRing_.drainQueue();
     hasPresented_=false;gpuTimer_.close();rtvs_.Reset();pass_={};sink_.shutdown();
     presentationRing_.shutdown();presentationFence_.Reset();presentationQueue_.Reset();
     if(presentationEvent_){CloseHandle(presentationEvent_);presentationEvent_=nullptr;}
+}
+PresentationSettings VideoPresenter::configurePresentation(gfx::D3D12DeviceContext& ctx,PresentationSettings requested,bool fg,std::wstring& status){
+    const bool reflexDisabled=reflex_.disable();reflexFrame_=0;
+    auto effective=requested;
+    if(!reflexDisabled){effective.enabled=false;sink_.configurePacing(false,false);status=L"Reflex 驱动状态撤销失败；应用等待已停用，请关闭视频后重试";return effective;}
+    if(!requested.enabled){const bool restored=sink_.configurePacing(false,false);status=restored?L"帧同步已关闭":L"应用等待已关闭，但显示队列恢复失败；请关闭视频后重试";return effective;}
+    if(xessActive()||fsrActive()){effective.enabled=false;sink_.configurePacing(false,false);status=L"当前由补帧提供方调度，帧同步选项暂不生效";return effective;}
+    if(!sink_.configurePacing(true,requested.display!=DisplaySync::Tearing)){effective.enabled=false;status=L"显示队列控制不可用，已回退原呈现方式";return effective;}
+    if(requested.mode==PacingMode::Reflex){
+        // Generated outputs need separately validated out-of-band markers.
+        if(fg||!reflex_.enable(ctx.device())){effective.mode=PacingMode::LowQueue;status=fg?L"补帧运行：Reflex 暂用低排队（保留补帧倍率）":L"Reflex 初始化失败，已回退低排队";return effective;}
+    }
+    status=effective.mode==PacingMode::Reflex?L"NVIDIA Reflex · 实验":effective.mode==PacingMode::Even?L"均匀呈现":L"低排队";
+    if(requested.display==DisplaySync::Automatic)status+=L" · 自动：垂直同步（VRR 状态未知）";
+    else if(requested.display==DisplaySync::Vsync)status+=L" · 垂直同步";
+    else status+=L" · 允许撕裂";
+    return effective;
 }
 Microsoft::WRL::ComPtr<ID3D12Resource> VideoPresenter::presentedResourceForTest() {
     Microsoft::WRL::ComPtr<ID3D12Resource> buffer;

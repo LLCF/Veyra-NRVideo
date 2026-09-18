@@ -1,5 +1,23 @@
 # Veyra 工作记录
 
+## 2026-09-18 帧同步隔离实现与本机验收交付
+
+在 `codex/frame-pacing-20260918` 完成默认关闭的低排队/均匀呈现/Reflex 实验、允许撕裂/VSync/自动、UI v6 独立持久化、请求与实际状态，以及相关回归。当前构建 `E:/项目/Veyra/build/frame-pacing-20260918/veyra.exe`。存档仍为 `6e69eeb` / `checkpoint/pre-frame-pacing-20260918`；没有合并 main、推送、发布或改动此前 beta 包。
+
+完整命令、各选项延迟表、真实 Create/Evaluate/NVAPI 返回码、失败修复、修改文件范围及未覆盖项见 [FRAME_PACING_ACCEPTANCE_2026-09-18.md](FRAME_PACING_ACCEPTANCE_2026-09-18.md)。`build-isolated.ps1` 最终构建 `veyra,veyra_presentation_pacing_tests,veyra_scheduling_chain_tests` exit0，日志 `E:/项目/Veyra/logs/frame-pacing-20260918/build-closeout.log`；effects 组合测试追加编译 exit0，`build-effects-test.log`。单测、实际 UI 重启/关闭、九种模式显示组合、DLSS2/4/6、各帧率、NR+SR+6X、过载/seek/resize、XeSS 调度归属、文件模拟采集、无音轨播放和 NVENC 取消/12帧导出均有实际 PASS 证据，统一在 `E:/项目/Veyra/tests/frame-pacing-20260918`。
+
+无补帧软件 ready→Present-return 中位数从81.548ms到约40.9ms，原因是提前增强从两批降至一批；不能解释为屏幕延迟降低40ms。6X各软件模式保持144提交fps，未证明显著延迟/抖动改善；100Hz VSync保持6X生成但只提交100fps，周期日志记录445张过期生成帧，不隐瞒丢弃。Reflex无补帧真实NVAPI开启/关闭status0，252次Sleep；FG下显式回退低排队，并没有完成原生Reflex+FG。
+
+发现并修正：完整周期最小间隔累积唤醒误差导致6X降136.67fps；状态控件ID与色彩控件范围冲突；采集无FG单批上限误依赖文件启动标志；文件模拟采集每批重锚导致关闭模式也跑快。保留中间失败日志，不将模拟回放当实卡验收。截图遮挡/PrintWindow失真另行处理，最终本应用截图已目视核对，遮挡误图删除。
+
+PresentMon ETW 因权限不足失败，显示事件及屏幕端到端延迟未测；未改变系统权限。30/40、实卡采集、PS5、VRR、多屏/HDR等未执行，完整原计划未全部验收。下一项唯一任务：反馈者同源同倍率的显示事件/音画对照，再决定是否合并。产物按规则集中，tmp为空，无新便携中间包；保留当前构建与必要证据，不新增专有SDK/运行库入Git。
+
+## 2026-09-18 帧同步施工启动
+
+用户授权先创建 Git 存档、更新文档、目标模式施工并验收各选项实际延迟。保存当前 FSR4 回退、HDR 和 beta 文档到 `6e69eeb`，标签 `checkpoint/pre-frame-pacing-20260918`；`git worktree add -b codex/frame-pacing-20260918 E:/项目/Veyra/worktrees/frame-pacing-20260918 HEAD` 创建隔离区。main 和旧 beta 包保持。更新 AGENTS、README、CURRENT_STATUS 与执行方案后开始代码工作，无 push/Release。
+
+工具检查：Git 2.53.0.windows.2；全局 PATH 无 cmake，将使用既有 build-isolated.ps1 定位 Visual Studio 附带 CMake/Ninja。后续 build/tests/logs/tmp 使用 `E:/项目/Veyra/<用途>/frame-pacing-20260918`，依赖沿用上一轮经过核验的缓存路径。当前无新增运行时或 SDK 入 Git。验收待执行，不以此记录宣称完成。
+
 ## 2026-09-18 可关闭帧同步实施方案
 
 用户要求功能可完全关闭、提供多个选项，本轮新增 `docs/FRAME_PACING_EXECUTION_PLAN_2026-09-18.md` 并更新 CURRENT_STATUS。方案明确默认关闭、低排队/均匀呈现/Reflex 实验三种开启模式，显示同步独立选择；关闭撤销新增等待和 Reflex 配置，保留基础音画同步、资源安全与补帧必要依赖。30/40 的 6X 选择保留，Reflex 必须通过直接 NGX 实测后才开放，不以黑盒限帧冒充。

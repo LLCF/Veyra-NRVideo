@@ -4,7 +4,7 @@
 
 English | [简体中文](README.md)
 
-[Current status and development](docs/CURRENT_STATUS.md) · [Build instructions](docs/BUILD.md). The released version is 1.4.1. RTX Video HDR and experimental NVIDIA FSR 4.1.1 are being developed separately and are not included in that release.
+[Current status and development](docs/CURRENT_STATUS.md) · [Build instructions](docs/BUILD.md). The released version is 1.4.1. The local 1.4.2beta package includes RTX Video HDR; the NVIDIA FSR 4.1 experiment was reverted. Optional frame pacing is implemented on an isolated branch, disabled by default, under Professional mode > Motion. See the [local acceptance and latency report](docs/FRAME_PACING_ACCEPTANCE_2026-09-18.md); this change is not in the existing beta package. Native Reflex is experimental without frame generation; with FG it explicitly falls back to low queue mode while preserving the multiplier.
 
 <p align="center">
   <a href="https://github.com/Likely7/Veyra-NRVideo/blob/main/REAMDE%20MP4.mp4">

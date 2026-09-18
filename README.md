@@ -4,7 +4,7 @@
 
 [English](README_EN.md) | 简体中文
 
-[当前状态与开发任务](docs/CURRENT_STATUS.md) · [本机构建](docs/BUILD.md)。正式版为 1.4.1；RTX Video HDR 与 NVIDIA FSR 4.1.1 正在隔离开发，尚未包含在正式版中。
+[当前状态与开发任务](docs/CURRENT_STATUS.md) · [本机构建](docs/BUILD.md)。正式版为 1.4.1；1.4.2beta 已本地交付 RTX Video HDR 内测，NVIDIA FSR 4.1 实验已撤回。隔离分支已实现默认关闭的帧同步，入口为专业模式 → 运动 → 帧同步；[本机验收与延迟报告](docs/FRAME_PACING_ACCEPTANCE_2026-09-18.md)记录适用范围，尚未加入现有内测包。
 
 <p align="center">
   <a href="https://github.com/Likely7/Veyra-NRVideo/blob/main/REAMDE%20MP4.mp4">

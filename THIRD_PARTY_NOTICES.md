@@ -315,6 +315,39 @@ This runtime retains the NVIDIA RTX Video SDK license; it is not relicensed unde
 Veyra's GPL. SDK/license and runtime remain external. This change does not publish
 or grant redistribution of a new runtime pack.
 
+## NVAPI Reflex ABI reference (2026-09-18)
+
+Source: https://github.com/NVIDIA/nvapi/tree/87dca625e83fd89a983e19b904e5f3a580da90d2
+(`nvapi.h`, `nvapi_interface.h`, `nvapi_lite_common.h`), MIT.
+`include/veyra/gfx/ReflexSession.h` contains minimal renamed ABI declarations for
+SetSleepMode v1 and SetLatencyMarker v1, and QueryInterface IDs for initialization,
+unloading, sleep and markers. Adaptations: independent RAII device lifetime,
+absolute system-driver loading, return-code logging, successful call counts and
+explicit disable. No complete SDK header or NVIDIA runtime is committed or bundled.
+The driver is supplied by Windows/NVIDIA. Frame markers delimit Veyra enhancement
+and presentation, not game input or physical display latency. Generated-frame
+Reflex integration is not enabled; DLSS retains its selected multiplier.
+
+Copyright (c) 2019-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 ## dav1d (1.3.0 AV1 playback)
 
 FFmpeg dynamically links dav1d 1.5.4 from the pinned local vcpkg build. The portable package includes its complete aggregated copyright/license text in `licenses/DAV1D-COPYRIGHT.txt` and provenance in `licenses/DAV1D-SPDX.json`. The FFmpeg corresponding-source ZIP includes dav1d source and its vcpkg port. Upstream: https://code.videolan.org/videolan/dav1d . License set recorded by the build: Apache-2.0, BSD-2-Clause, ISC and MIT; retain all notices supplied with the source.
