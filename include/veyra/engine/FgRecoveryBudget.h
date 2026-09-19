@@ -14,6 +14,11 @@ class FgRecoveryBudget {
     std::deque<Sample> base_,fg_,warmup_;
     bool limited_=false;
     unsigned recoveryPairs_=0;
+    bool recordAdmission(bool fits){
+        if(!fits){limited_=true;recoveryPairs_=0;return false;}
+        if(limited_&&++recoveryPairs_>=2){limited_=false;recoveryPairs_=0;}
+        return true;
+    }
     static void add(std::deque<Sample>& values,int64_t now,double ms){
         if(!std::isfinite(ms)||ms<0)return;
         while(!values.empty()&&(values.size()>=64||values.front().time<now-10000000))values.pop_front();
@@ -63,16 +68,22 @@ public:
         const double queued=std::isfinite(queuedMs)?std::max(0.0,queuedMs):0.0;
         const double progress=std::clamp(elapsed,0.0,queued+baseCost(now).value_or(0));
         const bool fits=double(deadline-now)/10000+10>=std::max(0.0,queued+cost.value_or(0)-progress)+std::max(0.0,present);
-        if(!fits){
-            limited_=true;recoveryPairs_=0;return false;
-        }
-        if(limited_){
-            // A probe consists of consecutive admitted pairs, not an isolated
-            // warmup. A fresh pair that fits can recover immediately; a fixed
-            // cooldown otherwise discards 15 healthy 60 Hz opportunities.
-            if(++recoveryPairs_>=2){limited_=false;recoveryPairs_=0;}
-        }
-        return true;
+        return recordAdmission(fits);
+    }
+    bool admitFile(int64_t now,int64_t firstDeadline,int64_t lastDeadline,int64_t outputInterval,
+                   double elapsed,double present,std::optional<double> firstFgMs,bool warmingHistory,double queuedMs){
+        const auto whole=predicted(now,warmingHistory),base=baseCost(now);
+        if(warmingHistory||!whole||!base||!firstFgMs||!std::isfinite(*firstFgMs)||*firstFgMs<0)
+            return admit(now,lastDeadline,elapsed,present,warmingHistory,queuedMs);
+        const double queued=std::isfinite(queuedMs)?std::max(0.0,queuedMs):0.0;
+        const double progress=std::clamp(elapsed,0.0,queued+*base);
+        const double blit=std::max(0.0,present),grace=double(std::max<int64_t>(0,outputInterval))/10000;
+        const auto fits=[&](int64_t deadline,double cost){
+            return double(deadline-now)/10000+grace>=std::max(0.0,queued+cost-progress)+blit;
+        };
+        // The first output must be reachable too: the last deadline alone can
+        // admit a whole MFG group whose early outputs are already doomed.
+        return recordAdmission(fits(firstDeadline,*base+*firstFgMs)&&fits(lastDeadline,*whole));
     }
     bool recovering()const{return limited_&&recoveryPairs_>0;}
 };

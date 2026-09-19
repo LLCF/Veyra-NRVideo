@@ -194,7 +194,9 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
     try {
         do {
             Status st=Status::Ok;gfx::DeviceContextDesc dd;dd.commandSlotCount=6;
-            wchar_t testSlots[16]{};unsigned commandSlots=6;
+            // Two bounded jobs, each up to three enhancement lists plus five
+            // MFG lists. Allocators must not stall the presentation owner.
+            wchar_t testSlots[16]{};unsigned commandSlots=16;
             if(GetEnvironmentVariableW(L"VEYRA_TEST_COMMAND_SLOTS",testSlots,16))commandSlots=std::clamp(unsigned(_wtoi(testSlots)),6u,24u);
             if(!ctx.initialize(dd,st)||!ring.initialize(ctx.device(),ctx.directQueue(),ctx.fence(),ctx.fenceEvent(),commandSlots,st)){status(L"D3D12初始化失败，请查看诊断",true);break;}
             auto ext=std::filesystem::path(path).extension().wstring();for(auto& c:ext)c=towlower(c);
@@ -1057,13 +1059,13 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 const bool injectedReject=transaction&&!options.nr&&GetEnvironmentVariableW(L"VEYRA_TEST_REJECT_NR_DISABLE",nullptr,0)>0;
                 if(injectedReject)veyra::log::error("settings-test","test-only reject NR-disable transaction before graph process; no driver failure");
                 pipeline::EnhanceGraph::FgAdmission admitFg;
-                const auto logAdmission=[&](const pipeline::FrameBatch& batch,int64_t now,int64_t deadline,double elapsed,double blit,bool admitted,bool warmingHistory,const char* timeline){
+                const auto logAdmission=[&](const pipeline::FrameBatch& batch,int64_t now,int64_t deadline,double elapsed,double blit,bool admitted,bool warmingHistory,const char* timeline,int64_t firstDeadline=0,double queuedMs=0){
                     if(admitted)++fgAdmittedPairs;else ++fgRejectedPairs;
                     // Keep the first rejection even if the periodic sample just
                     // logged a success. Both channels remain rate bounded.
                     if(now<nextFgAdmissionLog&&(admitted||now<nextFgRejectionLog))return;
                     nextFgAdmissionLog=now+10000000;if(!admitted)nextFgRejectionLog=now+10000000;
-                    veyra::log::info("live-fg-admission",std::format("timeline={} revision={} source={} multiplier={} admitted={} admittedPairs={} rejectedPairs={} remainingDeadlineMs={:.3f} predictedMs={:.3f} elapsedMs={:.3f} blitGpuP95Ms={:.3f} presentCpuP95Ms={:.3f} warmingHistory={} (CPU Present is backpressure, not added GPU cost)",timeline,batch.identity.settingsRevision,batch.identity.sourceFrameId,options.fgMultiplier,admitted,fgAdmittedPairs,fgRejectedPairs,double(deadline-now)/10000,fgBudget.predicted(now,warmingHistory).value_or(-1),elapsed,blit,livePresent.p95(),warmingHistory));
+                    veyra::log::info("live-fg-admission",std::format("timeline={} revision={} source={} multiplier={} requestedMultiplier={} admitted={} admittedPairs={} rejectedPairs={} remainingDeadlineMs={:.3f} firstDeadlineMs={:.3f} queuedGpuMs={:.3f} predictedMs={:.3f} elapsedMs={:.3f} blitGpuP95Ms={:.3f} presentCpuP95Ms={:.3f} warmingHistory={} (CPU Present is backpressure, not added GPU cost; firstDeadlineMs=-1 when unused)",timeline,batch.identity.settingsRevision,batch.identity.sourceFrameId,previewFgMultiplier,options.fgMultiplier,admitted,fgAdmittedPairs,fgRejectedPairs,double(deadline-now)/10000,firstDeadline?double(firstDeadline-now)/10000:-1,queuedMs,fgBudget.predicted(now,warmingHistory).value_or(-1),elapsed,blit,livePresent.p95(),warmingHistory));
                 };
                 if(fgBudgetRevision!=options.settings.revision){fgBudget.reset();fgCapacity.reset();pairLatency.reset();fgBudgetRevision=options.settings.revision;}
                 previewFgMultiplier=options.fgMultiplier;
@@ -1100,13 +1102,12 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                         return admitted;
                     };
                 }
-                // File playback: same pair admission, but deadlines are PTS
-                // deadlines on the audio master clock. A pair whose last
-                // generated timestamp can no longer be reached spends no FG
-                // Evaluate; the real frame keeps its normal cadence (plan §4.1).
+                // File playback checks both the first output and whole-group
+                // deadlines against the audio clock, including older queued
+                // GPU work. The real frame retains its original media PTS.
                 double queuedGpuMs=0;
                 if(!isCapture&&!isImage&&!rereadCached&&!transaction&&options.fg&&!presentSinkFrameGeneration(options.settings.frameGenerationBackend)){
-                    if(GetEnvironmentVariableW(L"VEYRA_TEST_ADMISSION_QUEUE",nullptr,0)){
+                    {
                         const auto start=std::chrono::duration_cast<std::chrono::nanoseconds>(processStart.time_since_epoch()).count()/100;
                         int64_t finish=0;
                         for(const auto& previous:pendingCompletions){
@@ -1114,42 +1115,22 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                             const auto began=std::chrono::duration_cast<std::chrono::nanoseconds>(previous->processStart.time_since_epoch()).count()/100;
                             const auto cost=previous->output.fgEvaluated?fgBudget.predicted(start,previous->output.historyReset||previous->output.fgRecovery):fgBudget.baseCost(start);
                             finish=std::max({finish,began,previous->predictedGpuStart100ns})+int64_t(cost.value_or(0)*10000);
-                            if(GetEnvironmentVariableW(L"VEYRA_TEST_ADMISSION_REMAINING",nullptr,0)&&ctx.fence()->GetCompletedValue()>=previous->output.videoFenceValue){
-                                const auto timing=frameFlow->snapshot(start).gpuTiming;
-                                double remaining=0;bool known=true;
-                                for(const auto& item:previous->output.batch.frames){
-                                    if(item.kind!=pipeline::FrameKind::Generated||!item.lease||ctx.fence()->GetCompletedValue()>=item.lease->readyFence)continue;
-                                    const auto stage=size_t(diagnostics::GpuStage::Fg1)+item.subframe-1;
-                                    if(stage>=timing.size()||!timing[stage].p95){known=false;break;}
-                                    remaining+=*timing[stage].p95;
-                                }
-                                if(known&&!previous->output.historyReset&&!previous->output.fgRecovery)
-                                    finish=std::min(finish,start+int64_t(remaining*10000));
-                            }
                         }
                         queuedGpuMs=double(std::max<int64_t>(0,finish-start))/10000;
                     }
                     admitFg=[&,historyReset,queuedGpuMs](const pipeline::FrameBatch& batch,bool warmingHistory){
                         if(fileAwaitingVideo)return true; // Bounded startup lookahead; audio has not started.
-                        if(GetEnvironmentVariableW(L"VEYRA_TEST_ADMISSION_ALWAYS",nullptr,0))return true;
                         const auto interval=liveSourceInterval100ns(pkt.duration,activeSource->info().averageFps);
                         const auto a=(historyReset||batch.b100ns<=batch.a100ns||batch.b100ns-batch.a100ns>10000000)?batch.b100ns-interval:batch.a100ns;
                         const auto lastGenerated=pipeline::FrameBatch::interpolate(a,batch.b100ns,previewFgMultiplier-1,previewFgMultiplier);
                         const auto now=host100ns();
-                        const auto admissionPts=GetEnvironmentVariableW(L"VEYRA_TEST_ADMISSION_FIRST",nullptr,0)?pipeline::FrameBatch::interpolate(a,batch.b100ns,1,previewFgMultiplier):lastGenerated;
-                        const auto reserve=GetEnvironmentVariableW(L"VEYRA_TEST_ADMISSION_RESERVE",nullptr,0)?100000:0;
-                        auto deadline=now+admissionPts-int64_t(nowMs()*10000.0)-reserve;
-                        if(GetEnvironmentVariableW(L"VEYRA_TEST_ADMISSION_PROFILE",nullptr,0)&&!warmingHistory){
-                            const auto first=frameFlow->snapshot(now).gpuTiming[size_t(diagnostics::GpuStage::Fg1)].p95;
-                            const auto whole=fgBudget.predicted(now),base=fgBudget.baseCost(now);
-                            if(first&&whole&&base){
-                                const auto firstPts=pipeline::FrameBatch::interpolate(a,batch.b100ns,1,previewFgMultiplier);
-                                deadline=now+firstPts-int64_t(nowMs()*10000.0)-100000+interval/previewFgMultiplier+int64_t(std::max(0.0,*whole-*base-*first)*10000);
-                            }
-                        }
+                        const auto media=int64_t(nowMs()*10000.0);
+                        const auto firstPts=pipeline::FrameBatch::interpolate(a,batch.b100ns,1,previewFgMultiplier);
+                        const auto firstDeadline=now+firstPts-media,deadline=now+lastGenerated-media;
+                        const auto first=frameFlow->snapshot(now).gpuTiming[size_t(diagnostics::GpuStage::Fg1)].p95;
                         const auto elapsed=elapsedMs(processStart),blit=livePresentGpu.p95();
-                        const auto admitted=fgBudget.admit(now,deadline,elapsed,blit,warmingHistory,queuedGpuMs);
-                        logAdmission(batch,now,deadline,elapsed,blit,admitted,warmingHistory,"file-audio");
+                        const auto admitted=fgBudget.admitFile(now,firstDeadline,deadline,interval/previewFgMultiplier,elapsed,blit,first,warmingHistory,queuedGpuMs);
+                        logAdmission(batch,now,deadline,elapsed,blit,admitted,warmingHistory,"file-audio",firstDeadline,queuedGpuMs);
                         return admitted;
                     };
                 }
@@ -1337,7 +1318,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                                 if(nowMs()+.25<itemPtsMs)return {State::Pending,now+std::min<int64_t>(10000,int64_t((itemPtsMs-nowMs())*10000))};
                             }
                             const auto optionalNow=host100ns();
-                            if(!isCapture&&!fileAwaitingVideo&&options.fg&&!presentSinkFrameGeneration(options.settings.frameGenerationBackend)&&GetEnvironmentVariableW(L"VEYRA_TEST_SUBFRAME_SPACING",nullptr,0)){
+                            if(!isCapture&&!fileAwaitingVideo&&options.fg&&!presentSinkFrameGeneration(options.settings.frameGenerationBackend)){
                                 const auto interval=std::max<int64_t>(1,int64_t(sourceIntervalMs*10000)/std::max(1u,batch.batch.count));
                                 const auto due=cadence.due(optionalNow+int64_t((itemPtsMs-nowMs())*10000),interval);
                                 if(optionalNow<due)return {State::Pending,due};

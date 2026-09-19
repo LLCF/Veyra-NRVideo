@@ -4752,3 +4752,43 @@ remaining16 reached274.567/s in its retained window but kept48 rejected/warmup p
 XeSS xess-final2 and xess-final4 ran30s each: lifecycle passed, app submissions60/s, SDK-reported output120/240 respectively, no admission skips or post-evaluation expiration in reported samples. These are not per-subframe scanout measurements. content-build.log succeeded, content6 GPU regression exited0 (150s watchdog, actual about5s): dynamic2/4/6/default, reset/recovery and D3D12 validation passed with zero errors. Diagnostic readback on source frames13/21/29 found adjacent generated images different (3.0-6.9 million changed RGB channels; mean absolute byte difference0.218-1.079). This excludes byte-identical repetition in these samples, not incorrect temporal order or interpolation artifacts. Readback is test-only. Artifacts remain under the previously recorded E:/ paths.
 
 Fixed6X uniform-cadence acceptance remains open. Experimental queue/profile/spacing controls remain opt-in and must not be described as production-ready. No publication, package or shutdown.
+
+### Prefix admission promotion and partial acceptance
+
+Enabled measured first-output/whole-group file admission with carried GPU
+queue debt, minimum file DLSS output spacing and16 command allocators for
+the existing two-job bound. Removed rejected experimental admission/spacing
+switches; preserved fixed-multiplier and trace diagnostics. Admission logs
+now expose first deadline, queue cost and requested/effective multipliers.
+Files: FgRecoveryBudget.h, EngineController.cpp, LiveGpuSchedulerTests.cpp;
+current status, plan and new FG_CADENCE_REPAIR_ACCEPTANCE_2026-09-20.md.
+
+Build commands: scripts/build-isolated.ps1 with existing slider-reset build
+and CMakeCache, explicit E:/ tmp, display1.4.3 and targets sustained, worker,
+main, admission, pacing. Logs prefix-final-build.log and
+prefix-lifecycle-build.log succeeded. Worker test prefix-final-cpu.log:
+121 PASS, exit0. Every GPU run used scripts/run-short-test.ps1, bounded
+95s watchdog (admission150s), process-local TEMP/TMP; sequential runs.
+prefix2/adaptive6/headroom6/xess4 duration30s, prefix6 duration45s;
+analyzed frame-trace.txt with scripts/acceptance/analyze-fg-cadence.py.
+
+Results: NR-on2X120.001/s; NR-on fixed6X265.445/s but P95gap15.428ms,
+max17.169ms and19 gaps over16.667ms in retained5.760s, NOT accepted as
+uniform6X. Requested6 adaptive actual4X240.007/s, P95gap4.514ms, fallback
+only. Effects-off fixed6X360.004/s, P95gap3.198ms, diagnostic only. Both2X
+and headroom6 meet>=95% target assertion. Others' exit0 means lifecycle,
+not target throughput. No scanout measurement; no physical latency claim.
+
+XeSS prefix-xess4: SDK240/s, app60/s in final samples, no budget rejection
+or generated expiration. prefix-content6 validates dynamic2/4/6/default,
+PTS, reset and recovery; debugErrors0, exit0. prefix-lifecycle passes
+paused seek, resume, mode changes, resize and stop. prefix-smoke passes
+main startup/exit5s. Final added log fields do not alter scheduling.
+
+All new outputs remain E:/项目/Veyra/{tests,logs,tmp}/fg-cadence-repair-20260920;
+current executable E:/项目/Veyra/build/slider-reset-20260919/veyra.exe.
+No intermediate package or extraction created. Retain diagnostic evidence.
+Current serial NR+flow+FG exceeds60Hz budget; do not infer architectural
+optimization is impossible. Fixed6X cadence remains an active goal; no
+shutdown, package, push or publication. This continuation supersedes the
+earlier opt-in/default6 descriptions without rewriting historical results.

@@ -73,6 +73,17 @@ int main(){
     veyra::engine::TimingWindow timing;for(unsigned i=0;i<100;++i)timing.add(i);check(timing.p95()==94,"percentile order statistic");timing.clear();timing.add(6);check(timing.p95()==6,"reset removes old timing window");
     veyra::engine::FgRecoveryBudget budget;
     {
+        veyra::engine::FgRecoveryBudget prefix;
+        prefix.complete(18,true,false,10000000,10);
+        check(!prefix.admitFile(10000000,10070000,10250000,27778,0,0,3,false,0),"late first subframe rejects even when the last output fits");
+        check(prefix.admitFile(10000000,10100000,10250000,27778,0,0,3,false,0),"first deadline uses prefix cost rather than full MFG group");
+        check(!prefix.admitFile(10000000,10100000,10140000,27778,0,0,3,false,0),"last subframe also has to fit when later FG work is slower");
+        check(!prefix.admitFile(10000000,10100000,10250000,27778,0,0,3,false,5),"pending previous batch cannot be mistaken for free first-frame headroom");
+        check(!prefix.admitFile(10000000,10000000,10250000,27778,100,0,3,false,0),"CPU delay cannot erase future first interpolation work");
+        prefix.complete(4,true,true,10000000);
+        check(prefix.admitFile(10000000,9900000,10010000,27778,0,0,3,true,0),"history seed has no generated prefix to present");
+    }
+    {
         veyra::engine::FgRecoveryBudget queued;
         queued.complete(10,true,false,10000000,4);
         check(queued.admit(10000000,10020000,0,0),"idle GPU can fit the measured batch");

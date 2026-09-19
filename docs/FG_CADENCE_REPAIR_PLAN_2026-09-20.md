@@ -1,5 +1,12 @@
 # Fixed-media DLSS cadence repair
 
+Latest continuation: prefix admission, carried queue prediction and minimum
+file output spacing are now enabled normally; command allocator budget16,
+two-job capacity unchanged. Experimental admission/spacing flags removed.
+The historical default6/opt-in statements below describe earlier experiments.
+See FG_CADENCE_REPAIR_ACCEPTANCE_2026-09-20.md for current measured results
+and remaining fixed6X acceptance. No claim of a completed fixed6X repair.
+
 User authorized repair, checkpointing validated improvements, testing p001.mp4 with NR / 4K target / DLSS 6X and comparison to 2X, then shutdown after reporting. Starting checkpoint: dad189a, tag checkpoint/pre-fg-cadence-repair-20260920. Work remains on codex/fg-cadence-audit-20260920; no publish authorization.
 
 Media: E:/项目/Likely7 个人账号/Deepseek Grok/p001.mp4. ffprobe reports H.264 yuv420p 3840x2160 60/1, AAC, 333.764 seconds. A 4K target does not upscale an already 4K source; report actual graph sizes and enabled stages rather than claim SR execution from its UI flag.
