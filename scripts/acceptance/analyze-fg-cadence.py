@@ -101,6 +101,18 @@ def analyze_trace(path):
         transitions[key] = transitions.get(key, 0) + 1
     span = (int(presents[-1]["host"]) - int(presents[0]["host"])) / 1e7
     ready = {(e["batch"], e["detail"]): e for e in events if e["event"] == "FrameReady"}
+    gaps = []
+    for a, b in zip(presents, presents[1:]):
+        observed = ready.get((b["batch"], b["detail"]))
+        gaps.append({
+            "intervalMs": (int(b["host"]) - int(a["host"])) / 10000,
+            "mediaStepMs": (int(b["pts"]) - int(a["pts"])) / 10000,
+            "nextBatch": int(b["batch"]), "nextSubframe": int(b["detail"]),
+            "nextBatchState": state(b["batch"]),
+            "presentCpuMs": float(b["ms"]),
+            "readyObservedToPresentMs": (int(b["host"]) - int(observed["host"])) / 10000 if observed else None,
+            "readyObservedBeforePreviousPresent": int(observed["host"]) <= int(a["host"]) if observed else None,
+        })
     discarded = [e for e in events if e["event"] == "Discarded"]
     observed_delays = [(int(e["host"]) - int(ready[(e["batch"], e["detail"])]["host"])) / 10000
                        for e in discarded if (e["batch"], e["detail"]) in ready]
@@ -125,6 +137,10 @@ def analyze_trace(path):
             "batchTransitions": transitions,
             "discardedSubframes": discard_summary,
             "presentCpuMs": distribution([float(p["ms"]) for p in presents]),
+            "longestGaps": sorted(gaps, key=lambda g: g["intervalMs"], reverse=True)[:12],
+            "longGapMediaStepsMs": distribution([g["mediaStepMs"] for g in gaps if g["intervalMs"] > 10]),
+            "longGapsOver10ms": sum(g["intervalMs"] > 10 for g in gaps),
+            "longGapsWithMediaStepOver10ms": sum(g["intervalMs"] > 10 and g["mediaStepMs"] > 10 for g in gaps),
             "mediaStepMs": distribution([(int(b["pts"]) - int(a["pts"])) / 10000 for a, b in zip(presents, presents[1:])])}
 
 

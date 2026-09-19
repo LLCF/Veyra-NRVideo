@@ -1,5 +1,18 @@
 # Veyra 工作记录
 
+## 2026-09-20 Fixed6 gap attribution
+
+Saved verified seed implementation as57213e1,
+checkpoint/fg-same-input-seed-20260920. Extended existing cadence analysis
+with media-step/admission/ready correlation. Ran Python analyzer --trace
+against reseed-default6 and reseed-default2 frame-trace.txt; outputs under
+the same test root as reseed-gap-causes.json and reseed2-gap-causes.json.
+All88 fixed6 gaps over10ms coincide with16.667ms media steps and rejected
+groups; 2X has none. No generated discards in either retained window.
+Next investigation must address full-group rejection and serial stage cost,
+not claim that Present timing alone can replace missing motion samples.
+No product code changed in this diagnostic continuation; no GPU rerun needed.
+
 ## 2026-09-20 Affordable same-input FG seed
 
 Full-group rejection previously forced another real-only warmup on the next

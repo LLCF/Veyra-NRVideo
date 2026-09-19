@@ -31,6 +31,15 @@ E:/项目/Veyra/{tests,logs}/fg-cadence-repair-20260920.
 The temporary double-callback experiment switch was removed before these
 final runs. The historical results below describe the prior checkpoint.
 
+Gap attribution: analyze-fg-cadence.py now joins consecutive Present events
+with their media PTS, admission state and CPU-observed ready time. In
+reseed-default6 all88 gaps over10ms have a16.667ms media step and correspond
+to the88 rejected groups. These gaps lack intermediate generated samples;
+moving a ready real frame earlier cannot recreate that missing motion.
+reseed-default2 has no gap over10ms. Files reseed-gap-causes.json and
+reseed2-gap-causes.json retain the analysis. This does not identify every
+GPU scheduling cause of rejection or prove a hardware limit.
+
 ## Scope and result
 
 Branch: `codex/fg-cadence-audit-20260920`. RTX5070, user p001.mp4,
