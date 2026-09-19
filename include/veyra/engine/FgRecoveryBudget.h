@@ -32,9 +32,10 @@ public:
     void complete(std::optional<double> measuredMs,bool evaluated,bool warmup,int64_t now,std::optional<double> measuredFg={}){
         // Missing GPU timestamps are unknown, not CPU polling delay. Let old
         // samples expire; admission still checks each batch's real deadline.
+        if(warmup){if(measuredMs)add(warmup_,now,*measuredMs);return;}
+        if(evaluated&&measuredFg)fgCost(*measuredFg,now);
         if(!measuredMs)return;
         const double ms=*measuredMs;
-        if(warmup){add(warmup_,now,ms);return;}
         const auto extra=evaluated?(measuredFg?measuredFg:p95(fg_,now,20000000)):std::optional<double>(0);
         // If a generated batch lacks a GPU timing, retain its whole measured
         // completion as conservative base cost; never assume free FG.

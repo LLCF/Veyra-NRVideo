@@ -476,11 +476,12 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
             LiveStats liveStats;std::deque<int64_t> liveSubmissions;
             TimingWindow liveAges,liveWaits,liveReady;
             TimingWindow livePresent{std::chrono::seconds(1)};
-            TimingWindow livePresentService{std::chrono::seconds(1)};
+            TimingWindow livePresentGpu{std::chrono::seconds(1)};
             FgRecoveryBudget fgBudget;uint64_t fgBudgetRevision=options.settings.revision;
             LivePairLatency pairLatency;
             const bool adaptiveCapturePhase=physicalCapture&&GetEnvironmentVariableW(L"VEYRA_TEST_LEGACY_CAPTURE_PHASE",nullptr,0)==0;
-            int64_t nextFgAdmissionLog=0;
+            int64_t nextFgAdmissionLog=0,nextFgRejectionLog=0;
+            uint64_t fgAdmittedPairs=0,fgRejectedPairs=0;
             std::atomic<uint64_t> historyResets=0,presentationDrains=0,presentationCompletedReal=0,presentationSkippedGenerated=0,presentationCancelledJobs=0;
             std::atomic<uint64_t> presentationGeneration{0};
             std::unique_ptr<LiveGpuScheduler> liveScheduler;
@@ -542,7 +543,8 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                             if(fgCost.state==diagnostics::SampleState::Measured)watch->fgExecutionMs=fgCost.milliseconds;
                         }
                     }
-                    if(sample.identity.settingsRevision==fgBudgetRevision&&fgCost.state==diagnostics::SampleState::Measured&&fgCost.milliseconds)fgBudget.fgCost(*fgCost.milliseconds,host100ns());
+                    const auto& blit=sample.gpu[size_t(diagnostics::GpuStage::Blit)];
+                    if(sample.identity.settingsRevision==fgBudgetRevision&&blit.state==diagnostics::SampleState::Measured&&blit.milliseconds)livePresentGpu.add(*blit.milliseconds);
                     if(frameFlow)frameFlow->gpuFrame(sample,host100ns());
                     for(size_t i=0;i<sample.gpu.size();++i){const auto& gpu=sample.gpu[i];
                         if(gpu.state==diagnostics::SampleState::Measured&&gpu.milliseconds){
@@ -1041,17 +1043,27 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 const bool injectedReject=transaction&&!options.nr&&GetEnvironmentVariableW(L"VEYRA_TEST_REJECT_NR_DISABLE",nullptr,0)>0;
                 if(injectedReject)veyra::log::error("settings-test","test-only reject NR-disable transaction before graph process; no driver failure");
                 pipeline::EnhanceGraph::FgAdmission admitFg;
+                const auto logAdmission=[&](const pipeline::FrameBatch& batch,int64_t now,int64_t deadline,double elapsed,double blit,bool admitted,const char* timeline){
+                    if(admitted)++fgAdmittedPairs;else ++fgRejectedPairs;
+                    // Keep the first rejection even if the periodic sample just
+                    // logged a success. Both channels remain rate bounded.
+                    if(now<nextFgAdmissionLog&&(admitted||now<nextFgRejectionLog))return;
+                    nextFgAdmissionLog=now+10000000;if(!admitted)nextFgRejectionLog=now+10000000;
+                    veyra::log::info("live-fg-admission",std::format("timeline={} revision={} source={} multiplier={} admitted={} admittedPairs={} rejectedPairs={} remainingDeadlineMs={:.3f} predictedMs={:.3f} elapsedMs={:.3f} blitGpuP95Ms={:.3f} presentCpuP95Ms={:.3f} (CPU Present is backpressure, not added GPU cost)",timeline,batch.identity.settingsRevision,batch.identity.sourceFrameId,options.fgMultiplier,admitted,fgAdmittedPairs,fgRejectedPairs,double(deadline-now)/10000,fgBudget.predicted(now).value_or(-1),elapsed,blit,livePresent.p95()));
+                };
                 if(fgBudgetRevision!=options.settings.revision){fgBudget.reset();pairLatency.reset();fgBudgetRevision=options.settings.revision;}
-                const auto liveInterval=liveSourceInterval100ns(pkt.duration,activeSource->info().averageFps);
+                const auto liveInterval=livePhaseInterval100ns(pkt.duration,activeSource->info().averageFps/(isScreen&&halfRate?2:1),isScreen);
                 const auto processingAllowance=isCapture&&options.fg&&!presentSinkFrameGeneration(options.settings.frameGenerationBackend)?
                     fgBudget.processingAllowance(host100ns(),liveInterval):0;
-                const auto legacyPairDelay=liveInterval+processingAllowance;
+                // Present-sink providers own subframe pacing after receiving B.
+                // Graph FG needs the A/B presentation phase; provider FG does not.
+                const auto legacyPairDelay=presentSinkFrameGeneration(options.settings.frameGenerationBackend)?0:liveInterval+processingAllowance;
                 const auto pairDelay=adaptiveCapturePhase&&options.fg&&!presentSinkFrameGeneration(options.settings.frameGenerationBackend)?
                     pairLatency.select(host100ns(),legacyPairDelay,liveInterval,options.fgMultiplier):legacyPairDelay;
                 // DLSS can reseed after a skipped pair. XeSS
                 // owns generation inside its presenter and has no graph admission.
                 if(isCapture&&!rereadCached&&useLiveFgAdmission&&!presentSinkFrameGeneration(options.settings.frameGenerationBackend)){
-                    const auto presentP95=livePresentService.p95();
+                    const auto presentP95=livePresentGpu.p95();
                     admitFg=[&,presentP95](const pipeline::FrameBatch& batch){
                         // Physical capture and PS5 delivery clocks are not
                         // guaranteed to match the host clock. Anchor each new
@@ -1066,7 +1078,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                         const auto now=host100ns(),deadline=liveTimeline.deadline(lastGenerated);
                         const double elapsed=elapsedMs(processStart);
                         const bool admitted=fgBudget.admit(now,deadline,elapsed,presentP95);
-                        if(now>=nextFgAdmissionLog){nextFgAdmissionLog=now+10000000;veyra::log::info("live-fg-admission",std::format("timeline={} admitted={} remainingDeadlineMs={:.3f} predictedMs={:.3f} elapsedMs={:.3f} decodedAgeMs={:.3f} callbackAgeMs={:.3f} presentP95Ms={:.3f} processingAllowanceMs={:.3f}",pairAnchoredLive?(isRemote?"decoded-pair":"capture-pair"):"continuous",admitted,double(deadline-now)/10000,fgBudget.predicted(now).value_or(-1),elapsed,double(now-liveInputReady)/10000,double(now-captureArrival)/10000,presentP95,double(processingAllowance)/10000));}
+                        logAdmission(batch,now,deadline,elapsed,presentP95,admitted,pairAnchoredLive?(isRemote?"decoded-pair":"capture-pair"):"continuous");
                         return admitted;
                     };
                 }
@@ -1081,7 +1093,11 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                         const auto a=(historyReset||batch.b100ns<=batch.a100ns||batch.b100ns-batch.a100ns>10000000)?batch.b100ns-interval:batch.a100ns;
                         const auto lastGenerated=pipeline::FrameBatch::interpolate(a,batch.b100ns,options.fgMultiplier-1,options.fgMultiplier);
                         const auto now=host100ns();
-                        return fgBudget.admit(now,now+lastGenerated-int64_t(nowMs()*10000.0),elapsedMs(processStart),livePresentService.p95());
+                        const auto deadline=now+lastGenerated-int64_t(nowMs()*10000.0);
+                        const auto elapsed=elapsedMs(processStart),blit=livePresentGpu.p95();
+                        const auto admitted=fgBudget.admit(now,deadline,elapsed,blit);
+                        logAdmission(batch,now,deadline,elapsed,blit,admitted,"file-audio");
+                        return admitted;
                     };
                 }
                 uint64_t processWaitBase=0,processSubmitBase=0;double processWaitMsBase=0,processSlotWaitMs=0;
@@ -1159,7 +1175,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     // soft preview-skip history breaks do NOT reopen them.
                     if(settingsChanged){xessGenerationGate.reset();presenter.setXessGenerationSuppressed(false);fedXessPresented=fedXessGenerated=fedFsrPresented=fedFsrGenerated=0;}
                     playbackSpeedLastWall={};
-                    if(liveScheduler){liveStats={};liveSubmissions.clear();liveAges.clear();liveWaits.clear();livePresent.clear();livePresentService.clear();liveReady.clear();}
+                    if(liveScheduler){liveStats={};liveSubmissions.clear();liveAges.clear();liveWaits.clear();livePresent.clear();livePresentGpu.clear();liveReady.clear();}
                     if(settingsChanged||!completionRates)completionRates=std::make_shared<FrameCompletionRates>(host100ns());
                     frameFlow=std::shared_ptr<FrameFlowWindow>(new FrameFlowWindow(runSessionId,out.batch.identity,host100ns(),completionRates),[](FrameFlowWindow* window){logFrameFlow(window->snapshot(monotonic100ns()),"closed");delete window;});
                     if(resetRecord)frameFlow->resetLifecycle(*resetRecord);else if(lastResetRecord)frameFlow->resetLifecycle(*lastResetRecord);
@@ -1275,7 +1291,6 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                             }
                             const auto waited=elapsedMs(*s.deadlineStart);s.deadlineStart.reset();s.waitMs+=waited;flow->cpu(diagnostics::CpuStage::DeadlineWait,waited,host100ns());
                             const auto begin=Clock::now();const auto before=presenter.submittedCount();
-                            const auto presentSlotWaitBefore=presenter.cpuWaitMilliseconds(ring);
                             presenter.reflexFrame(watch->reflexFrame);
                             if(!presenter.present(ctx,ring,graph,item.lease->slot,generated,item.lease->referencesValid,comparisonMode_,comparisonBase_,comparisonSplit_,item.identity,previewView()))return {State::Failed};
                             item.lease->consumerFence=presenter.consumerFenceValue(ring.lastSignaledValue());const bool didPresent=presenter.submittedCount()>before;s.blit=presenter.blitTiming(ctx.fence());
@@ -1284,9 +1299,8 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                             // session/revision windows must not update its admission cost.
                             if(flow==frameFlow){
                                 livePresent.add(elapsed);
-                                // Allocator reuse waits on graph work already charged
-                                // by GPU timestamps; it is not additional blit service.
-                                livePresentService.add(std::max(0.0,elapsed-(presenter.cpuWaitMilliseconds(ring)-presentSlotWaitBefore)));
+                                // DXGI/driver blocking is backpressure, not GPU blit
+                                // work. The bounded scheduler retains that pressure.
                             }
                             if(didPresent){
                                 cadence.submitted(optionalNow);

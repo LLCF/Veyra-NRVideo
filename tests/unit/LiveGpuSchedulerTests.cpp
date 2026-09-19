@@ -65,8 +65,8 @@ int main(){
         const Window::Clock::time_point start{};
         Window present{std::chrono::seconds(1)};
         present.add(80,start);
-        check(present.p95(start)==80,"temporary Present stall is visible to admission");
-        check(!budget.admit(10000000,10200000,0,present.p95(start)),"stall limits FG admission");
+        check(present.p95(start)==80,"temporary GPU blit stall is visible to admission");
+        check(!budget.admit(10000000,10200000,0,present.p95(start)),"GPU blit stall limits FG admission");
         check(present.p95(start+std::chrono::seconds(1))==0,"Present stall expires without successful FG or new samples");
         present.add(2,start+std::chrono::seconds(1));
         check(budget.admit(20000000,20200000,0,present.p95(start+std::chrono::seconds(1))),"admission recovers after expired Present stall");
@@ -79,8 +79,10 @@ int main(){
     check(!budget.admit(10000000,10100000,0,0),"insufficient pair deadline enters limited state");
     check(budget.admit(10100000,10600000,0,0)&&budget.recovering(),"fresh deadline admits warmup without a fixed cooldown");
     check(budget.admit(10266667,10766667,0,0)&&!budget.recovering(),"second consecutive source pair exits recovery");
-    budget.complete(200,true,true,13000000);
+    budget.complete(200,true,true,13000000,180);
     check(*budget.predicted(13000000)<32,"expensive reset warmup does not poison steady cost");
+    budget.complete(std::nullopt,true,true,13000001,190);
+    check(*budget.predicted(13000001)<32,"warmup FG timestamp without graph timestamp cannot poison steady cost");
     budget.complete(10,false,false,24000000);
     check(budget.processingAllowance(24000000,166667)==100000,"live deadline includes measured enhancement before interpolation cadence");
     check(*budget.predicted(24000000)<14,"old slow completion expires even when no FG succeeds");
@@ -93,6 +95,18 @@ int main(){
     budget.complete(std::nullopt,true,false,36000000);
     check(!budget.predicted(36000000),"missing GPU timing cannot retain a stale CPU polling cost");
     check(!budget.admit(36000000,35800000,0,0),"unknown cost still rejects expired presentation deadlines");
+    for(unsigned multiplier:{2u,4u,6u}){
+        budget.reset();const double fg=double(multiplier-1)*1.5;
+        budget.complete(5+fg,true,false,40000000,fg);
+        check(budget.predicted(40000000)==5+fg,"completion samples steady FG with its matching graph identity");
+        for(int64_t t=40100000;t<42100000;t+=166667){
+            budget.complete(200,true,true,t,190);
+            check(budget.admit(t,t+166667,0,1),"repeated reset cost cannot trap healthy 2X/4X/6X pairs in rejection");
+            budget.complete(5+fg,true,false,t+1,fg);
+        }
+        budget.complete(100,true,false,42200000,90);
+        check(!budget.admit(42200000,42366667,0,1),"real steady GPU overload remains limited");
+    }
     veyra::engine::LivePairLatency phase;
     check(phase.select(10000000,420000,333333,4)==420000,"unknown live readiness keeps legacy phase");
     for(int i=0;i<8;++i)phase.observe(10000000+i,370000);

@@ -3,6 +3,7 @@
 #include "veyra/source/CaptureTiming.h"
 #include "veyra/engine/CaptureHalfRate.h"
 #include "veyra/engine/FrameRateWindow.h"
+#include "veyra/engine/PresentationScheduler.h"
 #include <cmath>
 #include <limits>
 #include <cstdio>
@@ -53,6 +54,19 @@ int main(){
     check(liveSourceInterval100ns({0,1},60)==166667,"known zero cannot turn60fps into120fps");
     check(liveSourceInterval100ns(captureDuration(0,0,false,333333),60)==333333,"30fps packet retained by scheduler");
     check(liveSourceInterval100ns({INT64_MAX,1},60)==1000000,"huge duration clamps before integer conversion");
+    for(unsigned factor:{2u,4u,6u}){
+        veyra::engine::PresentationScheduler scheduler;
+        int64_t pts=0,previousDeadline=0;bool ordered=true;
+        for(unsigned i=0;i<100;++i){
+            const int64_t dt=i%2?200000:400000;pts+=dt;
+            const auto phase=veyra::engine::livePhaseInterval100ns({dt,10000000},30,true);
+            scheduler.resetPair(1,pts,pts,phase);
+            if(i)ordered&=scheduler.deadline(pts-dt+dt/factor)>previousDeadline;
+            previousDeadline=scheduler.deadline(pts);
+        }
+        check(ordered,"jittery compositor input cannot schedule a new pair before the preceding real frame");
+    }
+    check(veyra::engine::livePhaseInterval100ns({1,30},60,false)==333333,"device sample duration still overrides nominal capture rate");
     check(livePairHoldMs(false,1822.09,22.64)==0,"no-FG never waits on stale source PTS");
     check(livePairHoldMs(false,1e12,0)==0,"no-FG absolute PTS cannot add latency");
     check(livePairHoldMs(true,100,90)==10,"50fps FG pair half interval");

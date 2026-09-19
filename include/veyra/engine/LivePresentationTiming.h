@@ -9,6 +9,12 @@ inline int64_t liveSourceInterval100ns(pipeline::Rational duration,double nomina
     if(std::isfinite(nominalFps)&&nominalFps>=10&&nominalFps<=1000)return int64_t(std::llround(10000000.0/nominalFps));
     return 200000; // documented last-resort 50 Hz estimate, never a measured duration
 }
+// Compositor frames have jittery PTS intervals even at a fixed capture limit.
+// Use that limit for the pair's presentation phase, not for its actual A/B PTS.
+// Otherwise alternating 40/20 ms packets move the next pair before the last B.
+inline int64_t livePhaseInterval100ns(pipeline::Rational duration,double nominalFps,bool compositor){
+    return liveSourceInterval100ns(compositor?pipeline::Rational{}:duration,nominalFps);
+}
 // Live capture never waits on an absolute source PTS. Once B is available,
 // display generated(A,B), then B up to half an input interval later. Anchor
 // each pair to current host time, not to the first (possibly stale) sample.

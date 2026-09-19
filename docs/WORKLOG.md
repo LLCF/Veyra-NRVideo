@@ -1,5 +1,17 @@
 # Veyra 工作记录
 
+## 2026-09-19 DLSS / XeSS 调度修复施工
+
+开工存档 `5a1931b`，分支 `codex/fg-scheduling-repair-20260919`。用户明确要求同时处理 DLSS。完成暖机 FG 成本与稳态预算分离、以 GPU blit 替代 CPU Present 预算项、XeSS 实时路径取消额外源间隔相位、窗口采集固定配置帧率相位，以及 GC573 回调分项诊断。保留有界队列、真实时间戳、资源租约及必要历史 reset。
+
+实现文件：`FgRecoveryBudget.h`、`LivePresentationTiming.h`、`EngineController.cpp`、`CaptureCardSource.cpp`；回归：`LiveGpuSchedulerTests.cpp`、`LivePresentationTimingTests.cpp`、`PresentationPacingTests.cpp`。详细命令、构建结果、连续生成/恢复测试、失败与未验收项目见 `docs/FG_SCHEDULING_ACCEPTANCE_2026-09-19.md`。
+
+构建复用 `E:/项目/Veyra/build/slider-reset-20260919`，依赖缓存 `E:/项目/Veyra/build/frame-pacing-20260918/CMakeCache.txt`。日志 `E:/项目/Veyra/logs/xess-gc573-20260919`；测试 `E:/项目/Veyra/tests/xess-gc573-20260919`；进程 TEMP/TMP `E:/项目/Veyra/tmp/xess-gc573-20260919`。`build5.log` 构建退出 0；最终 timing/worker 单测退出 0；DLSS6 和 XeSS4 各 120 秒实时窗口采集及三轮 80ms 拥堵恢复退出 0。所有单项均少于 300 秒，GPU 测试串行。
+
+初始窗口测试被产品自身捕获保护正确拒绝，后改独立子进程输入；未取消保护。DLSS4 初次名为 vsync 的测试实际 mode=-1，最终标志 sync=0，因此只计为完全关闭回归，不能算 VSync 通过。未改运行库；无 SDK、模型、DLL 或用户日志入 Git；本轮未打包、推送、发布。无 GC573 实卡，不宣称 53fps 已根治；无 5080 功耗测量，不宣称功率波动消除。
+
+后续最终构建验证：DLSS4 完全关闭与低排队+VSync 各120秒及三轮拥堵恢复通过；VSync 已核对最终 sync=1/flags=0。XeSS4 VSync 15秒及三轮恢复通过，提供方仍独占节奏。DLSS2 文件生命周期通过。XeSS pan4/recovery2/recovery4/resize4 均退出0、debugErrors=0。采集颜色单测首次缺运行路径而未启动（0xC0000135），设置测试进程 PATH 后退出0。`git diff --check` 通过。没有重跑完整旧 delivery 套件，未将本轮针对性回归扩大为导出或全部设备验收。
+
 ## 2026-09-19 XeSS 游玩转身卡顿深度审计（方案，未施工）
 
 用户要求排查与修复方案。保留当前 `codex/cross-monitor-20260919` 上已有跨屏、V 原图等未提交修改，新增 `docs/XESS_GAMEPLAY_STUTTER_REPAIR_PLAN_2026-09-19.md`。审计确认 XeLL 标记未覆盖 graph 工作、暂时 motion 无效触发 SetEnabled 造成额外历史预热、多倍 pacing 省略上游 fallback、统计遗漏批次边界，以及重复 install 嵌套 mutex 的条件死锁。快速转身误切、mailbox Drop 反馈、双重排期、motion 空间域为待实证假说，不称作已复现根因。采集不走文件 XessGenerationGate，明确排除该误判。
