@@ -16,12 +16,14 @@ int wmain(int argc,wchar_t** argv){
     if(argc==3&&std::wstring_view(argv[1])==L"--fg-compat-probe")
         return runFgCompatibilityProbe(reinterpret_cast<HANDLE>(_wcstoui64(argv[2],nullptr,10)));
     if(argc!=7&&argc!=8&&argc!=9)return 2; // optional target ratio, then live-1440p profile
-    const bool liveProfile=argc==9&&std::wstring_view(argv[8])==L"live-1440p";
+    const bool xessProfile=argc==9&&std::wstring_view(argv[8])==L"file-xess-4k";
+    const bool fileProfile=argc==9&&(std::wstring_view(argv[8])==L"file-4k"||xessProfile);
+    const bool liveProfile=argc==9&&(std::wstring_view(argv[8])==L"live-1440p"||fileProfile);
     if(argc==9&&!liveProfile)return 2;
     const unsigned multiplier=_wtoi(argv[3]);
     const int seconds=_wtoi(argv[5]);
     const double minimumRatio=argc>=8?_wtof(argv[7]):0;
-    if((multiplier!=4&&multiplier!=6)||seconds<30||seconds>240)return 2;
+    if((multiplier!=2&&multiplier!=4&&multiplier!=6)||seconds<30||seconds>240)return 2;
     if(FAILED(CoInitializeEx(nullptr,COINIT_MULTITHREADED)))return 2;
     std::filesystem::create_directories(argv[2]);
     veyra::Logger::instance().openFile((std::filesystem::path(argv[2])/L"engine.log").wstring());
@@ -35,13 +37,14 @@ int wmain(int argc,wchar_t** argv){
     {
         EngineController engine;engine.setVolume(0,true);
         EnhancementSettings settings;settings.multiplier=multiplier;
+        if(xessProfile)settings.frameGenerationBackend=FrameGenerationBackend::XeSS;
         const std::wstring_view effects=argv[6];
         settings.nr=effects==L"on"||effects==L"nr";
         settings.sr=effects==L"on"||effects==L"sr";
         if(liveProfile){settings.flow=FlowQuality::Performance;settings.videoSrQuality=0;settings.srTarget=veyra::pipeline::SrTarget::Uhd4K;}
         auto options=PlayerOptions::from(settings);
         const std::wstring source=argv[1];
-        options.captureReplayForTest=!source.starts_with(L"capture:")&&!source.starts_with(L"capture2:");
+        options.captureReplayForTest=!fileProfile&&!source.starts_with(L"capture:")&&!source.starts_with(L"capture2:");
         options.captureReplayDisableFgAdmissionForTest=std::wstring_view(argv[4])==L"off";
         engine.open(window,source,options);
         const auto opened=Clock::now();auto started=Clock::time_point{};
@@ -59,8 +62,9 @@ int wmain(int argc,wchar_t** argv){
                 if(elapsed>=17&&!cleared){SetEnvironmentVariableW(L"VEYRA_TEST_VIDEO_WORK_MS",nullptr);cleared=true;beforeRecovery=s.generated;}
                 if(elapsed!=reported){
                     reported=elapsed;const auto& f=s.metrics.flow;const auto& c=f.counters;
-                    std::cout<<"t="<<elapsed<<" multiplier="<<s.applied.multiplier<<" frames="<<s.frames<<" generated="<<s.generated
+                    std::cout<<"t="<<elapsed<<" multiplier="<<s.applied.multiplier<<" effective="<<s.previewFgMultiplier<<" frames="<<s.frames<<" generated="<<s.generated
                         <<" sourceFps="<<f.sourceCompletedFps<<" submitFps="<<f.presentSubmitFps<<" validFps="<<f.validGeneratedFps
+                        <<" providerFps="<<f.xessSdkSubmitFps<<" providerGenerated="<<c.xessSdkGenerated
                         <<" limited="<<s.fgBudgetLimited<<" skipped="<<c.fgSkippedBeforeEval<<" expired="<<c.generatedExpiredAfterEval
                         <<" received="<<c.captureReceived<<" accepted="<<c.sourceAccepted<<" overwritten="<<c.mailboxOverwritten
                         <<" evaluated="<<c.fgEvaluated<<" warmup="<<c.fgWarmup<<" realPresented="<<c.realPresented<<" generatedPresented="<<c.generatedPresented

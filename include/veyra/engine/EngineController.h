@@ -72,6 +72,7 @@ struct PlayerSnapshot {
     uint64_t pausedFrameRefreshes=0;
     double playbackSpeed=0;
     bool fgBudgetLimited=false,xessGenerationSuppressed=false;
+    unsigned previewFgMultiplier=0;
     // Runtime-reported DLSSG MultiFrameCountMax: 1 = 2X only, 5 = 6X.
     // 0 = not queried yet (no session). The UI uses this to offer only the
     // multipliers the active GPU can actually honour.

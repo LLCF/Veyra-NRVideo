@@ -4724,3 +4724,13 @@ Blackwell 上会改变一条已经正常工作的路径，无法区分"补丁生
 - PowerShell `Select-String`、正则字段摘取核对5080日志：87条admission采样均true，11:35:30至34累计拒绝固定9，但暖机/过期增长且中间有120fps提交。避免将累计拒绝误算为每秒新增，也避免把XeSS套用DLSS门禁。
 - 方案新增2.5节：分离计算成本与显示反压、逐子帧期限、连续恢复、供给阻塞及对应测试矩阵。预算数值例子仅为算式推演，没有冒充实机结果。
 - 本轮仅修改方案与WORKLOG，未改产品代码、未构建、未运行新单测或实卡测试、未生成包或发布；没有新增仓库外产物。
+## 2026-09-20 Fixed-media cadence fallback checkpoint (not final 6X repair)
+
+Branch: codex/fg-cadence-audit-20260920; starting checkpoint dad189a.
+User media p001.mp4 is 3840x2160/60 H.264. NR realtime1080 and 4K output; SR does not run when input already matches target. Baseline target6X: 81.61 average software submissions/s, retained trace 79.37/s with 182 gaps below 1ms and 499 above 16.667ms. Baseline2X: 120/s.
+
+Implemented per-frame file readiness and measured preview capacity fallback. Requested settings remain saved; actual scheduling multiplier and PTS agree. Export uses default full multiplier. Final build via scripts/build-isolated.ps1 succeeded; veyra_presentation_worker_tests passed 110 checks. Final6 ran 120s: steady 240/s at actual4X, retained 7.579s P95 4.5733ms / max5.0918ms, no sub-ms or >16.667ms gaps. Final2 ran45s: mean119.913/s, retained P95 8.8444ms / max9.1539ms. GPU admission6 on actual4K media passed dynamic2/4/6/default, reset/recovery, generated texture nonblack and PTS checks, D3D12 errors0. These do not prove full6X or physical display quality.
+
+Outputs: E:/项目/Veyra/tests/fg-cadence-repair-20260920 (baseline2/6, final2/6, admission6, JSON traces), logs/fg-cadence-repair-20260920 (final-build.log, cpu-final.log), tmp/fg-cadence-repair-20260920; build reused build/slider-reset-20260919. All tests run using scripts/run-short-test.ps1, limits <=185s. Combining FG command lists and servicing presentation during slot waits did not sufficiently improve throughput and were reverted.
+
+User explicitly clarified automatic downshift is only a fallback; full6X uneven presentation still must be investigated. Saving this verified improvement before further fixed6X experiments. XeSS and final lifecycle verification remain pending. No package, push, release or shutdown yet.

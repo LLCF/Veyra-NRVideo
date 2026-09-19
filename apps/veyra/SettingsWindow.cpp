@@ -1682,6 +1682,8 @@ case WM_TIMER:{auto s=controller->snapshot();putText(1150,s.presentationStatus.c
     o<<L"期望版本 "<<s.desired.revision<<L" / 已应用 "<<s.applied.revision<<(s.applying?L" · 应用中":L"");
     const wchar_t* backend=s.applied.frameGenerationBackend==engine::FrameGenerationBackend::XeSS?L"XeSS":s.applied.frameGenerationBackend==engine::FrameGenerationBackend::Fsr?L"AMD FSR":L"DLSS";
     o<<L"\n"<<backend<<L" · "<<(s.applied.multiplier<=1?L"补帧关闭":s.fgActive?L"补帧运行":L"等待有效补帧");
+    if(s.applied.multiplier>1&&s.previewFgMultiplier>1&&s.previewFgMultiplier<s.applied.multiplier)
+        o<<L" · 目标 "<<s.applied.multiplier<<L"X / 当前 "<<s.previewFgMultiplier<<L"X";
     if(!s.backendWarning.empty())message(s.backendWarning);
     else if(!displayedBackendWarning.empty())message(L"设置已应用");
     displayedBackendWarning=s.backendWarning;

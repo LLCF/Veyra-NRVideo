@@ -1255,7 +1255,7 @@ bool EnhanceGraph::createViews()
 // ---------------------------------------------------------------------------
 // process: the per-frame chain (verbatim from the probe lambda).
 // ---------------------------------------------------------------------------
-bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, FrameOutputs& out, uint64_t sourceFrameId, const ColorDescription* color, const HardwareSurfaceInput* hardwareSurface, bool retainReferences, const FgAdmission& admitFg)
+bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, FrameOutputs& out, uint64_t sourceFrameId, const ColorDescription* color, const HardwareSurfaceInput* hardwareSurface, bool retainReferences, const FgAdmission& admitFg, unsigned previewMultiplier)
 {
     diagnostics::CpuStallTrace cpuTrace("graph-cpu-stall",sourceFrameId,30.0);
     failedBackend_=engine::FailedBackend::Infrastructure;
@@ -1888,12 +1888,13 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
     }
     previousSource_=sourceFrameId;
     const bool fgBackendAvailable=fgEnabled_&&(fgBackend_&&fgBackend_->created());
-    out.fgCandidates=fgBackendAvailable?desc_.fgMultiplier-1:0;
+    const unsigned fgMultiplier=previewMultiplier&&fgBackendAvailable?std::clamp(previewMultiplier,2u,desc_.fgMultiplier):desc_.fgMultiplier;
+    out.fgCandidates=fgBackendAvailable?fgMultiplier-1:0;
     const bool resetFg=reset||!prevValid_||fgHistorySkipped_;
     const bool runFg=fgBackendAvailable&&(!admitFg||admitFg(out.batch,resetFg));
     // A reset has no usable A/B pair. Seed one complete 2X evaluation group;
     // all later subframes would repeat reset work and cannot be presented.
-    const uint32_t fgCalls=resetFg?1:desc_.fgMultiplier-1;
+    const uint32_t fgCalls=resetFg?1:fgMultiplier-1;
     if(runFg&&resetFg)out.fgSkippedForReset=out.fgCandidates-fgCalls;
     out.fgRecovery=runFg&&fgHistorySkipped_;
     if(fgBackendAvailable&&!runFg){out.fgSkippedBeforeEval=out.fgCandidates;fgHistorySkipped_=true;}
@@ -1951,7 +1952,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
         if(out.hasGenerated){
             ++metrics_.fgSubmittedCandidates;
             BatchFrame f;f.identity=out.batch.identity;f.kind=FrameKind::Generated;f.validity=GenerationValidity::Pending;f.subframe=sub;
-            f.pts100ns=FrameBatch::interpolate(out.batch.a100ns,out.batch.b100ns,sub,desc_.fgMultiplier);
+            f.pts100ns=FrameBatch::interpolate(out.batch.a100ns,out.batch.b100ns,sub,fgMultiplier);
             f.lease=std::make_shared<FrameLease>();f.lease->texture=genFrame_[generatedSlot];f.lease->slot=generatedSlot;f.lease->readyFence=out.genFenceValue;generatedLeases_[generatedSlot]=f.lease;out.batch.append(std::move(f));
         }
       }

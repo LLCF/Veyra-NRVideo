@@ -76,6 +76,29 @@ int wmain(int argc,wchar_t** argv){
     }
     const auto nr=graph.metrics().nrEvaluateCount;
     ok=ok&&real==40&&nr==40&&skipped==8*(multiplier-1)&&resetSkipped==4*(multiplier-2)&&evaluated==28*(multiplier-1)+4&&recoveries==2&&generated>0;
+    // Change preview group size without recreating NGX, then return to the
+    // default requested size used by export. Check actual GPU output and PTS.
+    for(unsigned requested:{2u,4u,6u,0u}){
+        if(!ok)break;
+        const auto effective=requested?std::min(requested,multiplier):multiplier;
+        pipeline::FramePacket packet;const AVFrame* frame=nullptr;
+        ok=source.read(packet,&frame)==source::SourceReadStatus::Frame;
+        pipeline::EnhanceGraph::FrameOutputs output;
+        ok=ok&&graph.process(frame,packet.pts.toDouble()*1000,false,output,packet.sequence,&packet.colorInfo,nullptr,false,{},requested);
+        const auto start=std::chrono::steady_clock::now();
+        while(ok&&!graph.resolveGeneration(output)){
+            if(std::chrono::steady_clock::now()-start>std::chrono::seconds(2)){ok=false;break;}wait.slice(.2);
+        }
+        ok=ok&&output.batch.count==effective&&output.fgEvaluated==effective-1;
+        for(unsigned j=0;ok&&j+1<output.batch.count;++j){
+            const auto& f=output.batch.frames[j];
+            ok=f.validity==pipeline::GenerationValidity::Valid&&f.pts100ns==pipeline::FrameBatch::interpolate(output.batch.a100ns,output.batch.b100ns,j+1,effective);
+            sink::RgbaImage image;ok=ok&&sink::readRgba8(ctx,ring,f.lease->texture.Get(),image);
+            unsigned nonblack=0;for(size_t p=0;p+3<image.pixels.size();p+=4)nonblack+=image.pixels[p]>8||image.pixels[p+1]>8||image.pixels[p+2]>8;
+            ok=ok&&nonblack>image.width*image.height/20;
+        }
+        std::cout<<"ADAPT requested="<<requested<<" effective="<<effective<<" pass="<<ok<<std::endl;
+    }
     ring.drainQueue();graph.shutdown();source.close();
     unsigned errors=0;if(info)for(UINT64 i=0;i<info->GetNumStoredMessagesAllowedByRetrievalFilter();++i){SIZE_T size=0;info->GetMessage(i,nullptr,&size);std::vector<uint8_t> data(size);auto* m=reinterpret_cast<D3D12_MESSAGE*>(data.data());if(SUCCEEDED(info->GetMessage(i,m,&size))&&m->Severity<=D3D12_MESSAGE_SEVERITY_ERROR){++errors;log::error("debug",m->pDescription);}}
     ok=ok&&errors==0;

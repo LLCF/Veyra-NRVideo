@@ -174,7 +174,7 @@ public:
     // `hardwareSurface` carries the decoded texture for paths whose surface
     // does not travel inside the AVFrame (D3D11VA). It must be provided exactly
     // when frame->format == AV_PIX_FMT_D3D11 and is unused otherwise.
-    bool process(const AVFrame* frame, double ptsMs, bool reset, FrameOutputs& out, uint64_t sourceFrameId = 0, const ColorDescription* color = nullptr, const HardwareSurfaceInput* hardwareSurface = nullptr, bool retainReferences = true, const FgAdmission& admitFg = {});
+    bool process(const AVFrame* frame, double ptsMs, bool reset, FrameOutputs& out, uint64_t sourceFrameId = 0, const ColorDescription* color = nullptr, const HardwareSurfaceInput* hardwareSurface = nullptr, bool retainReferences = true, const FgAdmission& admitFg = {}, unsigned previewMultiplier = 0);
     bool nextFrameSlotAvailable()const {
         const unsigned slot=unsigned(realFrameIndex_%2);
         if(presentationFences_[slot]&&presentationFences_[slot]->GetCompletedValue()<presentationValues_[slot])return false;

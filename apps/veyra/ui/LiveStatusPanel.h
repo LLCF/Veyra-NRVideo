@@ -55,6 +55,8 @@ inline LRESULT CALLBACK proc(HWND h,UINT message,WPARAM wp,LPARAM lp){
             else if(old(f.lastPresent100ns))progress=L"GPU已就绪，等待呈现";
         }
         rows.emplace_back(L"状态",progress);
+        if(playing&&s.applied.frameGenerationBackend==engine::FrameGenerationBackend::Dlss&&s.applied.multiplier>1&&s.previewFgMultiplier>1)
+            rows.emplace_back(L"补帧倍率 · 目标 / 调度",std::format(L"{}X / {}X",s.applied.multiplier,s.previewFgMultiplier));
         if(!s.capture)rows.emplace_back(L"媒体播放速度",playing?std::format(L"{:.2f} x",s.playbackSpeed):L"未测");
         if(!s.capture&&!s.image){
             rows.emplace_back(L"预览状态",!playing?L"未运行":s.previewSkipped?std::format(L"已跳帧 {}",s.previewSkipped):s.fgBudgetLimited?L"补帧预算不足":L"正常");

@@ -94,7 +94,7 @@ def analyze_trace(path):
             return "unknown"
         if int(submit["detail"]) > 0:
             return "rejected"
-        return "warmup" if submit["count"] == "1" else "steady"
+        return "warmup" if batch in only_real and submit["count"] == "1" else "steady"
     transitions = {}
     for a, b in zip(complete, complete[1:]):
         key = state(a) + "->" + state(b)
