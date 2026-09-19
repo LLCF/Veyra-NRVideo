@@ -1,5 +1,34 @@
 # FG cadence: partial acceptance, fixed 6X still open
 
+## Fixed6 workload controls
+
+Two30s diagnostic tests select EXISTING NR900/720 policies, keeping
+fixed6 and4K FG/output. These change NR/flow resolution and are not the
+requested original-quality acceptance. No defaults or product code changed.
+
+| NR policy | Retained seconds | Submissions/s | P99 / max gap ms | Gaps over10ms | Expired subframes |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 900p | 4.945 | 319.299 | 15.361 / 15.816 | 37 | 17 |
+| 720p | 4.564 | 353.874 | 3.993 / 4.559 | 0 | 28 |
+
+900p's >=95% throughput assertion fails;720p passes that assertion but
+still drops individual generated outputs. Neither result establishes
+physical display smoothness or fixes NR1080+4K+6X. Evidence folders:
+nr900-fixed6 / nr720-fixed6 under the existing task test root. See WORKLOG
+for commands and GPU costs. The proposed new NR performance UI is redundant
+with existing options and has not been implemented.
+
+## XeSS subframe evidence
+
+Existing fence-xess4 provider-hook logs include all Present returns across
+burst boundaries. After excluding10 seconds from the first window,19
+windows cover4560 intervals:mean4.166579ms,max6.909ms. No recurrent16ms
+DLSS-style hole appears in those steady4X records. The first startup window
+has max159.027ms and is not accepted as smooth. This evidence is stronger
+than SDK FPS alone but still not physical scanout, not a6X result, and not
+proof for other GPUs or user workloads. XeSS2X's earlier counter test does
+not provide the same hooked-subframe measurement.
+
 ## Full-group cost follow-up
 
 Matched GPU stages by complete input identity, excluding seed-only groups.

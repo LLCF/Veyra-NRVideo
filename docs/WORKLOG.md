@@ -1,5 +1,74 @@
 # Veyra 工作记录
 
+## 2026-09-20 Fixed6 existing NR-policy diagnostic controls
+
+Corrected the preceding proposal: NrSizePolicy and the settings UI already
+offer explicit 900p/720p policies. No new performance mode is needed or
+implemented. The pending optional question is not authorization to lower
+the product default. Added test-only file-4k-nr900 / file-4k-nr720 profiles
+to FgSustainedTests, selecting those existing policies without saving user
+settings. Original fixed-quality acceptance remains unchanged.
+
+Built veyra_fg_sustained_tests via scripts/build-isolated.ps1, existing
+build/slider-reset-20260919 cache, DisplayVersion1.4.3, process TEMP/TMP
+under tmp/fg-cadence-repair-20260920. Sequential run-short-test.ps1 runs
+nr900-fixed6 and nr720-fixed6: p001.mp4, fixed6, NR+SR settings on, 4K
+target, 30s each, watchdog95s, minimumTargetRatio .95. Trace subframes and
+fixed multiplier environment flags enabled. Source is already4K; SR does
+not execute. Engine logs verify nr/flow1600x900 and1280x720, respectively,
+while FG/output remain3840x2160. These are workload/quality controls, not
+same-quality optimizations; no visual-quality acceptance is claimed.
+
+900p: lifecycle passes, throughput assertion fails (exit1), late sample
+mean320.375/s. Retained4.945s trace:319.299/s, P99/max15.361/15.816ms,
+37 rejected real-only groups and37 gaps over10ms;17 expired subframes.
+720p: lifecycle and throughput assertion pass (exit0), late sample mean
+354.5/s. Retained4.564s trace:353.874/s, P99/max3.993/4.559ms, no
+real-only groups, no gaps over10ms, but28 expired subframes. Full-group
+NR mean5.019/3.608ms; FG batch9.902/9.834ms. This supports workload
+sensitivity, not a claim that every6X defect is hardware-limited or solved.
+
+Inspected SDK310.7 DLSSG headers: no quality/performance preset exposed
+in the inspected create/evaluate contracts. VideoPresenter already uses
+an independent presentation queue/fence for DLSS; same-queue blit blockage
+is not an explanation for these runs. No production scheduling changes.
+
+Evidence root E:/项目/Veyra/tests/fg-cadence-repair-20260920, run folders,
+stdout/stderr and JSON produced by scripts/acceptance/analyze-fg-cadence.py.
+Build logs in E:/项目/Veyra/logs/fg-cadence-repair-20260920/
+nr900-diagnostic-build.log and nr720-diagnostic-build.log. No publication,
+package, or shutdown. Original NR1080+4K+fixed6 acceptance stays open.
+
+## 2026-09-20 Upstream MFG contract and XeSS cadence review
+
+Read GitHub API experimental commit and raw DLSSFrameGenerator.cpp from
+SAOG0721/Magpie at3841698348bfb246623d4acf791984c8b68a577b. Its loop also
+uses generatedFrameCount/index per evaluation, one backbuffer identity per
+real input and one reset evaluation on warmup. It caps its exposed multiplier
+at4; it is not a reference proving6X performance. No upstream code copied.
+The local SDK310.7 contract matches Veyra's count/index/frame-ID usage; no
+documented one-call replacement was found in the inspected sources.
+
+Inspected existing fence-xess4/engine.log's xess-present-gaps records rather
+than treating SDK FPS alone as cadence evidence. Excluding10 seconds from
+the first window timestamp leaves19 windows of240 intervals:4560 hooked
+Present-return gaps, mean4.166579ms, largest recorded gap6.909ms. These
+include burst boundaries, unlike the inBurstGaps statistic. First startup
+window mean8.443ms/max159.027ms; startup is not claimed smooth. Steady file
+4X does not reproduce DLSS fixed6's recurrent16ms holes in this local run.
+Neither this hook nor SDK FPS measures physical scanout; XeSS2X lacks this
+same hook coverage and is not inferred from4X. No new GPU run was needed
+to inspect these existing records. Evidence remains under
+E:/项目/Veyra/tests/fg-cadence-repair-20260920/fence-xess4/engine.log.
+
+Current constraint: known serial NR/flow/full6 work exceeds the60Hz input
+budget; tested overlap and instrumentation alternatives do not solve it.
+Asked user whether an explicit opt-in lower NR internal resolution may be
+tested while retaining4K output and fixed6. This is a quality tradeoff and
+new authorization, not a completed fixed-quality repair. No such product
+change is implemented while the answer is pending. Original goal remains
+incomplete; no shutdown or publication.
+
 ## 2026-09-20 Full-group costs and redundant timestamp experiment
 
 Extended analyze-fg-cadence.py with same-session/revision/epoch/source GPU

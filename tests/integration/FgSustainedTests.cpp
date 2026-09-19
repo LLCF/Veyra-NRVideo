@@ -17,7 +17,9 @@ int wmain(int argc,wchar_t** argv){
         return runFgCompatibilityProbe(reinterpret_cast<HANDLE>(_wcstoui64(argv[2],nullptr,10)));
     if(argc!=7&&argc!=8&&argc!=9)return 2; // optional target ratio, then live-1440p profile
     const bool xessProfile=argc==9&&std::wstring_view(argv[8])==L"file-xess-4k";
-    const bool fileProfile=argc==9&&(std::wstring_view(argv[8])==L"file-4k"||xessProfile);
+    const bool nr900Profile=argc==9&&std::wstring_view(argv[8])==L"file-4k-nr900";
+    const bool nr720Profile=argc==9&&std::wstring_view(argv[8])==L"file-4k-nr720";
+    const bool fileProfile=argc==9&&(std::wstring_view(argv[8])==L"file-4k"||xessProfile||nr900Profile||nr720Profile);
     const bool liveProfile=argc==9&&(std::wstring_view(argv[8])==L"live-1440p"||fileProfile);
     if(argc==9&&!liveProfile)return 2;
     const unsigned multiplier=_wtoi(argv[3]);
@@ -42,6 +44,8 @@ int wmain(int argc,wchar_t** argv){
         settings.nr=effects==L"on"||effects==L"nr";
         settings.sr=effects==L"on"||effects==L"sr";
         if(liveProfile){settings.flow=FlowQuality::Performance;settings.videoSrQuality=0;settings.srTarget=veyra::pipeline::SrTarget::Uhd4K;}
+        if(nr900Profile)settings.nrPolicy=veyra::pipeline::NrSizePolicy::P900;
+        if(nr720Profile)settings.nrPolicy=veyra::pipeline::NrSizePolicy::P720;
         auto options=PlayerOptions::from(settings);
         const std::wstring source=argv[1];
         options.captureReplayForTest=!fileProfile&&!source.starts_with(L"capture:")&&!source.starts_with(L"capture2:");
