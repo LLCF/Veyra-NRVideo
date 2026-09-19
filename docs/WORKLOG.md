@@ -1,5 +1,25 @@
 # Veyra 工作记录
 
+## 2026-09-20 用户关闭程序后的同参数实卡对照
+
+用户要求直接测试刚才参数。按原日志 revision18 使用 `capture:0:14:0:0`、1440p60 NV12、NR 实时1080、DLSS SR 到4K、NVOF Performance、DLSS6X、1795x816、帧同步/VSync/HDR关闭；没有误用最终效果全关配置。完整命令、哈希、计数及边界见 `docs/DLSS_RECOVERY_REPAIR_2026-09-20.md` 新增实卡章节。
+
+基线 worktree=`E:/项目/Veyra/worktrees/dlss-recovery-baseline-20260920`，detached c8a3828，复制相同 sustained harness，产品代码不改。同名 build 目录使用 `scripts/build-isolated.ps1`、当前 slider-reset 构建依赖缓存、同名 tmp，Targets=veyra_fg_sustained_tests；基线首次启动漏 PresentBlit，补构建 veyra_shader_present_blit 后正常。当前 CMakeLists 给 engine 增加此依赖；测试入口增加 live-1440p 参数及计数，禁用性能比较中的注入长帧。
+
+通过 `scripts/run-short-test.ps1` 串行运行 baseline-clean/fixed-clean 各120秒、fixed-no-admission 60秒，均退出0。前两轮 t22..119 计数差得到呈现提交202.57/204.10每秒，预热67.58/13.22每秒，采集覆盖1.93/2.40每秒；关闭预算诊断 t22..59 为184.76提交、10.05采集覆盖、64.32生成过期每秒。恢复浪费减少，但稳定6X目标未达到，不宣称性能修复验收通过。三个测试不与构建并行；初轮 live-fixed 与基线编译重叠，排除其性能结论。一次超时参数拼写错误未启动测试。
+
+证据=`E:/项目/Veyra/tests/dlss-recovery-20260920/live-{baseline-clean,fixed-clean,fixed-no-admission}*`；构建日志=`E:/项目/Veyra/logs/dlss-recovery-baseline-build-20260920.log`、`dlss-recovery-harness-dependency-20260920.log`。修正 CMake 依赖后重新配置/构建退出0（ninja 无待编译项），git diff --check 无错误；测试进程均已结束。TEMP/TMP 和 CWD 均在 E 盘本轮目录；保留对照构建与日志，无额外中间包。现场内容未固定回放，不将不足1%差异宣传为收益。未修改用户包、未发布；下一步需区分 GPU 执行成本、命令槽/主循环供给停顿和呈现相位，不能简单撤掉门禁。
+
+## 2026-09-20 DLSS 重置恢复重复计算修复
+
+用户要求修复现场 6X 调度降档。从干净 `c8a3828` 创建 `codex/dlss-recovery-20260920` 和存档 `checkpoint/pre-dlss-recovery-20260920`。现场计数及范围见 `docs/DLSS_RECOVERY_REPAIR_2026-09-20.md`。修复 EnhanceGraph 的重复重置评估、FgRecoveryBudget 的预热成本选择、EngineController 的实际历史状态传递及未知 ready 日志；增加独立 reset-skipped 计数，并更新候选守恒回归。没有放开截止时间、增加队列上限或取消断帧历史重置。
+
+构建命令：`scripts/build-isolated.ps1 -Root . -BuildDirectory E:/项目/Veyra/build/slider-reset-20260919 -DependencyCache E:/项目/Veyra/build/frame-pacing-20260918/CMakeCache.txt -TempDirectory E:/项目/Veyra/tmp/dlss-recovery-20260920 -DisplayVersion 1.4.3`，Targets 为 veyra、veyra_presentation_worker_tests、veyra_fg_admission_tests、veyra_fg_sustained_tests、veyra_live_presentation_tests，分批构建均退出 0。日志为 `E:/项目/Veyra/logs/dlss-recovery-{build,build-final,live-build,admission-build}-20260920.log`。存在既有 MSVC 字符转换警告，无编译错误。
+
+`veyra_presentation_worker_tests.exe` 退出 0，105 PASS，记录 `E:/项目/Veyra/tests/dlss-recovery-20260920/scheduler.log`。`scripts/run-short-test.ps1 -Exe BUILD/veyra_fg_admission_tests.exe -Arguments dlss,M,MEDIA,OUTPUT -TimeoutSeconds 60 -LogPrefix PREFIX`，M=2/4/6，MEDIA=`E:/项目/Veyra/tests/1.4.2beta/visible-scene.mp4`，OUTPUT/PREFIX=`E:/项目/Veyra/tests/dlss-recovery-20260920/finalM`。三轮各 40 源帧与 40 次 NR，加入两段拒绝和一次中途历史重置，分别生成 28/84/140 有效帧，debugErrors=0，均退出 0；检查恢复后一帧完整倍率、PTS 和非黑画面。早期 admission2/4/6 为未加入中途 reset 的首轮通过证据，不用其计数替代最终结果。
+
+测试子进程 TEMP/TMP 指向 E 盘本轮 tmp 目录，CWD 指向本轮 tests 目录。用户原进程 32496 保持运行，未占采集卡、未覆盖旧包。短素材 GPU 测试只验正确性，不作并发环境下性能结论；同参数 4K 持续对照等待用户关闭旧窗口。未执行 sustained/live-presentation GPU 用例，未测 RTX30/40，不宣称所有补帧受限解决。主程序已构建但未重新打包、合并 main、推送或发布。
+
 ## 2026-09-20 1.4.3 本地测试包
 
 用户要求构建 1.4.3 自测，沿用当前隔离分支与修复提交 8c9957b，不推送或发布。CMake 数字及显示版本改为 1.4.3，新增本版更新说明、组件说明和 RemotePlay 构建说明。运行库全部沿用既有身份，打包脚本逐项校验哈希、签名、尺寸与版本。

@@ -1889,8 +1889,12 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
     previousSource_=sourceFrameId;
     const bool fgBackendAvailable=fgEnabled_&&(fgBackend_&&fgBackend_->created());
     out.fgCandidates=fgBackendAvailable?desc_.fgMultiplier-1:0;
-    const bool runFg=fgBackendAvailable&&(!admitFg||admitFg(out.batch));
     const bool resetFg=reset||!prevValid_||fgHistorySkipped_;
+    const bool runFg=fgBackendAvailable&&(!admitFg||admitFg(out.batch,resetFg));
+    // A reset has no usable A/B pair. Seed one complete 2X evaluation group;
+    // all later subframes would repeat reset work and cannot be presented.
+    const uint32_t fgCalls=resetFg?1:desc_.fgMultiplier-1;
+    if(runFg&&resetFg)out.fgSkippedForReset=out.fgCandidates-fgCalls;
     out.fgRecovery=runFg&&fgHistorySkipped_;
     if(fgBackendAvailable&&!runFg){out.fgSkippedBeforeEval=out.fgCandidates;fgHistorySkipped_=true;}
     if(!runFg)gpuTimer_.resolve(list);
@@ -1900,7 +1904,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
 
     // FG reads enhanced SDR color, not the pre-NR guidance input.
     if (runFg && fgBackend_ && fgBackend_->created()) {
-      for(uint32_t sub=1;sub<desc_.fgMultiplier;++sub){
+      for(uint32_t sub=1;sub<=fgCalls;++sub){
         const uint32_t generatedSlot=parity+(sub-1)*2;
         auto* flist=ring_.acquireNext(slot,st); if(!flist)return false;
         auto* motion=desc_.fgMotionProbe?desc_.fgMotionProbe:(haveFlow?baseFlow_.Get():nrZeroMotion_.Get());
@@ -1919,7 +1923,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
         fe.hdr=hdr10Output();fe.backbuffer=videoFrame_[parity].Get(); fe.depth=depthTex_.Get(); fe.mvecs=motion;
         fe.outputInterpolated=genFrame_[generatedSlot].Get(); fe.reset=resetFg;
         fe.outputDisableInterpolation=fgDisable_[parity].Get();
-        fe.multiFrameCount=desc_.fgMultiplier-1;fe.multiFrameIndex=sub;
+        fe.multiFrameCount=fgCalls;fe.multiFrameIndex=sub;
         fe.frameId=realFrameIndex_+1;
         // FG consumer adapter: current->previous pixel flow -> normalized reverse flow.
         fe.mvecScaleX=(haveFlow||desc_.fgMotionProbe)?-1.0f/static_cast<float>(workW_):1.0f;
@@ -1930,7 +1934,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
         if(!fgBackend_->evaluate(flist,ngxParams_,fe,st)){failedBackend_=engine::FailedBackend::Fg;return false;}
         cpuTrace.mark("fgEvaluate");
         ++out.fgEvaluated;
-        gpuTimer_.mark(flist,timingStage,true);if(sub==desc_.fgMultiplier-1)gpuTimer_.mark(flist,GpuStage::FgBatch,true);
+        gpuTimer_.mark(flist,timingStage,true);if(sub==fgCalls)gpuTimer_.mark(flist,GpuStage::FgBatch,true);
         tracker_.uavBarrier(flist,genFrame_[generatedSlot].Get());
         tracker_.uavBarrier(flist,fgDisable_[parity].Get());
         tracker_.transition(flist,fgDisable_[parity].Get(),D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -1938,9 +1942,9 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
         tracker_.transition(flist,videoFrame_[parity].Get(),D3D12_RESOURCE_STATE_COMMON);
         tracker_.transition(flist,genFrame_[generatedSlot].Get(),D3D12_RESOURCE_STATE_COMMON);
         tracker_.transition(flist,depthTex_.Get(),D3D12_RESOURCE_STATE_COMMON);
-        if(sub==desc_.fgMultiplier-1)gpuTimer_.resolve(flist);
+        if(sub==fgCalls)gpuTimer_.resolve(flist);
         if(!ring_.submitAndSignal(slot))return false;
-        if(sub==desc_.fgMultiplier-1)gpuTimer_.submitted(ring_.lastSignaledValue());
+        if(sub==fgCalls)gpuTimer_.submitted(ring_.lastSignaledValue());
         out.hasGenerated=!resetFg;
         out.genSlot=parity; out.genFenceValue=ring_.lastSignaledValue();
         out.generatedPtsMs=(prevPtsMs_+ptsMs)*0.5;

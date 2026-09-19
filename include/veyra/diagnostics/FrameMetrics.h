@@ -46,7 +46,7 @@ struct FrameFlowCounters {
     // Realtime file preview only: decoded source frames whose enhancement
     // opportunity was dropped (PTS window fully passed) before the graph.
     uint64_t previewSkippedBeforeGraph=0;
-    uint64_t fgCandidate=0,fgEvaluated=0,fgSkippedBeforeEval=0,fgReadyValid=0,fgInvalid=0,fgWarmup=0;
+    uint64_t fgCandidate=0,fgEvaluated=0,fgSkippedBeforeEval=0,fgReadyValid=0,fgInvalid=0,fgWarmup=0,fgSkippedForReset=0;
     uint64_t xessSdkGenerated=0,xessSdkPresented=0,realReady=0;
     uint64_t realPresented=0,generatedPresented=0,generatedExpiredAfterEval=0,cancelledBeforePresent=0;
     uint64_t historyResets=0,captureDropResets=0,settingsResets=0;

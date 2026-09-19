@@ -283,7 +283,7 @@ int wmain(int argc,wchar_t**argv){
     if(overload){
         check(until([](const auto& s){return s.frames>=150;},35),"native4K NR + VSR high + FG4 completes bounded overload replay");
         const auto s=engine.snapshot();const auto& c=s.metrics.flow.counters;
-        check(c.fgCandidate==c.fgEvaluated+c.fgSkippedBeforeEval&&c.presentationBatchHighWater<=2&&c.commandSlotHighWater<=6,"overload work accounting and resource bounds");
+        check(c.fgCandidate==c.fgEvaluated+c.fgSkippedBeforeEval+c.fgSkippedForReset&&c.presentationBatchHighWater<=2&&c.commandSlotHighWater<=6,"overload work accounting and resource bounds");
         check(options.captureReplayDisableFgAdmissionForTest?c.fgSkippedBeforeEval==0:c.fgSkippedBeforeEval>0,"overload comparison uses requested admission policy");
         std::cout<<"OVERLOAD baseline="<<options.captureReplayDisableFgAdmissionForTest<<" frames="<<s.frames<<" processedFps="<<s.fps<<" realPresented="<<c.realPresented<<" generatedPresented="<<c.generatedPresented<<" expired="<<c.generatedExpiredAfterEval<<" skipped="<<c.fgSkippedBeforeEval<<" evaluated="<<c.fgEvaluated<<" ageP95Ms="<<s.captureAgeP95Ms<<std::endl;
         engine.stop();check(until([&](const auto&){return engine.idle();},5),"overload shutdown releases leases");DestroyWindow(window);CoUninitialize();return failures?1:0;
@@ -311,7 +311,7 @@ int wmain(int argc,wchar_t**argv){
     const auto& flow=state.metrics.flow;
     check(flow.latest.sameWindow(state.sessionId,state.metrics.identity)&&flow.counters.fgEvaluated>0,"flow counters carry actual session, epoch and revision");
     check(flow.counters.commandSlotHighWater<=6&&flow.counters.presentationBatchHighWater<=2,"command and presentation queues remain bounded");
-    check(flow.counters.fgCandidate==flow.counters.fgSkippedBeforeEval+flow.counters.fgEvaluated,"each candidate is accounted before evaluate");
+    check(flow.counters.fgCandidate==flow.counters.fgSkippedBeforeEval+flow.counters.fgEvaluated+flow.counters.fgSkippedForReset,"each candidate is accounted before evaluate");
     if(argc==4&&wcscmp(argv[3],L"--reset-rollback")==0){
         SetEnvironmentVariableW(L"VEYRA_TEST_REJECT_NR_DISABLE",L"1");
         settings=state.desired;settings.nr=false;engine.requestSettings(settings);

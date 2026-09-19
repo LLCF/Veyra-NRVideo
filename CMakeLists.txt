@@ -811,7 +811,7 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
   target_compile_options(veyra_popup_selector_tests PRIVATE /utf-8)
   target_compile_definitions(veyra_popup_selector_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
   target_link_libraries(veyra_popup_selector_tests PRIVATE veyra_base comctl32)
-  add_dependencies(veyra_engine veyra_shader_hdr_video_sr veyra_shader_present_motion)
+  add_dependencies(veyra_engine veyra_shader_hdr_video_sr veyra_shader_present_motion veyra_shader_present_blit)
   add_executable(veyra_hdr_color_tests tests/integration/HdrColorTests.cpp)
   add_executable(veyra_multichannel_tests tests/integration/MultichannelTests.cpp)
   target_compile_features(veyra_multichannel_tests PRIVATE cxx_std_20)

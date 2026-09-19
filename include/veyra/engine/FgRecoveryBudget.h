@@ -32,7 +32,7 @@ public:
     void complete(std::optional<double> measuredMs,bool evaluated,bool warmup,int64_t now,std::optional<double> measuredFg={}){
         // Missing GPU timestamps are unknown, not CPU polling delay. Let old
         // samples expire; admission still checks each batch's real deadline.
-        if(warmup){if(measuredMs)add(warmup_,now,*measuredMs);return;}
+        if(warmup){if(evaluated&&measuredMs)add(warmup_,now,*measuredMs);return;}
         if(evaluated&&measuredFg)fgCost(*measuredFg,now);
         if(!measuredMs)return;
         const double ms=*measuredMs;
@@ -41,7 +41,10 @@ public:
         // completion as conservative base cost; never assume free FG.
         add(base_,now,std::max(0.0,ms-extra.value_or(0)));
     }
-    std::optional<double> predicted(int64_t now)const{
+    std::optional<double> predicted(int64_t now,bool warmingHistory=false)const{
+        // Use a measured whole warmup, never divide MFG cost by its multiplier.
+        // Until measured, retain the conservative steady-work estimate.
+        if(warmingHistory)if(auto cost=p95(warmup_,now,10000000))return cost;
         const auto base=baseCost(now);
         if(!base)return {};
         return *base+p95(fg_,now,20000000).value_or(0);
@@ -53,8 +56,8 @@ public:
     int64_t processingAllowance(int64_t now,int64_t interval)const{
         return int64_t(std::min(double(std::max<int64_t>(0,interval)),baseCost(now).value_or(0)*10000));
     }
-    bool admit(int64_t now,int64_t deadline,double elapsed,double present){
-        const auto cost=predicted(now);
+    bool admit(int64_t now,int64_t deadline,double elapsed,double present,bool warmingHistory=false){
+        const auto cost=predicted(now,warmingHistory);
         // FG has not been submitted at admission. CPU time can at most cover
         // the base work; it must never erase the cost of future FG calls.
         const double progress=std::clamp(elapsed,0.0,baseCost(now).value_or(0));

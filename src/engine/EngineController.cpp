@@ -53,7 +53,7 @@ void logFrameFlow(const diagnostics::FrameFlowMetrics& m,const char* state){
     const auto& c=m.counters;const auto& id=m.latest;
     if(c.xessSdkPresented)veyra::log::info("provider-flow",std::format("state={} session={} revision={} sdkPresented={} sdkGenerated={} sdkSubmitFps={:.2f} measurement=provider-report-not-scanout",state,id.sessionId,id.frame.settingsRevision,c.xessSdkPresented,c.xessSdkGenerated,m.xessSdkSubmitFps));
     const auto& r=m.reset; const auto ms=[&](diagnostics::ResetStage s){return r.stageMs[size_t(s)].value_or(-1.0);};
-    veyra::log::info("frame-flow",std::format("state={} session={} revision={} epoch={} source={} batch={} readyFence={} consumerFence={} captureReceived={} mailboxOverwritten={} sourceAccepted={} sourceSkippedBeforeGraph={} realSubmitted={} fgCandidate={} fgSkippedBeforeEval={} fgEvaluated={} fgWarmup={} fgReadyValid={} fgInvalid={} realPresented={} generatedPresented={} generatedExpiredAfterEval={} cancelledBeforePresent={} commandSlots={} commandHighWater={} presentationHighWater={} slotWaitCount={} slotWaitMs={:.3f} generatedFps={:.2f} presentSubmitFps={:.2f} resetRevision={} resetEpoch={} resetReason={} resetOutcome={} resetDrainMs={:.3f} resetDestroyMs={:.3f} resetCreateMs={:.3f} resetWarmupMs={:.3f} resetFirstValidMs={:.3f} resetTotalMs={:.3f}",state,id.sessionId,id.frame.settingsRevision,id.frame.epoch,id.frame.sourceFrameId,id.batchId,id.readyFence,id.consumerFence,c.captureReceived,c.mailboxOverwritten,c.sourceAccepted,c.sourceSkippedBeforeGraph,c.realSubmitted,c.fgCandidate,c.fgSkippedBeforeEval,c.fgEvaluated,c.fgWarmup,c.fgReadyValid,c.fgInvalid,c.realPresented,c.generatedPresented,c.generatedExpiredAfterEval,c.cancelledBeforePresent,c.commandSlotsInFlight,c.commandSlotHighWater,c.presentationBatchHighWater,m.slotReuseWaitCount,m.slotReuseWaitMs.value_or(0),m.validGeneratedFps,m.presentSubmitFps,r.settingsRevision,r.epoch,unsigned(r.reason),unsigned(r.outcome),ms(diagnostics::ResetStage::Drain),ms(diagnostics::ResetStage::Destroy),ms(diagnostics::ResetStage::Create),ms(diagnostics::ResetStage::Warmup),ms(diagnostics::ResetStage::FirstValid),r.totalMs.value_or(-1.0)));
+    veyra::log::info("frame-flow",std::format("state={} session={} revision={} epoch={} source={} batch={} readyFence={} consumerFence={} captureReceived={} mailboxOverwritten={} sourceAccepted={} sourceSkippedBeforeGraph={} realSubmitted={} fgCandidate={} fgSkippedBeforeEval={} fgEvaluated={} fgWarmup={} fgSkippedForReset={} fgReadyValid={} fgInvalid={} realPresented={} generatedPresented={} generatedExpiredAfterEval={} cancelledBeforePresent={} commandSlots={} commandHighWater={} presentationHighWater={} slotWaitCount={} slotWaitMs={:.3f} generatedFps={:.2f} presentSubmitFps={:.2f} resetRevision={} resetEpoch={} resetReason={} resetOutcome={} resetDrainMs={:.3f} resetDestroyMs={:.3f} resetCreateMs={:.3f} resetWarmupMs={:.3f} resetFirstValidMs={:.3f} resetTotalMs={:.3f}",state,id.sessionId,id.frame.settingsRevision,id.frame.epoch,id.frame.sourceFrameId,id.batchId,id.readyFence,id.consumerFence,c.captureReceived,c.mailboxOverwritten,c.sourceAccepted,c.sourceSkippedBeforeGraph,c.realSubmitted,c.fgCandidate,c.fgSkippedBeforeEval,c.fgEvaluated,c.fgWarmup,c.fgSkippedForReset,c.fgReadyValid,c.fgInvalid,c.realPresented,c.generatedPresented,c.generatedExpiredAfterEval,c.cancelledBeforePresent,c.commandSlotsInFlight,c.commandSlotHighWater,c.presentationBatchHighWater,m.slotReuseWaitCount,m.slotReuseWaitMs.value_or(0),m.validGeneratedFps,m.presentSubmitFps,r.settingsRevision,r.epoch,unsigned(r.reason),unsigned(r.outcome),ms(diagnostics::ResetStage::Drain),ms(diagnostics::ResetStage::Destroy),ms(diagnostics::ResetStage::Create),ms(diagnostics::ResetStage::Warmup),ms(diagnostics::ResetStage::FirstValid),r.totalMs.value_or(-1.0)));
 }
 }
 EngineController::EngineController(){worker_=std::thread(&EngineController::dispatch,this);}
@@ -1045,13 +1045,13 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 const bool injectedReject=transaction&&!options.nr&&GetEnvironmentVariableW(L"VEYRA_TEST_REJECT_NR_DISABLE",nullptr,0)>0;
                 if(injectedReject)veyra::log::error("settings-test","test-only reject NR-disable transaction before graph process; no driver failure");
                 pipeline::EnhanceGraph::FgAdmission admitFg;
-                const auto logAdmission=[&](const pipeline::FrameBatch& batch,int64_t now,int64_t deadline,double elapsed,double blit,bool admitted,const char* timeline){
+                const auto logAdmission=[&](const pipeline::FrameBatch& batch,int64_t now,int64_t deadline,double elapsed,double blit,bool admitted,bool warmingHistory,const char* timeline){
                     if(admitted)++fgAdmittedPairs;else ++fgRejectedPairs;
                     // Keep the first rejection even if the periodic sample just
                     // logged a success. Both channels remain rate bounded.
                     if(now<nextFgAdmissionLog&&(admitted||now<nextFgRejectionLog))return;
                     nextFgAdmissionLog=now+10000000;if(!admitted)nextFgRejectionLog=now+10000000;
-                    veyra::log::info("live-fg-admission",std::format("timeline={} revision={} source={} multiplier={} admitted={} admittedPairs={} rejectedPairs={} remainingDeadlineMs={:.3f} predictedMs={:.3f} elapsedMs={:.3f} blitGpuP95Ms={:.3f} presentCpuP95Ms={:.3f} (CPU Present is backpressure, not added GPU cost)",timeline,batch.identity.settingsRevision,batch.identity.sourceFrameId,options.fgMultiplier,admitted,fgAdmittedPairs,fgRejectedPairs,double(deadline-now)/10000,fgBudget.predicted(now).value_or(-1),elapsed,blit,livePresent.p95()));
+                    veyra::log::info("live-fg-admission",std::format("timeline={} revision={} source={} multiplier={} admitted={} admittedPairs={} rejectedPairs={} remainingDeadlineMs={:.3f} predictedMs={:.3f} elapsedMs={:.3f} blitGpuP95Ms={:.3f} presentCpuP95Ms={:.3f} warmingHistory={} (CPU Present is backpressure, not added GPU cost)",timeline,batch.identity.settingsRevision,batch.identity.sourceFrameId,options.fgMultiplier,admitted,fgAdmittedPairs,fgRejectedPairs,double(deadline-now)/10000,fgBudget.predicted(now,warmingHistory).value_or(-1),elapsed,blit,livePresent.p95(),warmingHistory));
                 };
                 if(fgBudgetRevision!=options.settings.revision){fgBudget.reset();pairLatency.reset();fgBudgetRevision=options.settings.revision;}
                 const auto liveInterval=livePhaseInterval100ns(pkt.duration,activeSource->info().averageFps/(isScreen&&halfRate?2:1),isScreen);
@@ -1066,7 +1066,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 // owns generation inside its presenter and has no graph admission.
                 if(isCapture&&!rereadCached&&useLiveFgAdmission&&!presentSinkFrameGeneration(options.settings.frameGenerationBackend)){
                     const auto presentP95=livePresentGpu.p95();
-                    admitFg=[&,presentP95](const pipeline::FrameBatch& batch){
+                    admitFg=[&,presentP95](const pipeline::FrameBatch& batch,bool warmingHistory){
                         // Physical capture and PS5 delivery clocks are not
                         // guaranteed to match the host clock. Anchor each new
                         // input pair before enhancement, so a 59.94-vs-60Hz
@@ -1079,8 +1079,8 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                         const auto lastGenerated=pipeline::FrameBatch::interpolate(a,batch.b100ns,options.fgMultiplier-1,options.fgMultiplier);
                         const auto now=host100ns(),deadline=liveTimeline.deadline(lastGenerated);
                         const double elapsed=elapsedMs(processStart);
-                        const bool admitted=fgBudget.admit(now,deadline,elapsed,presentP95);
-                        logAdmission(batch,now,deadline,elapsed,presentP95,admitted,pairAnchoredLive?(isRemote?"decoded-pair":"capture-pair"):"continuous");
+                        const bool admitted=fgBudget.admit(now,deadline,elapsed,presentP95,warmingHistory);
+                        logAdmission(batch,now,deadline,elapsed,presentP95,admitted,warmingHistory,pairAnchoredLive?(isRemote?"decoded-pair":"capture-pair"):"continuous");
                         return admitted;
                     };
                 }
@@ -1089,7 +1089,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 // generated timestamp can no longer be reached spends no FG
                 // Evaluate; the real frame keeps its normal cadence (plan §4.1).
                 if(!isCapture&&!isImage&&!rereadCached&&!transaction&&options.fg&&!presentSinkFrameGeneration(options.settings.frameGenerationBackend)){
-                    admitFg=[&,historyReset](const pipeline::FrameBatch& batch){
+                    admitFg=[&,historyReset](const pipeline::FrameBatch& batch,bool warmingHistory){
                         if(fileAwaitingVideo)return true; // Bounded startup lookahead; audio has not started.
                         const auto interval=liveSourceInterval100ns(pkt.duration,activeSource->info().averageFps);
                         const auto a=(historyReset||batch.b100ns<=batch.a100ns||batch.b100ns-batch.a100ns>10000000)?batch.b100ns-interval:batch.a100ns;
@@ -1097,8 +1097,8 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                         const auto now=host100ns();
                         const auto deadline=now+lastGenerated-int64_t(nowMs()*10000.0);
                         const auto elapsed=elapsedMs(processStart),blit=livePresentGpu.p95();
-                        const auto admitted=fgBudget.admit(now,deadline,elapsed,blit);
-                        logAdmission(batch,now,deadline,elapsed,blit,admitted,"file-audio");
+                        const auto admitted=fgBudget.admit(now,deadline,elapsed,blit,warmingHistory);
+                        logAdmission(batch,now,deadline,elapsed,blit,admitted,warmingHistory,"file-audio");
                         return admitted;
                     };
                 }
@@ -1201,7 +1201,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 frameFlow->update([&](auto& m){m.lastSubmit100ns=host100ns();});
                 frameFlow->cpu(diagnostics::CpuStage::Submit,processMs,host100ns());
                 frameFlow->cpu(diagnostics::CpuStage::SlotWait,processSlotWaitMs,host100ns());
-                frameFlow->update([&](auto& m){m.latest.frame=out.batch.identity;m.latest.batchId=out.batch.batchId;m.latest.readyFence=std::max(out.videoFenceValue,out.genFenceValue);m.counters.sourceAccepted+=!rereadCached;++m.counters.realSubmitted;m.counters.previewSkippedBeforeGraph+=previewSkippedSinceSubmit;m.counters.fgCandidate+=out.fgCandidates;m.counters.fgEvaluated+=out.fgEvaluated;m.counters.fgSkippedBeforeEval+=out.fgSkippedBeforeEval;if(out.fgSkippedBeforeEval)m.lastFgRejected100ns=host100ns();if(!out.hasGenerated)m.counters.fgWarmup+=out.fgEvaluated;});
+                frameFlow->update([&](auto& m){m.latest.frame=out.batch.identity;m.latest.batchId=out.batch.batchId;m.latest.readyFence=std::max(out.videoFenceValue,out.genFenceValue);m.counters.sourceAccepted+=!rereadCached;++m.counters.realSubmitted;m.counters.previewSkippedBeforeGraph+=previewSkippedSinceSubmit;m.counters.fgCandidate+=out.fgCandidates;m.counters.fgEvaluated+=out.fgEvaluated;m.counters.fgSkippedForReset+=out.fgSkippedForReset;m.counters.fgSkippedBeforeEval+=out.fgSkippedBeforeEval;if(out.fgSkippedBeforeEval)m.lastFgRejected100ns=host100ns();if(!out.hasGenerated)m.counters.fgWarmup+=out.fgEvaluated;});
                 previewSkippedSinceSubmit=0;
                 if(transaction||frames==0){
                     std::lock_guard lock(mutex_);snapshot_.captureHalfRate=halfRate;
@@ -1273,7 +1273,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                             if(generated&&isCapture&&decisionTime>=nextFgDeadlineLog){
                                 nextFgDeadlineLog=decisionTime+10000000;
                                 const auto ready=watch->frameReadyObserved[s.next];
-                                veyra::log::info("fg-deadline",std::format("revision={} batch={} subframe={} expired={} readyObservedLateMs={:.3f} decisionLateMs={:.3f} observedReadyToDecisionMs={:.3f} batchReady={} (CPU fence observations, not scanout)",item.identity.settingsRevision,batch.batch.batchId,item.subframe,generationExpired,double(ready-timeline.deadline(item.pts100ns))/10000,double(decisionTime-timeline.deadline(item.pts100ns))/10000,ready?double(decisionTime-ready)/10000:-1,watch->ready.load()));
+                                veyra::log::info("fg-deadline",std::format("revision={} batch={} subframe={} expired={} readyObservedLateMs={:.3f} decisionLateMs={:.3f} observedReadyToDecisionMs={:.3f} batchReady={} (CPU fence observations, not scanout; -1 means readiness unknown)",item.identity.settingsRevision,batch.batch.batchId,item.subframe,generationExpired,ready?double(ready-timeline.deadline(item.pts100ns))/10000:-1,double(decisionTime-timeline.deadline(item.pts100ns))/10000,ready?double(decisionTime-ready)/10000:-1,watch->ready.load()));
                             }
                             if(readiness==PreviewFrameReadiness::Expired){++s.dropped;++s.handled;++s.next;s.deadlineStart.reset();continue;}
                             if(!s.deadlineStart)s.deadlineStart=Clock::now();

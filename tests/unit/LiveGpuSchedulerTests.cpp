@@ -107,6 +107,16 @@ int main(){
         budget.complete(100,true,false,42200000,90);
         check(!budget.admit(42200000,42366667,0,1),"real steady GPU overload remains limited");
     }
+    budget.reset();
+    budget.complete(20.719,true,false,50000000,11);
+    budget.complete(7,true,true,50000001,2);
+    check(!budget.admit(50000002,50084552,1.217,.047),"observed 6X deadline rejects the full steady batch");
+    check(budget.admit(50000002,50084552,1.217,.047,true),"measured single-call recovery fits without discounting steady MFG cost");
+    check(budget.predicted(50000002)==20.719&&budget.predicted(50000002,true)==7,"recovery and steady costs remain independent");
+    budget.complete(100,false,true,50000003);
+    check(budget.predicted(50000003,true)==7,"rejected reset without FG cannot become a warmup timing sample");
+    check(!budget.admit(50000002,49800002,1.217,.047,true),"cheap recovery cannot bypass an expired deadline");
+    check(budget.predicted(60000002,true)==budget.predicted(60000002),"expired recovery measurement falls back to steady estimate");
     veyra::engine::LivePairLatency phase;
     check(phase.select(10000000,420000,333333,4)==420000,"unknown live readiness keeps legacy phase");
     for(int i=0;i<8;++i)phase.observe(10000000+i,370000);
