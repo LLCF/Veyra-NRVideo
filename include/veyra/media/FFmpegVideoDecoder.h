@@ -4,6 +4,7 @@
 // D3D12VA arrives in P3.3 as a separate configuration of the same surface.
 
 #include <cstdint>
+#include <deque>
 #include <string>
 #include <unordered_map>
 
@@ -27,6 +28,7 @@ namespace veyra::media {
 struct DecoderStats {
     uint64_t framesDecoded = 0;
     uint64_t framesSubmitted = 0;
+    uint64_t packetRetries = 0;
     int64_t firstPts = 0;
     int64_t lastPts = 0;
     uint64_t ptsNonMonotonicCount = 0;
@@ -89,8 +91,8 @@ public:
     int height() const;
     int pixelFormat() const; // AVPixelFormat as int to keep this header light
 
-    // Send one packet (nullptr flushes at end/seek). Returns false on a hard
-    // decode error; end-of-stream is not an error.
+    // True means accepted (or an already completed nullptr drain). EAGAIN
+    // drains into a bounded output queue and retries this same packet.
     bool sendPacket(const AVPacket* packet);
 
     // Receive one decoded frame; false when more input is needed or at EOF.
@@ -100,6 +102,7 @@ public:
     DecodeReceiveStatus receiveStatus() const { return receiveStatus_; }
 
     void flushBuffers(); // seek boundary (Playbook 13.4)
+    void recoverAtKeyframe(); // compressed input loss: discard until a new key frame
     const DecoderStats& stats() const { return stats_; }
 
     // True when the decoder is producing AV_PIX_FMT_D3D12 frames.
@@ -153,6 +156,7 @@ private:
 
     AVCodecContext* context_ = nullptr;
     AVFrame* frame_ = nullptr;
+    std::deque<AVFrame*> bufferedFrames_;
     DecodeReceiveStatus receiveStatus_ = DecodeReceiveStatus::NeedInput;
     int frameTimeBaseNum_ = 0;
     int frameTimeBaseDen_ = 0;
@@ -168,7 +172,7 @@ private:
     ID3D11Device* d3d11Device_ = nullptr;             // our reference (FFmpeg holds its own)
     ID3D11DeviceContext* d3d11Context_ = nullptr;     // borrowed from the hw device context
     ID3D11Fence* d3d11Fence_ = nullptr;
-    ID3D11DeviceContext4* d3d11Context4_ = nullptr;   // borrowed from the hw device context
+    ID3D11DeviceContext4* d3d11Context4_ = nullptr;   // owned QueryInterface reference
     ID3D12Device* d3d12Device_ = nullptr;             // borrowed from the caller
     ID3D12Fence* d3d12Fence_ = nullptr;
     uint64_t interopFenceValue_ = 0;

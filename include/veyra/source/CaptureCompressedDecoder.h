@@ -38,7 +38,9 @@ public:
         const uint8_t* extradata, size_t extradataBytes,
         ID3D12Device* device, ID3D12CommandQueue* queue);
 
-    // Decodes one payload. On success `*out` is a frame whose lifetime the
+    // Decodes one payload; data=nullptr, bytes=0 receives remaining output
+    // without submitting input or EOS. Drain this way before the next payload.
+    // On success `*out` is a frame whose lifetime the
     // caller must not extend past the next decode():
     //  - hardware=true:  decoder-owned D3D12 surface (AV_PIX_FMT_D3D12);
     //  - hardware=false: converted into `nv12Target` (owned by the caller).
@@ -50,6 +52,7 @@ public:
     bool opened() const;
     bool hardwareActive() const;
     bool waitingForInput() const;
+    void recoverAtKeyframe();
     const char* backendName() const;
     const std::string& lastError() const;
     uint64_t framesDecoded() const;

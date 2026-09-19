@@ -1,5 +1,17 @@
 # Veyra 工作记录
 
+## 2026-09-19 七项独立审查修复
+
+用户要求将文档中七项一起修复。存档 `checkpoint/pre-seven-audit-20260919`，基线 `80f7dc4`，隔离分支 `codex/seven-audit-20260919`，保留此前 DLSS/XeSS 调度修复。完成压缩队列参考链恢复、解码输出帧身份、EAGAIN 真正接收重送、重排时间戳、D3D11 Context4 释放、字幕顶部/中部布局和全样式缓存键。
+
+修改：FFmpegVideoDecoder、CaptureCompressedDecoder 及头文件、CaptureCardSource、SubtitleOverlay、SubtitleSettingsPanel、CMakeLists、build-isolated 脚本；增加/扩充压缩解码与字幕像素测试。完整机制、命令、失败过程与验证边界见 `docs/SEVEN_AUDIT_REPAIR_2026-09-19.md`。
+
+构建复用 `E:/项目/Veyra/build/slider-reset-20260919`；依赖 `E:/项目/Veyra/build/frame-pacing-20260918/CMakeCache.txt`。产物位于 `E:/项目/Veyra/{tests,logs,tmp}/seven-audit-20260919`。构建脚本使用这些显式路径和六个目标，最终 build-utf8.log 干净构建及 build-delivery.log 增量均退出0。run-short-test.ps1 单次上限30/60秒：h264-delivery、hevc-delivery、file-delivery、subtitle-delivery、presentation_worker-clean、live_timing-clean、app-delivery 全部退出0并核实非SKIP。H.264/HEVC各90帧、64次EAGAIN，D3D11VA各三轮生命周期、4K文件9项、字幕实际像素与缓存检查通过。
+
+曾发现旧MSVC依赖前缀乱码，导致共享头文件改动未重编译调用者，4K测试崩溃；不能使用早期增量包。修正构建编码、迁移时清理旧对象，修正暴露的字幕窗口LONG/int编译错误。验证Ninja依赖及触碰头文件触发编译后重跑交付测试。首次中文路径导致SKIP、测试窗口无manifest、错误目标名均已修正；保留日志追溯。
+
+本人复查，无独立Reviewer。未连接GC551/GC573，未覆盖真实采集队列溢出端到端、AV1/VP9恢复和长期COM内存压力，不能声称GC573 RGB53fps或所有补帧受限已根治。未打包、合并main、推送或发布，没有新增SDK/运行库/模型入Git。
+
 ## 2026-09-19 DLSS / XeSS 调度修复施工
 
 开工存档 `5a1931b`，分支 `codex/fg-scheduling-repair-20260919`。用户明确要求同时处理 DLSS。完成暖机 FG 成本与稳态预算分离、以 GPU blit 替代 CPU Present 预算项、XeSS 实时路径取消额外源间隔相位、窗口采集固定配置帧率相位，以及 GC573 回调分项诊断。保留有界队列、真实时间戳、资源租约及必要历史 reset。

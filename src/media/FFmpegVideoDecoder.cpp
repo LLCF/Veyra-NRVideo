@@ -239,7 +239,7 @@ void FFmpegVideoDecoder::releaseInterop()
         d3d11Fence_->Release();
         d3d11Fence_ = nullptr;
     }
-    d3d11Context4_ = nullptr; // borrowed from the FFmpeg device context
+    if (d3d11Context4_) { d3d11Context4_->Release(); d3d11Context4_ = nullptr; }
     d3d11Context_ = nullptr;  // borrowed from the FFmpeg device context
     d3d12Device_ = nullptr;   // borrowed from the caller
     interopFenceValue_ = 0;
@@ -554,6 +554,8 @@ ID3D12Resource* FFmpegVideoDecoder::importD3D11Texture(ID3D11Texture2D* texture)
 
 void FFmpegVideoDecoder::close()
 {
+    for (auto* buffered : bufferedFrames_) av_frame_free(&buffered);
+    bufferedFrames_.clear();
     receiveStatus_ = DecodeReceiveStatus::NeedInput;
     if (frame_ != nullptr) {
         av_frame_free(&frame_);
@@ -635,8 +637,26 @@ bool FFmpegVideoDecoder::sendPacket(const AVPacket* packet)
     if (context_ == nullptr) {
         return false;
     }
-    const int result = avcodec_send_packet(context_, packet);
-    if (result < 0 && result != AVERROR(EAGAIN) && result != AVERROR_EOF) {
+    int result = avcodec_send_packet(context_, packet);
+    while (result == AVERROR(EAGAIN)) {
+        ++stats_.packetRetries;
+        if (bufferedFrames_.size() >= 16) {
+            log::error("media", "decoder: output queue full; caller must consume frames before sending more input");
+            return false;
+        }
+        AVFrame* buffered = av_frame_alloc();
+        if (!buffered) return false;
+        const int received = avcodec_receive_frame(context_, buffered);
+        if (received < 0) {
+            av_frame_free(&buffered);
+            log::error("media", std::format("decoder: send EAGAIN without receive progress code={}", received));
+            return false;
+        }
+        bufferedFrames_.push_back(buffered);
+        result = avcodec_send_packet(context_, packet);
+    }
+    if (result == AVERROR_EOF && packet == nullptr) return true;
+    if (result < 0) {
         char errorText[AV_ERROR_MAX_STRING_SIZE]{};
         av_strerror(result, errorText, sizeof(errorText));
         log::error("media", std::format("decoder: send_packet failed code={} text={}", result, errorText));
@@ -654,7 +674,14 @@ const AVFrame* FFmpegVideoDecoder::receiveFrame()
         receiveStatus_ = DecodeReceiveStatus::Error;
         return nullptr;
     }
-    const int result = avcodec_receive_frame(context_, frame_);
+    int result = 0;
+    if (!bufferedFrames_.empty()) {
+        av_frame_unref(frame_);
+        AVFrame* buffered = bufferedFrames_.front();
+        bufferedFrames_.pop_front();
+        av_frame_move_ref(frame_, buffered);
+        av_frame_free(&buffered);
+    } else result = avcodec_receive_frame(context_, frame_);
     if (result < 0) {
         if (result == AVERROR(EAGAIN)) receiveStatus_ = DecodeReceiveStatus::NeedInput;
         else if (result == AVERROR_EOF) receiveStatus_ = DecodeReceiveStatus::EndOfStream;
@@ -667,6 +694,7 @@ const AVFrame* FFmpegVideoDecoder::receiveFrame()
         return nullptr;
     }
     receiveStatus_ = DecodeReceiveStatus::Frame;
+    if (frame_->flags & AV_FRAME_FLAG_KEY) context_->skip_frame = AVDISCARD_DEFAULT;
     ++stats_.framesDecoded;
     // Frame timestamps are in the CODEC context time_base; AVFrame.time_base
     // is not reliably populated by every decoder path.
@@ -781,10 +809,19 @@ const AVFrame* FFmpegVideoDecoder::receiveFrame()
 
 void FFmpegVideoDecoder::flushBuffers()
 {
+    for (auto* buffered : bufferedFrames_) av_frame_free(&buffered);
+    bufferedFrames_.clear();
     receiveStatus_ = DecodeReceiveStatus::NeedInput;
     if (context_ != nullptr) {
         avcodec_flush_buffers(context_);
+        context_->skip_frame = AVDISCARD_DEFAULT;
     }
+}
+
+void FFmpegVideoDecoder::recoverAtKeyframe()
+{
+    flushBuffers();
+    if (context_) context_->skip_frame = AVDISCARD_NONKEY;
 }
 
 } // namespace veyra::media

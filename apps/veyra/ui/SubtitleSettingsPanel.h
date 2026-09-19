@@ -90,8 +90,8 @@ inline void showSubtitleSettings(HWND owner,SubtitleSettings settings,std::funct
     RECT p{};GetWindowRect(owner,&p);
     MONITORINFO monitor{sizeof(monitor)};GetMonitorInfoW(MonitorFromWindow(owner,MONITOR_DEFAULTTONEAREST),&monitor);
     const int width=r.right-r.left,height=r.bottom-r.top;
-    const int x=std::clamp(p.left+dip(owner,40),int(monitor.rcWork.left),std::max(int(monitor.rcWork.left),int(monitor.rcWork.right)-width));
-    const int y=std::clamp(p.top+dip(owner,80),int(monitor.rcWork.top),std::max(int(monitor.rcWork.top),int(monitor.rcWork.bottom)-height));
+    const int x=std::clamp(int(p.left)+dip(owner,40),int(monitor.rcWork.left),std::max(int(monitor.rcWork.left),int(monitor.rcWork.right)-width));
+    const int y=std::clamp(int(p.top)+dip(owner,80),int(monitor.rcWork.top),std::max(int(monitor.rcWork.top),int(monitor.rcWork.bottom)-height));
     subtitlePanel::window=CreateWindowExW(WS_EX_TOOLWINDOW,wc.lpszClassName,L"字幕设置",WS_CAPTION|WS_SYSMENU|WS_CLIPCHILDREN,x,y,width,height,owner,nullptr,wc.hInstance,state);
     if(subtitlePanel::window)ShowWindow(subtitlePanel::window,SW_SHOW);
 }

@@ -32,11 +32,13 @@ std::wstring signatureOf(const std::vector<SubtitleLine>& lines,const SubtitleVi
     std::wstring signature;
     signature.reserve(lines.size()*64);
     for(const auto& line:lines){
-        signature+=std::format(L"{}|{:08X}|{:08X}|{}|{:.1f}|{}|{}|{}|",line.text,line.style.primary,line.style.outline,line.style.font,
+        signature+=std::format(L"{}:{}|{:08X}|{:08X}|{}:{}|{}|{}|{}|{}|",line.text.size(),line.text,line.style.primary,line.style.outline,line.style.font.size(),line.style.font,
             line.style.size,line.style.alignment,line.alignOverride,line.secondary?1:0);
-        signature+=std::format(L"{}:{:.4f}:{:.4f}|",reinterpret_cast<uintptr_t>(line.bitmap.get()),line.posX,line.posY);
+        signature+=std::format(L"{}:{}:{}|",reinterpret_cast<uintptr_t>(line.bitmap.get()),line.posX,line.posY);
+        const auto& s=line.style;
+        signature+=std::format(L"{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|",s.back,s.outlineWidth,s.shadow,s.marginL,s.marginR,s.marginV,s.bold,s.italic,s.background,s.font.size());
     }
-    signature+=std::format(L"#{:.2f}|{}|{}|{}|{}|{}",view.scale,view.fontOverride,view.outline?1:0,view.background?1:0,view.bottomMargin,view.blockGap);
+    signature+=std::format(L"#{}|{}:{}|{}|{}|{}|{}",view.scale,view.fontOverride.size(),view.fontOverride,view.outline?1:0,view.background?1:0,view.bottomMargin,view.blockGap);
     signature+=std::format(L"/{}x{}/{}",rect.right,rect.bottom,view.targetLines);
     signature+=std::format(L"/{}/{}/{}/{}/{}",view.preview.zoom,view.preview.centerX,view.preview.centerY,view.videoWidth,view.videoHeight);
     return signature;
@@ -63,7 +65,7 @@ void updateSubtitleOverlay(HWND h,const std::vector<SubtitleLine>& lines,const S
     static thread_local std::vector<std::shared_ptr<const engine::SubtitleBitmapFrame>> lastBitmaps;
     if(h!=lastWindow){lastSignature.clear();lastBitmaps.clear();lastWindow=h;}
     if(lines.empty()||rect.right<1||rect.bottom<1){lastSignature.clear();lastBitmaps.clear();ShowWindow(h,SW_HIDE);SetWindowTextW(h,L"");return;}
-    const auto signature=signatureOf(lines,view,rect);
+    const auto signature=signatureOf(lines,view,rect)+std::format(L"/dpi{}",GetDpiForWindow(h));
     if(lastSignature==signature){ShowWindow(h,SW_SHOWNOACTIVATE);return;}
     const int width=rect.right,height=rect.bottom;
     BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=width;info.bmiHeader.biHeight=-height;
@@ -104,6 +106,8 @@ void updateSubtitleOverlay(HWND h,const std::vector<SubtitleLine>& lines,const S
             Line entry;
             entry.path=std::make_unique<Gdiplus::GraphicsPath>();
             entry.style=line.style;
+            if(line.alignOverride>=1&&line.alignOverride<=9)entry.style.alignment=line.alignOverride;
+            if(entry.style.alignment<1||entry.style.alignment>9)entry.style.alignment=2;
             const double logicalSize=std::max(8.0,(line.style.size>0?line.style.size:24.0)*view.scale);
             const std::wstring family=!view.fontOverride.empty()?view.fontOverride:(line.style.font.empty()?L"Microsoft YaHei UI":line.style.font);
             FontFamily requested(family.c_str());
@@ -148,6 +152,10 @@ void updateSubtitleOverlay(HWND h,const std::vector<SubtitleLine>& lines,const S
         const float space=std::max(1.0f,cursor-padding-gap*float(stacked?stacked-1:0));
         const float scale=totalHeight>space?space/totalHeight:1;
         if(scale<1)for(auto& entry:laid)if(!entry.positioned){Matrix shrink;shrink.Scale(scale,scale);entry.path->Transform(&shrink);entry.path->GetBounds(&entry.bounds);}
+        float middleHeight=0;size_t middleCount=0;
+        for(const auto& entry:laid)if(!entry.positioned&&verticalOf(entry.style.alignment)==StringAlignmentCenter){middleHeight+=entry.bounds.Height;++middleCount;}
+        if(middleCount>1)middleHeight+=gap*float(middleCount-1);
+        float topCursor=padding,middleCursor=std::max(padding,(float(height)-middleHeight)/2);
         for(size_t index=laid.size();index-->0;){
             auto& entry=laid[index];
             const int alignment=(entry.style.alignment>=1&&entry.style.alignment<=9)?entry.style.alignment:2;
@@ -161,14 +169,15 @@ void updateSubtitleOverlay(HWND h,const std::vector<SubtitleLine>& lines,const S
                 x=std::clamp(x,0.0f,std::max(0.0f,float(width)-blockWidth));
             }else{
                 const auto vertical=verticalOf(alignment);
-                if(vertical==StringAlignmentNear)y=padding;
-                else if(vertical==StringAlignmentCenter)y=std::max(padding,(float(height)-blockHeight)/2);
+                const float marginV=float(dip(h,std::max(0.0,entry.style.marginV)));
+                if(vertical==StringAlignmentNear){y=std::max(topCursor,padding+marginV);topCursor=y+blockHeight+gap;}
+                else if(vertical==StringAlignmentCenter){y=middleCursor;middleCursor=y+blockHeight+gap;}
+                else{y=std::min(cursor,float(height)-padding-float(dip(h,view.bottomMargin))-marginV)-blockHeight;cursor=y-gap;}
                 const float marginL=float(dip(h,entry.style.marginL));
                 const float marginR=float(dip(h,entry.style.marginR));
                 const float left=padding+marginL,right=float(width)-padding-marginR;
                 const auto horizontal=horizontalOf(alignment);
                 x=horizontal==StringAlignmentNear?left:horizontal==StringAlignmentFar?right-blockWidth:left+(right-left-blockWidth)/2;
-                if(vertical!=StringAlignmentNear)cursor=y-gap;
             }
             Matrix translation;
             translation.Translate(x-entry.bounds.X,y-entry.bounds.Y);

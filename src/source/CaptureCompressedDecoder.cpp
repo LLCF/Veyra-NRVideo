@@ -118,6 +118,16 @@ struct CaptureCompressedDecoder::Impl {
             ++failures;
             return false;
         }
+        target->pts = frame.pts;
+        target->best_effort_timestamp = frame.best_effort_timestamp;
+        target->pkt_dts = frame.pkt_dts;
+        target->duration = frame.duration;
+        target->time_base = frame.time_base;
+        target->flags = frame.flags;
+        target->colorspace = frame.colorspace;
+        target->color_primaries = frame.color_primaries;
+        target->color_trc = frame.color_trc;
+        target->color_range = targetFullRange ? AVCOL_RANGE_JPEG : AVCOL_RANGE_MPEG;
         return true;
     }
 };
@@ -185,7 +195,8 @@ bool CaptureCompressedDecoder::decode(const uint8_t* data, size_t bytes, int64_t
     *out = nullptr;
     hardware = false;
     p.waiting = false;
-    if (!p.decoder.opened() || data == nullptr || bytes == 0 || nv12Target == nullptr) {
+    const bool receiveOnly = data == nullptr && bytes == 0;
+    if (!p.decoder.opened() || (!receiveOnly && (data == nullptr || bytes == 0)) || nv12Target == nullptr) {
         p.error = "decode called without an open decoder or a writable target frame";
         ++p.failures;
         return false;
@@ -194,27 +205,29 @@ bool CaptureCompressedDecoder::decode(const uint8_t* data, size_t bytes, int64_t
     // hardware decoder whose first frame cannot be imported has been replaced
     // by the software decoder.
     for (int attempt = 0; attempt < 2; ++attempt) {
-        AVPacket* packet = av_packet_alloc();
-        if (packet == nullptr) {
-            p.error = "av_packet_alloc failed";
-            ++p.failures;
-            return false;
-        }
-        if (av_new_packet(packet, int(bytes)) < 0) {
+        if (!receiveOnly) {
+            AVPacket* packet = av_packet_alloc();
+            if (packet == nullptr) {
+                p.error = "av_packet_alloc failed";
+                ++p.failures;
+                return false;
+            }
+            if (av_new_packet(packet, int(bytes)) < 0) {
+                av_packet_free(&packet);
+                p.error = "av_new_packet failed";
+                ++p.failures;
+                return false;
+            }
+            std::memcpy(packet->data, data, bytes);
+            packet->pts = pts100ns;
+            packet->dts = AV_NOPTS_VALUE; // capture PTS is not decode order for B frames
+            const bool sent = p.decoder.sendPacket(packet);
             av_packet_free(&packet);
-            p.error = "av_new_packet failed";
-            ++p.failures;
-            return false;
-        }
-        std::memcpy(packet->data, data, bytes);
-        packet->pts = pts100ns;
-        packet->dts = pts100ns;
-        const bool sent = p.decoder.sendPacket(packet);
-        av_packet_free(&packet);
-        if (!sent) {
-            p.error = "decoder rejected the compressed payload";
-            ++p.failures;
-            return false;
+            if (!sent) {
+                p.error = "decoder rejected the compressed payload";
+                ++p.failures;
+                return false;
+            }
         }
         const AVFrame* frame = p.decoder.receiveFrame();
         if (frame == nullptr) {
@@ -240,8 +253,10 @@ bool CaptureCompressedDecoder::decode(const uint8_t* data, size_t bytes, int64_t
                     return false;
                 }
                 p.hardware = false;
+                p.decoder.recoverAtKeyframe();
                 ++p.fallbacks;
-                continue; // re-send this payload on the software decoder
+                if (receiveOnly) { p.waiting=true; return false; }
+                continue; // only a new key frame can rebuild the lost reference chain
             }
         }
         if (p.hardware) {
@@ -266,6 +281,7 @@ bool CaptureCompressedDecoder::decode(const uint8_t* data, size_t bytes, int64_t
 bool CaptureCompressedDecoder::opened() const { return p_->decoder.opened(); }
 bool CaptureCompressedDecoder::hardwareActive() const { return p_->hardware; }
 bool CaptureCompressedDecoder::waitingForInput() const { return p_->waiting; }
+void CaptureCompressedDecoder::recoverAtKeyframe() { p_->decoder.recoverAtKeyframe(); }
 const char* CaptureCompressedDecoder::backendName() const
 {
     if (p_->hardware) return "d3d12va";
