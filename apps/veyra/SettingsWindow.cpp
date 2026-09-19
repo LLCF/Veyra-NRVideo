@@ -39,6 +39,14 @@ constexpr auto smoothMotionHelp=L"只用 Smooth Motion\n"
     L"• 驱动额外延迟未测量，音画同步需实测。截图、导出不含驱动生成的帧；直播录制是否捕获到它们也需另测。\n"
     L"• 功能可用性以 NVIDIA App、显卡和驱动支持为准。";
 struct Item{HWND h;int page,x,y,w,height;bool hidden=false;};std::vector<Item> items;
+struct RowReset {
+    int slider,label,value;
+    std::function<double(const engine::EnhancementSettings&)> get;
+    std::function<void(engine::EnhancementSettings&)> reset;
+    std::wstring tip;
+};
+std::map<int,RowReset> rowResets;
+void syncRowResets();
 HWND item(int id){for(auto& entry:items)if(GetDlgCtrlID(entry.h)==id)return entry.h;return nullptr;}
 LRESULT send(int id,UINT message,WPARAM w=0,LPARAM l=0){return SendMessageW(item(id),message,w,l);}
 void putText(int id,const wchar_t* value){setText(item(id),value);}
@@ -357,6 +365,7 @@ void syncColorControls(){
     for(int section=0;section<kColorSections;++section)if(auto eye=item(colorSectionEyeId(section)))InvalidateRect(eye,nullptr,FALSE);
     for(int zone=0;zone<engine::kColorGradingZones;++zone)if(auto wheel=item(colorWheelId(zone)))InvalidateRect(wheel,nullptr,FALSE);
     syncingColour=false;
+    syncRowResets();
 }
 bool applyColour(const engine::ColorSettings& colour,bool autoEnable,bool record=true){
     auto settings=enhancementEnabled?controller->snapshot().desired:configuredSettings;
@@ -1099,6 +1108,13 @@ void arrange(){
     const int sticky=128,viewport=std::max(1,height-sticky);contentHeight=0;
     // The child still has its previous size until SetWindowPos below.
     if(page==2)layoutColorPage(width);
+    for(const auto& [id,row]:rowResets){
+        auto findItem=[&](int control)->Item&{return *std::find_if(items.begin(),items.end(),[&](const Item& entry){return GetDlgCtrlID(entry.h)==control;});};
+        auto& value=findItem(row.value);auto& reset=findItem(id);auto& label=findItem(row.label);
+        reset.x=width-40;reset.y=value.y;reset.hidden=value.hidden;
+        value.x=std::max(100,width-126);value.w=80;
+        label.w=std::max(1,value.x-label.x-8);
+    }
     int helpHeight=0;
     if(smoothMotionHelpExpanded){auto dc=GetDC(window);auto old=SelectObject(dc,font);RECT textRect{0,0,dip(window,std::max(1,width-24)),0};DrawTextW(dc,smoothMotionHelp,-1,&textRect,DT_CALCRECT|DT_WORDBREAK|DT_NOPREFIX);SelectObject(dc,old);ReleaseDC(window,dc);helpHeight=MulDiv(textRect.bottom,96,layoutDpi(window))+16;}
     const auto helpOffset=[&](const Item& entry){const auto id=GetDlgCtrlID(entry.h);return entry.page==1&&(id==1114||id==205||id==1110||id==240||id==241||id==242||id==1150)?helpHeight:0;};
@@ -1116,7 +1132,66 @@ void arrange(){
 HWND add(const wchar_t* cls,const wchar_t* text,int id,DWORD style,int group,int x,int y,int width,int height){auto h=CreateWindowExW(0,cls,text,WS_CHILD|WS_VISIBLE|WS_CLIPSIBLINGS|style,0,0,1,1,group==-1?window:body,reinterpret_cast<HMENU>(INT_PTR(id)),GetModuleHandleW(nullptr),nullptr);SendMessageW(h,WM_SETFONT,WPARAM(font),TRUE);themeControl(h);if(group!=-1)SetWindowSubclass(h,scrollOnly,950,0);items.push_back({h,group,x,y,width,height});return h;}
 void button(const wchar_t* title,int id,int group,int x,int y,int width=-1){add(L"BUTTON",title,id,BS_PUSHBUTTON|WS_TABSTOP,group,x,y,width,36);}
 void combo(int id,int group,int y,std::initializer_list<const wchar_t*> names){auto h=add(L"COMBOBOX",L"",id,CBS_DROPDOWNLIST|WS_VSCROLL|WS_TABSTOP,group,12,y,-1,200);for(auto name:names)SendMessageW(h,CB_ADDSTRING,0,LPARAM(name));}
+void syncRowResets(){
+    if(!controller)return;
+    const auto settings=enhancementEnabled?controller->snapshot().desired:configuredSettings;
+    const engine::EnhancementSettings defaults{};
+    for(const auto& [id,row]:rowResets){
+        const bool changed=std::abs(row.get(settings)-row.get(defaults))>0.00001;
+        if(bool(IsWindowEnabled(item(id)))!=changed)EnableWindow(item(id),changed);
+    }
+}
+void createRowResets(){
+    const auto addReset=[&](int slider,int label,int value,auto access,const ColorParam* colourParam=nullptr){
+        const int id=2000+slider;
+        RowReset row{slider,label,value,
+            [access](const engine::EnhancementSettings& s){auto copy=s;return double(access(copy));},
+            [access](engine::EnhancementSettings& s){engine::EnhancementSettings defaults{};access(s)=access(defaults);}};
+        if(colourParam){
+            const auto param=*colourParam;
+            row.get=[param](const auto& s){return double(param.value(s.color));};
+            row.reset=[param](auto& s){param.set(s.color,param.value(engine::ColorSettings{}));};
+        }
+        wchar_t name[128]{};GetWindowTextW(item(label),name,128);
+        if(slider==622)wcscpy_s(name,L"羽化");
+        row.tip=std::format(L"还原{} · 默认 {:g}",name,row.get(engine::EnhancementSettings{}));
+        auto& stored=rowResets.emplace(id,std::move(row)).first->second;
+        const auto valueItem=*std::find_if(items.begin(),items.end(),[&](const Item& entry){return entry.h==item(value);});
+        auto h=add(L"BUTTON",stored.tip.c_str(),id,BS_PUSHBUTTON|WS_TABSTOP,valueItem.page,0,valueItem.y,28,28);
+        icon(h,Icon::Reset);ghost(h);SetPropW(h,L"veyra.reset",HANDLE(1));
+        SetPropW(h,L"veyra.tip",HANDLE(stored.tip.c_str()));
+        SetWindowLongPtrW(item(label),GWL_STYLE,GetWindowLongPtrW(item(label),GWL_STYLE)|SS_ENDELLIPSIS);
+    };
+    addReset(600,1000,100,[](auto& s)->auto&{return s.model.intensity;});
+    addReset(601,1001,101,[](auto& s)->auto&{return s.model.tone;});
+    addReset(602,1002,102,[](auto& s)->auto&{return s.model.structure;});
+    addReset(603,1003,103,[](auto& s)->auto&{return s.model.skin;});
+    addReset(607,1007,107,[](auto& s)->auto&{return s.residual.total;});
+    addReset(608,1008,108,[](auto& s)->auto&{return s.residual.darken;});
+    addReset(609,1009,109,[](auto& s)->auto&{return s.residual.brighten;});
+    addReset(610,1010,110,[](auto& s)->auto&{return s.residual.color;});
+    addReset(611,1011,111,[](auto& s)->auto&{return s.residual.luminance;});
+    addReset(622,1123,222,[](auto& s)->auto&{return s.protection.featherPixels;});
+    addReset(631,1141,1131,[](auto& s)->auto&{return s.videoHdr.contrast;});
+    addReset(632,1142,1132,[](auto& s)->auto&{return s.videoHdr.saturation;});
+    addReset(633,1143,1133,[](auto& s)->auto&{return s.videoHdr.middleGray;});
+    addReset(634,1144,1134,[](auto& s)->auto&{return s.videoHdr.peakNits;});
+    for(size_t i=0;i<colorParams.size();++i){
+        // Colour arrays and scalars share the same field descriptor as editing.
+        addReset(colorSliderId(int(i)),colorLabelId(int(i)),colorEditId(int(i)),[](auto& s)->auto&{return s.color.exposure;},&colorParams[i]);
+    }
+}
 LRESULT CALLBACK proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
+    if(msg==WM_COMMAND&&!populating&&HIWORD(wp)==BN_CLICKED){
+        if(const auto found=rowResets.find(LOWORD(wp));found!=rowResets.end()){
+            auto settings=enhancementEnabled?controller->snapshot().desired:configuredSettings;
+            found->second.reset(settings);
+            if(found->second.slider>=colorSliderId(0))applyColour(settings.color,false);
+            else submit(settings);
+            populate(enhancementEnabled?controller->snapshot().desired:configuredSettings);
+            return 0;
+        }
+    }
     if(msg==WM_COMMAND&&!populating&&((LOWORD(wp)==240&&HIWORD(wp)==BN_CLICKED)||((LOWORD(wp)==241||LOWORD(wp)==242)&&HIWORD(wp)==CBN_SELCHANGE))){
         auto setting=controller->snapshot().presentation;setting.enabled=checked(240)==BST_CHECKED;
         setting.mode=engine::PacingMode(send(241,CB_GETCURSEL));setting.display=engine::DisplaySync(send(242,CB_GETCURSEL));
@@ -1564,6 +1639,7 @@ case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.
         auto slider=add(TRACKBAR_CLASSW,L"",631+i,TBS_HORZ|TBS_NOTICKS|WS_TABSTOP,0,12,y+26,-1,24);
         SendMessageW(slider,TBM_SETRANGE,TRUE,MAKELPARAM(hdrMin[i],hdrMax[i]));
     }
+    createRowResets();
     loadStore();populate(controller->snapshot().desired);message(store.error());SetTimer(h,1,250,nullptr);arrange();
     // Layout evidence for UI work: VEYRA_DUMP_SETTINGS_LAYOUT=1 prints the
     // resolved position of every control once, in DIP units.
@@ -1616,7 +1692,7 @@ case WM_TIMER:{auto s=controller->snapshot();putText(1150,s.presentationStatus.c
         s.videoHdrStatus.empty()?L"等待预览状态":s.videoHdrStatus.c_str();
     putText(1145,hdrStatus);
     return 0;}
-case WM_DESTROY:KillTimer(h,1);DeleteObject(font);window=nullptr;body=nullptr;items.clear();return 0;
+case WM_DESTROY:KillTimer(h,1);DeleteObject(font);window=nullptr;body=nullptr;items.clear();rowResets.clear();return 0;
 }return DefWindowProcW(h,msg,wp,lp);}
 }
 engine::EnhancementSettings defaultSettings(){loadStore();return store.defaultSettings();}

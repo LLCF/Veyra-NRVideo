@@ -4527,3 +4527,19 @@ Blackwell 上会改变一条已经正常工作的路径，无法区分"补丁生
 用户授权本轮修复、整合 main、GitHub 发布及新群/HDR 对比图片公开。AppShell 全屏切换先 TTM_POP，再按 full 状态 TTM_ACTIVATE，退出恢复正常提示。更新中英文 README、1.4.2 notes、组件与对应源码说明、RELEASE_SUPPORT；打包正式纳入已授权 TrueHDR，附 README 图片与窗口采集 MIT 许可。具体命令与最终状态见 RELEASE_1.4.2_EXECUTION.md。
 
 产物统一在 E:/项目/Veyra/releases/1.4.2、build/screen-capture-20260919，以及 logs/tests/tmp/release-1.4.2-20260919。未覆盖上一轮内测包。
+# 2026-09-19 参数滑杆单项还原（方案一）
+
+用户选择数值右侧固定还原图标。分支 `codex/slider-reset-20260919` 从字幕弹窗修复 `4bce05e` 创建，未合并、推送或发布。
+
+- `SettingsWindow.cpp` 为调色、NR、剔除区羽化和 RTX Video HDR 参数滑杆增加 28 DIP 独立按钮；读取 `EnhancementSettings{}` / `ColorSettings{}` 的实际默认值，只改对应字段，保留开关和其他参数。调色使用现有提交与撤销路径；提交失败保留原设置。默认态禁用，修改后启用，提示显示参数和默认值。
+- 数值和按钮固定右对齐，标签超长省略，折叠状态跟随参数行。`Theme.h` 增加还原按钮橙色悬停；新增 Lucide rotate-ccw 原始 SVG，由现有固定提交生成器更新图标和 manifest，许可证沿用 assets/icons/lucide/LICENSE。
+- 增加 `veyra_slider_reset_tests` 实际 Win32 控件测试：NR、羽化、HDR、曝光、非零混合/LUT 默认值；其他字段及开关不变；调色撤销；拒绝提交；按钮状态；280/328/420 宽度及折叠隐藏。
+
+实际命令与证据：
+
+1. `python scripts/generate-lucide-icons.py`，PYTHONPATH 指向 `E:/项目/Veyra/deps/fonttools-4.64.0`，生成 26 个图标。
+2. `scripts/build-isolated.ps1 -Root . -BuildDirectory E:/项目/Veyra/build/slider-reset-20260919 -DependencyCache E:/项目/Veyra/build/frame-pacing-20260918/CMakeCache.txt -TempDirectory E:/项目/Veyra/tmp/slider-reset-20260919 -DisplayVersion 1.4.2 -Targets veyra,veyra_slider_reset_tests` 通过；另构建 `veyra_popup_selector_tests`。
+3. `veyra_slider_reset_tests.exe --visual` 退出 0，全部断言通过；computer-use 实际点击曝光还原，曝光 2.00 -> 0.00，对比度保留 17.00，截图确认图标/数值无重叠。初次测试缺少 GDI+ 初始化发生崩溃，补齐测试初始化后通过；视觉测试宿主增加 WS_CLIPCHILDREN，消除宿主背景覆盖子控件。
+4. `veyra_popup_selector_tests.exe` 退出 0，包含此前字幕弹窗鼠标/键盘案例；`scripts/run-short-test.ps1 ... --smoke-empty --smoke-seconds 5` 主程序退出 0。
+
+日志及截图：`E:/项目/Veyra/logs/slider-reset-20260919/`（final-build.log、reset-test.log、popup-test.log、app-smoke.log、reset-after-click.png）。临时文件：`E:/项目/Veyra/tmp/slider-reset-20260919/`。未打包。此次为设置 UI 修改，未执行 NVIDIA Create/Evaluate、视频画质或实卡补帧测试，不据此宣称处理链验收。
