@@ -20,3 +20,22 @@ New outputs: E:/项目/Veyra/tests/fg-cadence-repair-20260920, logs/fg-cadence-r
 - Combining all MFG evaluations into a single command list reduced measured output to about 72 FPS; reverted. Servicing older presentations during producer slot waits reached only about 89 FPS; reverted. No CommandSlotRing changes retained.
 - XeSS is included in the active goal. Test the same media/effects at 2X and 4X, checking SDK generation counters separately from application Present calls; provider-owned subframe timing needs separate evidence.
 - Final acceptance: sustained matched DLSS 6X/2X; XeSS 2X/4X; dynamic multiplier GPU validity/PTS and recovery tests; CPU policy and application lifecycle/startup. Results belong in FG_CADENCE_REPAIR_ACCEPTANCE_2026-09-20.md.
+
+## Fixed 6X follow-up: not yet accepted
+
+User explicitly requires fixed 6X cadence repair in addition to the fallback checkpoint 0050870. Tests below bypass the capacity controller; multiplier remains 6. None proves NR-on fixed 6X repaired.
+
+| Run | Settings / duration | Retained submission FPS | P95 interval ms | Complete six-frame batches |
+| --- | --- | --- | --- | --- |
+| fixed6-slots16 | NR on, 16 command slots, 45s | 61.196 | 18.0236 | 0 |
+| fixed6-nr-off | NR/SR off, original 6 slots, 30s | 360.002 | 3.3488 | 371 |
+| barrier6 | NR on, avoid repeated input/depth COMMON transitions, 45s | 77.230 | 17.7609 | 0 |
+| phase20-slots16 | NR on, 16 slots, file presentation phase delayed 20ms, 45s | 62.609 | 17.7917 | 0 |
+
+Each trace is only the final bounded retention window, not the entire test. NR-off retained 6.206s, max interval 4.1553ms, no interval over16.667ms, PTS steps 2.7778ms. This demonstrates valid full6X submission with headroom; disabling NR is diagnostic, not a proposed user solution. NR-on measured GPU work is about17-18ms per60Hz input versus16.667ms budget. Enlarging the ring removed CPU slot waits but did not repair deadline losses. This does not prove all observed stalls are unavoidable compute limits.
+
+Input/depth barrier experiment and fixed20ms phase experiment were reverted for lack of benefit. The latter also added video phase lag and is not an audio synchronization fix. Default command ring remains6. Two bounded test hooks remain: VEYRA_TEST_COMMAND_SLOTS (6..24), VEYRA_TEST_FIXED_FG_MULTIPLIER (presence bypasses automatic multiplier selection). Normal runs do not set them.
+
+Evidence: E:/项目/Veyra/tests/fg-cadence-repair-20260920/{fixed6-slots16,fixed6-nr-off,barrier6,phase20-slots16}, corresponding stdout/stderr/JSON files; build logs slots-build.log, barrier-build.log, phase-build.log in E:/项目/Veyra/logs/fg-cadence-repair-20260920. All bounded harness runs exited0 for lifecycle only: minimumTargetRatio=0 deliberately disables a target-throughput assertion. No scanout measurement or subjective smoothness claim follows from these numbers.
+
+Next investigation must address the overload equilibrium: admitting work by the last generated deadline permits earlier subframes to expire, and repeated reject/warmup transitions remove additional temporal coverage. A fixed phase shift cannot cure a sustained throughput deficit. Any replacement must preserve original media time/audio speed, bounded queue/latency, accurate effective multiplier reporting and reset/resource lifetime correctness. XeSS final regression and lifecycle acceptance remain pending. Goal remains active; no shutdown until final work/report is complete.

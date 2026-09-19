@@ -194,7 +194,9 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
     try {
         do {
             Status st=Status::Ok;gfx::DeviceContextDesc dd;dd.commandSlotCount=6;
-            if(!ctx.initialize(dd,st)||!ring.initialize(ctx.device(),ctx.directQueue(),ctx.fence(),ctx.fenceEvent(),6,st)){status(L"D3D12初始化失败，请查看诊断",true);break;}
+            wchar_t testSlots[16]{};unsigned commandSlots=6;
+            if(GetEnvironmentVariableW(L"VEYRA_TEST_COMMAND_SLOTS",testSlots,16))commandSlots=std::clamp(unsigned(_wtoi(testSlots)),6u,24u);
+            if(!ctx.initialize(dd,st)||!ring.initialize(ctx.device(),ctx.directQueue(),ctx.fence(),ctx.fenceEvent(),commandSlots,st)){status(L"D3D12初始化失败，请查看诊断",true);break;}
             auto ext=std::filesystem::path(path).extension().wstring();for(auto& c:ext)c=towlower(c);
             const bool isImage=ext==L".png"||ext==L".jpg"||ext==L".jpeg";
             sink::RgbaImage image;
@@ -1059,7 +1061,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 };
                 if(fgBudgetRevision!=options.settings.revision){fgBudget.reset();fgCapacity.reset();pairLatency.reset();fgBudgetRevision=options.settings.revision;}
                 previewFgMultiplier=options.fgMultiplier;
-                if(!isImage&&!rereadCached&&options.fg&&!presentSinkFrameGeneration(options.settings.frameGenerationBackend))
+                if(!isImage&&!rereadCached&&options.fg&&!presentSinkFrameGeneration(options.settings.frameGenerationBackend)&&!GetEnvironmentVariableW(L"VEYRA_TEST_FIXED_FG_MULTIPLIER",nullptr,0))
                     previewFgMultiplier=fgCapacity.select(options.fgMultiplier,double(liveSourceInterval100ns(pkt.duration,activeSource->info().averageFps))/10000);
                 {std::lock_guard lock(mutex_);snapshot_.previewFgMultiplier=previewFgMultiplier;}
                 const auto liveInterval=livePhaseInterval100ns(pkt.duration,activeSource->info().averageFps/(isScreen&&halfRate?2:1),isScreen);
