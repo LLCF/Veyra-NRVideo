@@ -71,6 +71,27 @@ def analyze(path):
     }
 
 
+def gpu_group_costs(events):
+    # Match stages from the same input and epoch; seed evaluations must not
+    # dilute the full five-call cost. Blit repeats per output and is excluded.
+    frames = {}
+    for event in events:
+        if event["event"] != "Gpu" or int(event["detail"]) == 11:
+            continue
+        key = tuple(event[field] for field in ("session", "revision", "epoch", "source"))
+        frames.setdefault(key, {})[int(event["detail"])] = float(event["ms"])
+    full = [stages for stages in frames.values() if all(i in stages for i in range(5, 11))]
+    return {
+        "scope": "Same-input full five-evaluation groups only; batch includes inter-call gaps, excludes final status copy; not GPU utilization",
+        "full6Groups": len(full),
+        "evaluateSumMs": distribution([sum(s[i] for i in range(5, 10)) for s in full]),
+        "batchMs": distribution([s[10] for s in full]),
+        "betweenEvaluationsMs": distribution([s[10] - sum(s[i] for i in range(5, 10)) for s in full]),
+        "stagesMs": {str(i): distribution([s[i] for s in full if i in s])
+                     for i in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 12)},
+    }
+
+
 def analyze_trace(path):
     events = [dict(re.findall(r"(\w+)=([^ ]+)", line)) for line in
               path.read_text(encoding="utf-8", errors="replace").splitlines() if line.startswith("event=")]
@@ -136,6 +157,7 @@ def analyze_trace(path):
             "onlyRealRejectedBatches": rejected, "onlyRealWarmupBatches": warmup,
             "batchTransitions": transitions,
             "discardedSubframes": discard_summary,
+            "full6GpuCosts": gpu_group_costs(events),
             "presentCpuMs": distribution([float(p["ms"]) for p in presents]),
             "longestGaps": sorted(gaps, key=lambda g: g["intervalMs"], reverse=True)[:12],
             "longGapMediaStepsMs": distribution([g["mediaStepMs"] for g in gaps if g["intervalMs"] > 10]),

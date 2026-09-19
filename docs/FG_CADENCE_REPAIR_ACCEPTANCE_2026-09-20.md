@@ -1,5 +1,21 @@
 # FG cadence: partial acceptance, fixed 6X still open
 
+## Full-group cost follow-up
+
+Matched GPU stages by complete input identity, excluding seed-only groups.
+fence-fixed6 full-group mean: NR6.424ms, flow0.992ms, FG9.747ms; five FG
+Evaluate intervals account for9.661ms of that batch. The remaining0.087ms
+is between-evaluation elapsed time, not the whole pipeline overhead.
+Do not infer runtime-internal engine utilization from queue timestamps.
+
+Disabling redundant command-slot timestamps for one bounded experiment
+gave291.568 submissions/s versus288.946 in the subsequent control, but
+73/76 gaps over10ms remain in5.320/5.347s retained windows. Both runs keep
+fixed6, NR,4K, real PTS, graph timestamps and interpolation validity checks.
+The test hook was removed; no performance claim or fix promoted. Analyzer
+now reports full6GpuCosts separately from warmup/seed samples. See WORKLOG
+for commands and artifacts. Fixed6 acceptance remains open.
+
 ## Latest continuation: seed on rejected input
 
 Rejected full groups may now perform one affordable reset evaluation on the

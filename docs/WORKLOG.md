@@ -1,5 +1,34 @@
 # Veyra 工作记录
 
+## 2026-09-20 Full-group costs and redundant timestamp experiment
+
+Extended analyze-fg-cadence.py with same-session/revision/epoch/source GPU
+group matching. Seed-only records are excluded from full6 costs. Small
+Python assertions passed for complete groups, epoch isolation and incomplete
+groups. Historical fence-fixed6:243 full groups, FG batch mean9.7472ms,
+sum of five Evaluate intervals9.6606ms, between-call remainder0.0866ms.
+This excludes the final status copy and is not hardware utilization.
+
+Temporarily bypassed CommandSlotRing's redundant timestamps via process-only
+VEYRA_TEST_NO_SLOT_TIMESTAMPS, retaining graph stage timestamps, fences and
+per-output interpolation status. Built sustained harness using
+scripts/build-isolated.ps1 with build/slider-reset-20260919 and its cache,
+TEMP/TMP=tmp/fg-cadence-repair-20260920, DisplayVersion1.4.3.
+Sequential run-short-test.ps1 tests no-slot-timing6 / slot-timing-control6
+each30s, watchdog95s, p001.mp4, NR on, file-4k, fixed6, trace subframes;
+minimumTargetRatio0 means lifecycle only. Both exited0. Retained results:
+291.568/288.946 submissions/s, max gaps16.921/16.754ms,73/76 gaps over10ms,
+all with16.667ms media steps. Full FG mean9.591/9.729ms; inter-call mean
+0.051/0.067ms. A single pair does not establish a repeatable speedup, and
+neither passes fixed6 cadence. Removed the entire test hook with apply_patch.
+
+Evidence: E:/项目/Veyra/tests/fg-cadence-repair-20260920/{no-slot-timing6,
+slot-timing-control6,fence-fixed6-costs.json}, corresponding JSON/logs.
+Build logs: E:/项目/Veyra/logs/fg-cadence-repair-20260920/slot-timing-build.log
+and slot-timing-restore-build.log. No runtime changes, package or publication.
+The analyzer is the only retained code change; product scheduling is unchanged.
+Fixed6 remains open. Automatic lower multipliers are not its acceptance.
+
 ## Independent FG queue experiment (rejected)
 
 After checkpoint1b955b5, tested an explicit file-preview-only independent
