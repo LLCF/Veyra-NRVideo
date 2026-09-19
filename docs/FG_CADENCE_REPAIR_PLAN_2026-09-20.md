@@ -4,6 +4,33 @@ Continuation: affordable same-input reseeding removes a second lost group
 after budget rejection. Fixed6 now measures about280 submissions/s, still
 with15ms holes; acceptance remains open. Fallback is not the requested fix.
 
+## Next experiment: overlap enhancement and interpolation
+
+The retained trace attributes every >10ms gap to a rejected interpolation
+group. Test whether NR for input N+1 can overlap FG for input N, instead of
+assuming the current serial stage sum is an immutable hardware limit.
+
+1. Carry producer fence identity with each lease and with non-published
+   warmup completion. Poll and presentation must use that object's timeline.
+   Keep current single graph queue until this prerequisite passes regression.
+2. An isolated FG queue needs its own ring/fence/event and drain lifecycle.
+   Snapshot motion per parity before handing off; depth is currently immutable.
+   No queue may signal another queue's monotonic completion fence.
+   The first experiment must be explicitly requested by the realtime engine,
+   not enabled globally from inside the graph: player_probe and existing
+   export callers still consume numeric fence values on the original queue.
+3. Protect video input and generated/status output reuse, including seed-only
+   evaluations with no generated leases. Real-frame presentation must wait
+   for FG's read of its texture before changing that texture's state.
+4. Split timestamp collection by producer queue. Do not subtract timestamps
+   from different clocks or treat overlapping sums as elapsed execution time.
+   File budget and queued-work prediction need a dependency model before
+   promotion; keep any initial feasibility path explicitly experimental.
+5. Compare fixed6 same-media cadence, actual GPU overlap and latency against
+   checkpoint/fg-same-input-seed-20260920. Validate reset/seek/resize/stop,
+   2X/4X/6X, seeds, exports and non-DLSS paths before enabling normally.
+   Separate queues alone do not prove concurrent execution or a speedup.
+
 Latest continuation: prefix admission, carried queue prediction and minimum
 file output spacing are now enabled normally; command allocator budget16,
 two-job capacity unchanged. Experimental admission/spacing flags removed.

@@ -571,9 +571,8 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 collectTimings();
                 for(auto it=pendingCompletions.begin();it!=pendingCompletions.end();){
                     auto& watch=**it;auto& batch=watch.output;
-                    const auto completedFence=ctx.fence()->GetCompletedValue();
                     for(unsigned i=0;i<batch.batch.count;++i){const auto& item=batch.batch.frames[i];
-                        if(!watch.frameReadyObserved[i]&&item.lease&&completedFence>=item.lease->readyFence){
+                        if(!watch.frameReadyObserved[i]&&item.lease&&item.lease->ready()){
                             watch.frameReadyObserved[i]=host100ns();
                             if(traceSubframes)traceFrame(diagnostics::TraceKind::FrameReady,item.identity,batch.batch.batchId,item.lease->readyFence,item.pts100ns,item.subframe,1,elapsedMs(watch.processStart));
                         }
@@ -1111,7 +1110,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                         const auto start=std::chrono::duration_cast<std::chrono::nanoseconds>(processStart.time_since_epoch()).count()/100;
                         int64_t finish=0;
                         for(const auto& previous:pendingCompletions){
-                            if(ctx.fence()->GetCompletedValue()>=std::max(previous->output.videoFenceValue,previous->output.genFenceValue))continue;
+                            if(previous->output.gpuComplete())continue;
                             const auto began=std::chrono::duration_cast<std::chrono::nanoseconds>(previous->processStart.time_since_epoch()).count()/100;
                             const auto cost=previous->output.fgEvaluated?fgBudget.predicted(start,previous->output.historyReset||previous->output.fgRecovery):fgBudget.baseCost(start);
                             finish=std::max({finish,began,previous->predictedGpuStart100ns})+int64_t(cost.value_or(0)*10000);

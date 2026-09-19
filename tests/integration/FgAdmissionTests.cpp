@@ -21,6 +21,21 @@ int wmain(int argc,wchar_t** argv){
     gfx::DeviceContextDesc device;device.enableDebugLayer=true;
     bool ok=ctx.initialize(device,status)&&ring.initialize(ctx.device(),ctx.directQueue(),ctx.fence(),ctx.fenceEvent(),6,status);
     Microsoft::WRL::ComPtr<ID3D12InfoQueue> info;if(ok)ctx.device()->QueryInterface(IID_PPV_ARGS(&info));
+    if(ok){
+        Microsoft::WRL::ComPtr<ID3D12Fence> enhanced,generatedFence;
+        ok=SUCCEEDED(ctx.device()->CreateFence(9,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&enhanced)))&&
+            SUCCEEDED(ctx.device()->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&generatedFence)));
+        if(ok){
+            pipeline::FrameLease lease;lease.readyFence=1;lease.readyFenceObject=generatedFence;
+            pipeline::EnhanceGraph::FrameOutputs output;output.videoFenceValue=9;output.videoFenceObject=enhanced;
+            output.genFenceValue=1;output.genFenceObject=generatedFence;
+            ok=!lease.ready()&&!output.gpuComplete();
+            ok=ok&&SUCCEEDED(generatedFence->Signal(1))&&lease.ready()&&output.gpuComplete();
+            lease.readyFenceObject.Reset();ok=ok&&!lease.ready();
+            output.genFenceObject.Reset();ok=ok&&!output.gpuComplete();
+            std::cout<<"FENCE_IDENTITY independent timelines and missing producer pass="<<ok<<std::endl;
+        }
+    }
     source::MediaFileSource source;source::SourceOpenDesc input;input.path=argv[3];input.preferHardwareDecode=false;
     ok=ok&&source.open(input);
     pipeline::EnhanceGraph graph(ctx,ring);pipeline::EnhanceGraphDesc desc;

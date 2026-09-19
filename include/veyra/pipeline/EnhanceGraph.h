@@ -161,6 +161,11 @@ public:
         double generatedPtsMs = 0.0;       // strict midpoint of prev/current PTS
         uint32_t genSlot = 0;              // genFrame[genSlot] holds the DLSSG output
         uint64_t genFenceValue = 0;
+        Microsoft::WRL::ComPtr<ID3D12Fence> videoFenceObject,genFenceObject;
+        bool gpuComplete()const {
+            return fenceComplete(videoFenceObject.Get(),videoFenceValue)&&
+                fenceComplete(genFenceObject.Get(),genFenceValue);
+        }
         uint64_t realFrameIndex = 0;
         bool passthrough = false;          // VEYRA_GRAPH_OFF: metadata only, no GPU work
     };
@@ -187,6 +192,7 @@ public:
         if(generated&&slot<kGeneratedPoolSlots){if(auto lease=generatedLeases_[slot].lock())return lease->readyFence;}
         return uploadFences_[slot%2];
     }
+    ID3D12Fence* presentationReadyFenceObject(unsigned slot,bool generated)const;
     void presentationSubmitted(unsigned slot,ID3D12Fence* fence,uint64_t value){
         presentationFences_[slot%2]=fence;presentationValues_[slot%2]=value;
     }

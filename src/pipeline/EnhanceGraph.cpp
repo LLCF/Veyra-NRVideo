@@ -1911,6 +1911,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
     if (!ring_.submitAndSignal(slot)) return false;
     if(!runFg)gpuTimer_.submitted(ring_.lastSignaledValue());
     out.videoFenceValue = ring_.lastSignaledValue();
+    out.videoFenceObject = context_.fence();
 
     // FG reads enhanced SDR color, not the pre-NR guidance input.
     if (runFg && fgBackend_ && fgBackend_->created()) {
@@ -1957,12 +1958,13 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
         if(sub==fgCalls)gpuTimer_.submitted(ring_.lastSignaledValue());
         out.hasGenerated=!resetFg;
         out.genSlot=parity; out.genFenceValue=ring_.lastSignaledValue();
+        out.genFenceObject=context_.fence();
         out.generatedPtsMs=(prevPtsMs_+ptsMs)*0.5;
         if(out.hasGenerated){
             ++metrics_.fgSubmittedCandidates;
             BatchFrame f;f.identity=out.batch.identity;f.kind=FrameKind::Generated;f.validity=GenerationValidity::Pending;f.subframe=sub;
             f.pts100ns=FrameBatch::interpolate(out.batch.a100ns,out.batch.b100ns,sub,fgMultiplier);
-            f.lease=std::make_shared<FrameLease>();f.lease->texture=genFrame_[generatedSlot];f.lease->slot=generatedSlot;f.lease->readyFence=out.genFenceValue;generatedLeases_[generatedSlot]=f.lease;out.batch.append(std::move(f));
+            f.lease=std::make_shared<FrameLease>();f.lease->texture=genFrame_[generatedSlot];f.lease->slot=generatedSlot;f.lease->readyFence=out.genFenceValue;f.lease->readyFenceObject=out.genFenceObject;generatedLeases_[generatedSlot]=f.lease;out.batch.append(std::move(f));
         }
       }
     }
@@ -1975,16 +1977,22 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
     ++realFrameIndex_;
     out.realFrameIndex = realFrameIndex_;
     out.videoSlot = parity;
-    BatchFrame real;real.identity=out.batch.identity;real.pts100ns=out.batch.b100ns;real.lease=std::make_shared<FrameLease>();real.lease->texture=videoFrame_[parity];real.lease->sourceReference=sourceReferences_[parity];real.lease->baseReference=baseReferences_[parity];real.lease->slot=parity;real.lease->readyFence=out.videoFenceValue;real.lease->referencesValid=retainReferences;realLeases_[parity]=real.lease;out.batch.append(std::move(real));
+    BatchFrame real;real.identity=out.batch.identity;real.pts100ns=out.batch.b100ns;real.lease=std::make_shared<FrameLease>();real.lease->texture=videoFrame_[parity];real.lease->sourceReference=sourceReferences_[parity];real.lease->baseReference=baseReferences_[parity];real.lease->slot=parity;real.lease->readyFence=out.videoFenceValue;real.lease->readyFenceObject=out.videoFenceObject;real.lease->referencesValid=retainReferences;realLeases_[parity]=real.lease;out.batch.append(std::move(real));
     if(veyra::log::verboseFrameLogs())veyra::log::info("frame-batch",std::format("batch={} epoch={} revision={} source={} a={} b={} count={} realSlot={} realFence={} genSlot={} genFence={}",out.batch.batchId,epoch_,out.batch.identity.settingsRevision,out.batch.identity.sourceFrameId,out.batch.a100ns,out.batch.b100ns,out.batch.count,parity,out.videoFenceValue,out.genSlot,out.genFenceValue));
     return true;
+}
+
+ID3D12Fence* EnhanceGraph::presentationReadyFenceObject(unsigned slot,bool generated)const
+{
+    if(generated&&slot<kGeneratedPoolSlots){if(auto lease=generatedLeases_[slot].lock())return lease->readyFenceObject.Get();}
+    return context_.fence();
 }
 
 bool EnhanceGraph::resolveFrame(FrameOutputs& out,uint32_t index)
 {
     if(index>=out.batch.count)return false;
     auto& frame=out.batch.frames[index];
-    if(!frame.lease||context_.fence()->GetCompletedValue()<frame.lease->readyFence)return false;
+    if(!frame.lease||!frame.lease->ready())return false;
     if(frame.kind!=FrameKind::Generated||frame.validity!=GenerationValidity::Pending)return true;
     void* data=nullptr;D3D12_RANGE range{0,4};
     HRESULT hr=fgDisableReadback_[frame.lease->slot]->Map(0,&range,&data);
@@ -2008,7 +2016,7 @@ bool EnhanceGraph::resolveGeneration(FrameOutputs& out)
     }
     // Warmup evaluates may have no exposed generated leases, but their status
     // and resources must finish before full-batch completion is reported.
-    if(context_.fence()->GetCompletedValue()<out.genFenceValue)complete=false;
+    if(!out.gpuComplete())complete=false;
     if(complete)out.hasGenerated=anyValid;
     return complete;
 }

@@ -118,7 +118,9 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
     }
     const auto beginEnd=std::chrono::steady_clock::now();
     if(presentationQueue_){
-        const HRESULT hr=presentationQueue_->Wait(ctx.fence(),graph.presentationReadyFence(slot,generated));
+        auto* producerFence=graph.presentationReadyFenceObject(slot,generated);
+        if(!producerFence){veyra::log::error("present","missing producer fence");return false;}
+        const HRESULT hr=presentationQueue_->Wait(producerFence,graph.presentationReadyFence(slot,generated));
         if(FAILED(hr)){veyra::log::error("present",std::format("producer handoff wait hr=0x{:X}",unsigned(hr)));return false;}
     }
     Status st=Status::Ok;uint32_t commandSlot=0;auto* list=ring.acquireNext(commandSlot,st);if(!list)return false;

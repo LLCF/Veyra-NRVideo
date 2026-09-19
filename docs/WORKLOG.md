@@ -1,5 +1,36 @@
 # Veyra 工作记录
 
+Queue identity final regression: fence-fixed2 (30s) retained119.99565/s,
+P95/max8.7444/9.009ms, no >10ms gaps or discarded generated frames;
+fence-xess4 (30s) final samples app60/SDK240, limited/skipped/expired0;
+fence-smoke main startup5s exit0. All under the same task tests directory,
+run-short-test watchdogs <=95s. This verifies the prerequisite only, not an
+async queue optimization or completed fixed6 cadence repair.
+
+## 2026-09-20 Queue-specific completion prerequisite
+
+Preparing an NR/FG overlap feasibility experiment; no independent FG queue
+is enabled yet. FrameLease now owns its producing fence identity alongside
+the value. FrameOutputs keeps both video and generation producers, including
+seed-only generation. Readiness, completion accounting, queued-work filtering
+and presenter GPU waits use the appropriate producer instead of assuming
+the context fence. A missing producer for nonzero work remains incomplete;
+device-removed UINT64_MAX is not reported as completed work.
+
+Built sustained/admission/presentation-worker/pacing/main targets via
+scripts/build-isolated.ps1 in existing build/slider-reset-20260919.
+Initial fence-identity-build.log failed on an incomplete context type in an
+inline method; moved that method to EnhanceGraph.cpp. Second build passed:
+E:/项目/Veyra/logs/fg-cadence-repair-20260920/fence-identity-build2.log.
+fence-content6 passes independent fence timelines/missing producer checks,
+2/4/6 dynamic groups, reset/seed/skip/content checks; D3D12 errors0.
+fence-fixed6:30s, retained5.401s,285.120 submissions/s, P95/max15.025/16.500ms,
+81 gaps over10ms all with16.667ms media steps. No retained generated discards.
+This is baseline variation, not an optimization claim. fence-lifecycle passes
+pause/seek/resume/mode/resize/stop. All test outputs under
+E:/项目/Veyra/tests/fg-cadence-repair-20260920, temporary environment under
+E:/项目/Veyra/tmp/fg-cadence-repair-20260920. No package or release.
+
 ## 2026-09-20 Fixed6 gap attribution
 
 Saved verified seed implementation as57213e1,

@@ -6,6 +6,14 @@
 #include <d3d12.h>
 #include <wrl/client.h>
 namespace veyra::pipeline {
+// Fence values are ordered only within the same fence object. Never compare
+// a graph fence value with one produced by an independent GPU queue.
+inline bool fenceComplete(ID3D12Fence* fence,uint64_t value) {
+    if(!value)return true;
+    if(!fence)return false;
+    const auto completed=fence->GetCompletedValue();
+    return completed!=UINT64_MAX&&completed>=value;
+}
 enum class FrameKind { Real, Generated, Hold };
 enum class GenerationValidity { NotApplicable, Pending, Valid, Disabled, Failed };
 struct FrameIdentity {
@@ -16,9 +24,11 @@ struct FrameIdentity {
 // consumer fence before overwriting a pool slot. COM lifetime alone is insufficient.
 struct FrameLease {
     Microsoft::WRL::ComPtr<ID3D12Resource> texture,sourceReference,baseReference;
+    Microsoft::WRL::ComPtr<ID3D12Fence> readyFenceObject;
     uint64_t readyFence=0,consumerFence=0;
     uint32_t slot=0;
     bool referencesValid=false;
+    bool ready()const{return fenceComplete(readyFenceObject.Get(),readyFence);}
 };
 struct BatchFrame {
     FrameIdentity identity;
