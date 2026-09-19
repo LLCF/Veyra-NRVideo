@@ -1,5 +1,17 @@
 # Veyra 工作记录
 
+## 2026-09-20 1.4.3 本地测试包
+
+用户要求构建 1.4.3 自测，沿用当前隔离分支与修复提交 8c9957b，不推送或发布。CMake 数字及显示版本改为 1.4.3，新增本版更新说明、组件说明和 RemotePlay 构建说明。运行库全部沿用既有身份，打包脚本逐项校验哈希、签名、尺寸与版本。
+
+执行 `scripts/build-isolated.ps1`，BuildDirectory=`E:/项目/Veyra/build/slider-reset-20260919`，DependencyCache=`E:/项目/Veyra/build/frame-pacing-20260918/CMakeCache.txt`，TempDirectory=`E:/项目/Veyra/tmp/1.4.3-test-20260920`，DisplayVersion=1.4.3，Targets=veyra；构建成功。第一次 package-portable 因构建目录缺少 FFmpeg DLL 失败，随后从 CMake 指定的 `C:/veyra-deps/ffmpeg-ps5-dav1d-installed/bin` 补齐六个 DLL，保留原 PS5 slice 补丁身份。仅删除本轮失败 staging 的单个 EXE 与空目录后重新执行：Root=.，Version=1.4.3，Label=-test，BuildDirectory 同上，OutputDirectory=`E:/项目/Veyra/test-packages/1.4.3`。
+
+交付 `E:/项目/Veyra/test-packages/1.4.3/Veyra-1.4.3-test-win64-portable.zip`，472341538 bytes，SHA256 `22E15E219538A20561C6CA5ADC82F8D333D29A3D41C5E55F4B31EFE713297D47`。包内 121 文件经 ZIP 流逐文件大小和 SHA256 对照 manifest 通过；EXE FileVersion/ProductVersion 均 1.4.3，SHA256 `C65AB9426B3F929A3A34F21D54163268F8462995B2232C90FCB64967345FB9CC`。package-audit.json 含 12 运行组件身份与 forbiddenFiles=0；许可证随包。
+
+`scripts/acceptance/portable-smoke.ps1` 对上述解压目录运行 CaseSeconds=7，输入 `E:/项目/Veyra/tests/1.4.2beta/visible-scene.mp4`，七项独立运行检查通过；`scripts/acceptance/ui-fg-backends.py EXE MEDIA OUTPUT --portable` 连续后端切换通过。证据分别在 `E:/项目/Veyra/tests/1.4.3-test-20260920/smoke/result.json` 和 `ui-backends/result.json`，运行临时目录均重定向 E 盘。测试后的 staging 日志移入该证据目录的 package-run-logs，干净 staging 文件数复核 121；压缩包始终不含测试日志。构建/打包日志在 `E:/项目/Veyra/logs/1.4.3-test-*-20260920.log`。
+
+本机 RTX5070 软件验证，不代表 RTX30/40/GC551/GC573 实卡、屏幕扫描或用户所述 PotPlayer 清晰度差异已验收。旧 E:/App 测试包未覆盖。
+
 ## 2026-09-20 切换最终回归、YUY2 50fps 与清晰度排查
 
 本条更新下方 09-19 的中间验收。进一步发现异步准备两帧导致 XeLL 标记失败；改为每次呈现完整周期、每周期仅一次 sleep，提交结束标记覆盖到呈现之前，未暂停拖动补帧。错误 ID 重映射试验失败记录保留，最终实现已重测。
