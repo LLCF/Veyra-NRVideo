@@ -1,5 +1,7 @@
 # Veyra 项目 Agent 执行规则
 
+> 2026-09-19 用户授权修复全屏提示后构建并发布 1.4.2 至 Likely7/Veyra-NRVideo，整合本轮隔离修复到 main，更新双语 README 与 Release，重点说明 RTX Video HDR 和帧同步。授权公开本次新交流群二维码与 RTX Video HDR 对比图；赞助图保留，双二维码各 width=220。允许正式包携带已核验 TrueHDR 原件：RTX Video SDK 1.1.0，nvngx_truehdr.dll，3955752 bytes，1.1.0.0，Valid/NVIDIA，SHA256 9A80575F247190C05FE80EAC0C4BAA1D0D4D932348F26808310B5EC4BF9EEB4B，独立 manifest 与 NVIDIA_RTX_VIDEO_SDK_LICENSE.pdf。其余运行组件身份沿用；NVIDIA FSR4 实验保持撤回。执行记录见 docs/RELEASE_1.4.2_EXECUTION.md。本条取代此前仅本地测试包的发布范围限制。
+
 > 2026-09-18 用户授权目标模式实施可关闭帧同步、多模式与实际延迟验收。开工存档 `6e69eeb` / `checkpoint/pre-frame-pacing-20260918`，隔离分支 `codex/frame-pacing-20260918`。按 `docs/FRAME_PACING_EXECUTION_PLAN_2026-09-18.md` 施工，默认关闭、直接 NGX、保留 6X，不推送或发布。报告必须区分进程内排队、系统显示事件与未测量的屏幕端到端延迟。
 
 > 本轮交付状态见 `docs/FRAME_PACING_ACCEPTANCE_2026-09-18.md`：本机软件短测完成，原生 Reflex 仅无补帧路径；FG 下显示回退低排队，XeSS 不叠加外部节奏。不得将软件驻留减少冒充屏幕延迟降低，不得把本机 RTX5070 验收扩展为 30/40、实卡采集、PS5 或 VRR 通过。完整 Reflex+FG 与显示延迟验收仍未完成；现有 beta 包不含本轮改动。

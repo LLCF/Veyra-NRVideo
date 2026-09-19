@@ -1,4 +1,5 @@
 #include "veyra/source/CaptureCardSource.h"
+#include "veyra/source/CaptureFrameRate.h"
 #include "veyra/source/WasapiAudioInput.h"
 #include "veyra/source/CaptureTiming.h"
 #include "veyra/source/CaptureMediaType.h"
@@ -190,9 +191,14 @@ bool parseInt(std::wstring_view text,int& value){
     if(text.empty())return false;const std::wstring copy(text);size_t consumed=0;try{value=std::stoi(copy,&consumed);}catch(...){return false;}return consumed==copy.size();
 }
 bool parseUnsigned(std::wstring_view text,unsigned& value){int parsed=0;if(!parseInt(text,parsed)||parsed<0)return false;value=static_cast<unsigned>(parsed);return true;}
-struct CaptureSelection {unsigned videoIndex=0;int format=0;int audio=kCaptureAudioDisabled;unsigned colorOverride=0;bool stable=false;std::wstring videoPath,audioPath;};
+struct CaptureSelection {unsigned videoIndex=0;int format=0;int audio=kCaptureAudioDisabled;unsigned colorOverride=0;double requestedFps=0;bool stable=false;std::wstring videoPath,audioPath;};
 bool parseCapturePath(std::wstring_view path,CaptureSelection& selection){
     selection={};
+    if(const auto query=path.find(L'?');query!=std::wstring_view::npos){
+        const auto value=path.substr(query+1);
+        if(!value.starts_with(L"fps=")||!parseCaptureFrameRate(value.substr(4),selection.requestedFps))return false;
+        path=path.substr(0,query);
+    }
     constexpr std::wstring_view prefix=L"capture2:";
     if(path.starts_with(prefix)){
         std::array<std::wstring_view,5> fields{};size_t cursor=prefix.size();
@@ -416,13 +422,15 @@ std::vector<CaptureDevice> CaptureCardSource::deviceDetails(bool audio){
     return result;
 }
 std::vector<std::wstring> CaptureCardSource::devices(bool audio){std::vector<std::wstring> result;for(auto& device:deviceDetails(audio))result.push_back(std::move(device.name));return result;}
-std::wstring CaptureCardSource::makeCapturePath(unsigned videoIndex,const CaptureDevice& video,int format,int audioMode,const CaptureDevice* audio,unsigned colorOverride){
+std::wstring CaptureCardSource::makeCapturePath(unsigned videoIndex,const CaptureDevice& video,int format,int audioMode,const CaptureDevice* audio,unsigned colorOverride,double requestedFps){
+    if(!validCaptureFrameRate(requestedFps))return {};
+    const auto suffix=requestedFps>0?std::format(L"?fps={:.6f}",requestedFps):L"";
     if(audio&&audio->wasapi){
         if(video.path.empty()||audio->path.empty())return {};
-        return std::format(L"capture2:{}:{}:{}:{}:{}",encodePath(video.path),format,kCaptureAudioWasapi,encodePath(audio->path),colorOverride);
+        return std::format(L"capture2:{}:{}:{}:{}:{}{}",encodePath(video.path),format,kCaptureAudioWasapi,encodePath(audio->path),colorOverride,suffix);
     }
-    if(video.path.empty()||(audioMode>=0&&(!audio||audio->path.empty())))return std::format(L"capture:{}:{}:{}:{}",videoIndex,format,audioMode,colorOverride);
-    return std::format(L"capture2:{}:{}:{}:{}:{}",encodePath(video.path),format,audioMode,audioMode>=0?encodePath(audio->path):L"",colorOverride);
+    if(video.path.empty()||(audioMode>=0&&(!audio||audio->path.empty())))return std::format(L"capture:{}:{}:{}:{}{}",videoIndex,format,audioMode,colorOverride,suffix);
+    return std::format(L"capture2:{}:{}:{}:{}:{}{}",encodePath(video.path),format,audioMode,audioMode>=0?encodePath(audio->path):L"",colorOverride,suffix);
 }
 std::vector<CaptureFormat> enumerateFormats(IAMStreamConfig* config){
     std::vector<CaptureFormat> out;if(!config)return out;int count=0,size=0;
@@ -495,12 +503,20 @@ void CaptureCardSource::videoReset(bool resetAudio){if(p_->wasapi)p_->wasapi->vi
 void CaptureCardSource::setAudioSync(unsigned mode,int offset){if(p_->wasapi)p_->wasapi->setSync(mode,offset);else if(p_->audioSession)p_->audioSession->setSync(mode,offset);}
 sink::CaptureAudioState CaptureCardSource::audioState()const{auto state=p_->wasapi?p_->wasapi->snapshot():p_->audioSession?p_->audioSession->snapshot():sink::CaptureAudioState{};if(!p_->audioError.empty())state.error=p_->audioError;return state;}
 bool CaptureCardSource::open(const SourceOpenDesc& desc){return configure(desc)&&start();}
-bool CaptureCardSource::configure(const SourceOpenDesc& desc){close();p_->lastAudioGain=-1;auto& p=*p_;CaptureSelection selection;if(!parseCapturePath(desc.path,selection))return false;const unsigned index=selection.videoIndex;const int format=selection.format;const int audio=selection.audio;
+bool CaptureCardSource::configure(const SourceOpenDesc& desc){close();error_.clear();p_->lastAudioGain=-1;auto& p=*p_;CaptureSelection selection;if(!parseCapturePath(desc.path,selection))return false;const unsigned index=selection.videoIndex;const int format=selection.format;const int audio=selection.audio;
     if(selection.stable?!configuration(selection.videoPath,p.graph,p.builder,p.device,p.config):!configuration(index,p.graph,p.builder,p.device,p.config))return false;
     int count=0,size=0;if(FAILED(p.config->GetNumberOfCapabilities(&count,&size))||format<0||format>=count||size<=0||size>65536)return false;
     std::vector<BYTE> caps(size);AM_MEDIA_TYPE* native=nullptr;if(FAILED(p.config->GetStreamCaps(format,&native,caps.data())))return false;
+    if(selection.requestedFps>0){
+        REFERENCE_TIME* interval=nullptr;
+        if(native->formattype==FORMAT_VideoInfo&&native->cbFormat>=sizeof(VIDEOINFOHEADER))interval=&reinterpret_cast<VIDEOINFOHEADER*>(native->pbFormat)->AvgTimePerFrame;
+        else if(native->formattype==FORMAT_VideoInfo2&&native->cbFormat>=sizeof(VIDEOINFOHEADER2))interval=&reinterpret_cast<VIDEOINFOHEADER2*>(native->pbFormat)->AvgTimePerFrame;
+        if(!interval){error_=L"该采集格式不支持设备帧率协商，请将采集帧率设为 0。";freeType(native);return false;}
+        *interval=captureFrameInterval(selection.requestedFps);
+        log::info("capture-rate",std::format("requestFps={:.6f} interval100ns={} deviceNegotiation=1 softwareLimiter=0",selection.requestedFps,*interval));
+    }
     HRESULT hr=p.config->SetFormat(native);const GUID requestedSubtype=native->subtype;
-    log::info("capture",std::format("SetFormat device={} nativeIndex={} subtype=0x{:08X} hr=0x{:08X}",index,format,native->subtype.Data1,uint32_t(hr)));freeType(native);if(FAILED(hr))return false;
+    log::info("capture",std::format("SetFormat device={} nativeIndex={} subtype=0x{:08X} hr=0x{:08X}",index,format,native->subtype.Data1,uint32_t(hr)));freeType(native);if(FAILED(hr)){if(selection.requestedFps>0)error_=std::format(L"采集卡拒绝 {:.3f} FPS（0x{:08X}）；请改用设备支持的帧率，或填 0 恢复默认。",selection.requestedFps,uint32_t(hr));return false;}
     // Read the driver-negotiated type back. Native YUY2/NV12/RGB32 connects
     // directly to our terminal filter: no intelligent-connect converter.
     native=nullptr;hr=p.config->GetFormat(&native);if(FAILED(hr)||!native){freeType(native);return false;}
@@ -628,6 +644,7 @@ bool CaptureCardSource::configure(const SourceOpenDesc& desc){close();p_->lastAu
     if(!layoutValid){log::error("capture",std::format("unsupported negotiated layout/connect failure hr=0x{:08X}",uint32_t(hr)));return false;}
     if(p.cpuUnpack&&captureLegacyCpuLayout(p.layout))log::warn("capture-unpack",std::format("legacy CPU unpack path active packing={} format={} (per-pixel conversion stays on the callback thread)",int(p.layout.packing),int(p.layout.format)));
     const unsigned colorOverride=selection.colorOverride;
+    log::info("capture-color",std::format("driver controlFlags=0x{:08X} colorInfoPresent={} transfer={} matrix={} primaries={} chroma={} override={}",p.layout.colorControlFlags,bool(p.layout.colorControlFlags&AMCONTROL_COLORINFO_PRESENT),int(p.layout.color.transfer),int(p.layout.color.matrix),int(p.layout.color.primaries),int(p.layout.color.chromaLocation),colorOverride));
     if(colorOverride>2)return false;
     if(colorOverride&&!compressedPath){
         if(p.layout.format!=AV_PIX_FMT_P010&&p.layout.format!=AV_PIX_FMT_P016){log::error("capture-color","Explicit HDR requires P010/P016; select a 10/16-bit capture format");return false;}
@@ -637,6 +654,14 @@ bool CaptureCardSource::configure(const SourceOpenDesc& desc){close();p_->lastAu
         log::info("capture-color",std::format("manual override={} BT2020; range retains negotiated metadata",colorOverride==1?"PQ":"HLG"));
     }
     p.info={};p.info.kind=pipeline::SourceKind::CaptureCard;p.info.width=p.layout.width;p.info.height=p.layout.height;p.info.averageFps=p.layout.duration>0?1e7/p.layout.duration:0;p.info.duration=pipeline::Rational::unknown();p.info.color=p.layout.color;
+    if(selection.requestedFps>0){
+        const bool accepted=captureFrameRateMatches(selection.requestedFps,p.layout.duration);
+        log::info("capture-rate",std::format("requestedFps={:.6f} connectedFps={:.6f} accepted={} softwareLimiter=0",selection.requestedFps,p.info.averageFps,accepted));
+        if(!accepted){error_=std::format(L"请求 {:.3f} FPS，但采集卡返回 {:.3f} FPS；请改用支持的帧率，或填 0。",selection.requestedFps,p.info.averageFps);return false;}
+    }
+    if(!compressedPath&&!colorOverride&&(p.layout.format==AV_PIX_FMT_P010||p.layout.format==AV_PIX_FMT_P016)&&p.info.color.transferAssumed)
+        log::warn("capture-color","No explicit HDR transfer from driver; bit depth does not identify HDR. Keeping SDR fallback; manual PQ/HLG remains available.");
+    if(p.info.color.isHdrPath())log::info("capture-color",std::format("HDR input transfer={} matrix={} assumed={} primaries={} assumed={}",int(p.info.color.transfer),int(p.info.color.matrix),p.info.color.matrixAssumed,int(p.info.color.primaries),p.info.color.primariesAssumed));
     p.nominalDuration100ns=p.layout.duration;
     log::info("capture-color",std::format("format={} stride={} rowBytes={} bytes={} bottomUp={} matrix={} assumed={} range={} assumed={} workingTransfer={} assumed={} (explicit transfer contract)",int(p.layout.format),p.layout.stride,p.layout.rowBytes,p.layout.sampleBytes,p.layout.bottomUp,int(p.info.color.matrix),p.info.color.matrixAssumed,int(p.info.color.range),p.info.color.rangeAssumed,int(p.info.color.transfer),p.info.color.transferAssumed));
     if(audio==kCaptureAudioWasapi){
@@ -1047,6 +1072,7 @@ bool CaptureCardSource::reconnect(float gain,unsigned syncMode,int offsetMs){
     int format=-1;for(const auto& candidate:formatsByPath(selection.videoPath))if(candidate.key==key){format=candidate.index;break;}
     if(format<0)return false;
     auto reopen=desc;reopen.path=std::format(L"capture2:{}:{}:{}:{}:{}",encodePath(selection.videoPath),format,selection.audio,encodePath(selection.audioPath),selection.colorOverride);
+    if(selection.requestedFps>0)reopen.path+=std::format(L"?fps={:.6f}",selection.requestedFps);
     bool ok=configure(reopen);
     if(ok){const auto& current=p_->info;
         ok=current.width==expected.width&&current.height==expected.height&&current.color.pixelFormat==expected.color.pixelFormat&&

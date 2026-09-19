@@ -3,7 +3,7 @@
 #pragma once
 #include "GlassMaterial.h"
 namespace veyra::ui {
-enum class Icon { None,Play,Pause,Stop,Volume,Muted,Fullscreen,Video,Capture,Image,Subtitle,Minimize,Maximize,Close,Back,Settings,Recent,Enhance,Upscale,PanelOpen,PanelClose,Check,Chevron,Load,Type };
+enum class Icon { None,Play,Pause,Stop,Volume,Muted,Fullscreen,Video,Capture,Image,Subtitle,Minimize,Maximize,Close,Back,Settings,Recent,Enhance,Upscale,PanelOpen,PanelClose,Check,Chevron,Load,Type,ScreenCapture };
 inline void drawIcon(HDC dc,Icon icon,float x,float y,float size,COLORREF c){
 using namespace Gdiplus; AlphaGraphics drawing(dc);auto& g=drawing.get();
 g.SetSmoothingMode(SmoothingModeAntiAlias);g.TranslateTransform(x-size/2,y-size/2);g.ScaleTransform(size/24,size/24);
@@ -383,6 +383,24 @@ p.AddBezier(19.0000000f,4.0000000f,19.5522847f,4.0000000f,20.0000000f,4.4477153f
 p.AddLine(20.0000000f,5.0000000f,20.0000000f,7.0000000f);
 p.StartFigure();
 p.AddLine(9.0000000f,20.0000000f,15.0000000f,20.0000000f);
+break;
+case Icon::ScreenCapture: // app-window.svg
+p.StartFigure();
+p.AddLine(4.0000000f,4.0000000f,20.0000000f,4.0000000f);
+p.AddBezier(20.0000000f,4.0000000f,21.1045695f,4.0000000f,22.0000000f,4.8954305f,22.0000000f,6.0000000f);
+p.AddLine(22.0000000f,6.0000000f,22.0000000f,18.0000000f);
+p.AddBezier(22.0000000f,18.0000000f,22.0000000f,19.1045695f,21.1045695f,20.0000000f,20.0000000f,20.0000000f);
+p.AddLine(20.0000000f,20.0000000f,4.0000000f,20.0000000f);
+p.AddBezier(4.0000000f,20.0000000f,2.8954305f,20.0000000f,2.0000000f,19.1045695f,2.0000000f,18.0000000f);
+p.AddLine(2.0000000f,18.0000000f,2.0000000f,6.0000000f);
+p.AddBezier(2.0000000f,6.0000000f,2.0000000f,4.8954305f,2.8954305f,4.0000000f,4.0000000f,4.0000000f);
+p.CloseFigure();
+p.StartFigure();
+p.AddLine(10.0000000f,4.0000000f,10.0000000f,8.0000000f);
+p.StartFigure();
+p.AddLine(2.0000000f,8.0000000f,22.0000000f,8.0000000f);
+p.StartFigure();
+p.AddLine(6.0000000f,4.0000000f,6.0000000f,8.0000000f);
 break;
 default: return;}g.DrawPath(&pen,&p);
 }

@@ -126,7 +126,8 @@ bool readCanonicalFlow(gfx::D3D12DeviceContext& ctx, gfx::CommandSlotRing& ring,
 int wmain(int argc,wchar_t** argv){
     if(argc!=3)return 2;
     const bool dis=std::wstring(argv[1]).find(L"dis")==0;
-    const bool xess=wcscmp(argv[1],L"xess")==0||wcscmp(argv[1],L"dis-xess")==0;
+    const bool pan=wcscmp(argv[1],L"xess-pan2")==0||wcscmp(argv[1],L"xess-pan4")==0;
+    const bool xess=pan||wcscmp(argv[1],L"xess")==0||wcscmp(argv[1],L"dis-xess")==0;
     const bool amd=wcscmp(argv[1],L"amd")==0;
     const bool sr=std::wstring(argv[1]).find(L"sr")==0;
     if(!xess&&!amd&&!sr&&!dis&&wcscmp(argv[1],L"nvof1080")!=0)return 2;
@@ -149,6 +150,7 @@ int wmain(int argc,wchar_t** argv){
     desc.rgbInput=true;desc.enableNr=false;desc.enableFg=xess;desc.noNgx=true;
     desc.enableNvofStandalone=true;
     desc.frameGenerationBackend=engine::FrameGenerationBackend::XeSS;
+    if(wcscmp(argv[1],L"xess-pan4")==0)desc.fgMultiplier=4;
     desc.opticalFlowBackend=dis?engine::OpticalFlowBackend::GpuDis:amd?engine::OpticalFlowBackend::AmdFidelityFx:engine::OpticalFlowBackend::Nvidia;
     if(sr){
         desc.sourceWidth=width;desc.sourceHeight=height;
@@ -165,6 +167,9 @@ int wmain(int argc,wchar_t** argv){
     ok=ok&&av_frame_get_buffer(frame,32)>=0;
     pipeline::EnhanceGraph::FrameOutputs out;
     FlowSample rightward{}, leftward{};
+    engine::PreviewView view;
+    uint64_t panGenerated=0;
+    if(pan)view.zoom=1.5f;
     for(unsigned i=0;ok&&i<frames;++i){
         MSG msg;while(PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)){TranslateMessage(&msg);DispatchMessageW(&msg);}
         const int phase = i < 24 ? int(i) : int(i - 24);
@@ -178,10 +183,14 @@ int wmain(int argc,wchar_t** argv){
             p[0]=uint8_t(hash);p[1]=uint8_t(hash>>8);p[2]=uint8_t(hash>>16);p[3]=255;
         }
         out={};ok=graph.process(frame,i*1000.0/30,i==0||i==24,out,i+1);
-        if(ok)ok=presenter.present(ctx,ring,graph,out.videoSlot,false,false,0,false,.5f,out.batch.identity);
+        const bool moving=pan&&i>=4&&i<44;
+        if(moving)view.pan(i<24?3.0f:-3.0f,1.0f,960,540,float(width),float(height));
+        const auto beforePresent=presenter.xessGeneratedCount();
+        if(ok)ok=presenter.present(ctx,ring,graph,out.videoSlot,false,false,0,false,.5f,out.batch.identity,view);
+        if(moving)panGenerated+=presenter.xessGeneratedCount()-beforePresent;
         if(ok&&i==16){
             const auto before=presenter.xessGeneratedCount();
-            ok=presenter.present(ctx,ring,graph,out.videoSlot,false,false,0,false,.5f,out.batch.identity);
+            ok=presenter.present(ctx,ring,graph,out.videoSlot,false,false,0,false,.5f,out.batch.identity,view);
             if(xess)ok=ok&&presenter.xessGeneratedCount()==before;
         }
         if(i==24)SetWindowPos(window,nullptr,0,0,800,600,SWP_NOACTIVATE|SWP_NOZORDER);
@@ -203,6 +212,10 @@ int wmain(int argc,wchar_t** argv){
         std::cout<<"SR extent="<<image.width<<"x"<<image.height<<" evaluate="<<graph.metrics().srEvaluateCount<<" nonblack="<<nonblack<<" pass="<<ok<<std::endl;
     }
     if(xess)ok=ok&&generated>10;
+    if(pan){
+        ok=ok&&panGenerated>10;
+        std::cout<<"PAN multiplier="<<desc.fgMultiplier<<" generatedWhileMoving="<<panGenerated<<" pass="<<ok<<std::endl;
+    }
     if(amd||dis){
         // The source moves right then left. Canonical current->previous motion
         // must therefore point left then right with no material vertical drift.

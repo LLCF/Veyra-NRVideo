@@ -489,6 +489,7 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
     src/source/NativeCaptureSink.cpp
     src/source/MediaFileSource.cpp
     src/source/CaptureCardSource.cpp
+    src/source/ScreenCaptureSource.cpp
     src/source/AverMediaAudioSwitch.cpp
     src/source/CaptureCompressedDecoder.cpp
     src/source/WasapiAudioInput.cpp
@@ -502,6 +503,7 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
   target_include_directories(veyra_sources PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_link_libraries(veyra_sources PUBLIC veyra_pipeline veyra_media veyra_base)
   target_link_libraries(veyra_sources PRIVATE ${FFMPEG_LIBRARIES} strmiids ole32 oleaut32 d3d12 dxgi)
+  target_link_libraries(veyra_sources PRIVATE d3d11 windowsapp dwmapi)
 
   if(VEYRA_ENABLE_REMOTEPLAY)
     set(VEYRA_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -523,6 +525,10 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
   target_link_libraries(veyra_source_tests PRIVATE veyra_sources)
 
   add_executable(veyra_capture_tests tests/integration/CaptureSourceTests.cpp)
+  add_executable(veyra_screen_capture_tests tests/integration/ScreenCaptureTests.cpp)
+  target_compile_features(veyra_screen_capture_tests PRIVATE cxx_std_20)
+  target_compile_definitions(veyra_screen_capture_tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_link_libraries(veyra_screen_capture_tests PRIVATE veyra_engine dwmapi)
   add_executable(veyra_wasapi_input_tests tests/integration/WasapiInputTests.cpp)
   target_compile_features(veyra_wasapi_input_tests PRIVATE cxx_std_20)
   target_compile_definitions(veyra_wasapi_input_tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -828,6 +834,7 @@ if(VEYRA_FFMPEG_ROOT AND EXISTS "${VEYRA_FFMPEG_ROOT}/include/libavformat/avform
   target_compile_definitions(veyra_hdr_color_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   target_link_libraries(veyra_hdr_color_tests PRIVATE veyra_engine)
   add_executable(veyra WIN32 apps/veyra/main.cpp apps/veyra/ui/AppShell.cpp apps/veyra/ui/CapturePanel.cpp apps/veyra/ui/SubtitleOverlay.cpp apps/veyra/SettingsWindow.cpp apps/veyra/TelemetryWindow.cpp)
+  target_sources(veyra PRIVATE apps/veyra/ui/ScreenCapturePanel.cpp)
   if(VEYRA_ENABLE_REMOTEPLAY)
     add_executable(veyra_ps5_hw_image_tests tests/integration/Ps5HardwareImageTests.cpp)
     add_executable(veyra_ps5_quality_tests tests/integration/Ps5SourceQualityTests.cpp)

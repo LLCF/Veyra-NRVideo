@@ -30,7 +30,7 @@ public:
     static std::vector<CaptureDevice> deviceDetails(bool audio=false);
     static std::vector<std::wstring> devices(bool audio=false);
     static std::wstring makeCapturePath(unsigned videoIndex,const CaptureDevice& video,
-        int format,int audioMode,const CaptureDevice* audio,unsigned colorOverride=0);
+        int format,int audioMode,const CaptureDevice* audio,unsigned colorOverride=0,double requestedFps=0);
     static std::vector<CaptureFormat> formats(unsigned device);
     static std::vector<CaptureFormat> formatsByPath(std::wstring_view devicePath);
     bool open(const SourceOpenDesc&)override;
@@ -61,11 +61,13 @@ public:
     void setAudioSync(unsigned mode,int offsetMs);
     sink::CaptureAudioState audioState()const;
     const SourceInfo& info()const override;
+    const std::wstring& errorMessage()const{return error_;}
     SourceReadStatus read(pipeline::FramePacket&,const AVFrame**)override;
     SourceReadStatus tryRead(pipeline::FramePacket&,const AVFrame**);
     bool seek(const pipeline::Rational&)override{return false;}
     void close()noexcept override;
 private:
+    std::wstring error_;
     bool connectDirectShowAudio(const SourceOpenDesc&);
     // AVerMedia capture cards need their installed vendor component to arm
     // non-PCM (Dolby/DTS) passthrough before the audio pin is negotiated.

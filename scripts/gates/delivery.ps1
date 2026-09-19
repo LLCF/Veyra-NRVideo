@@ -1,5 +1,7 @@
 [CmdletBinding()]
-param([Parameter(Mandatory=$true)][string]$Root,[switch]$VisiblePlayer,[string]$BuildDirectory,[string]$PlayerExe,[switch]$PortablePlayer)
+param([Parameter(Mandatory=$true)][string]$Root,[switch]$VisiblePlayer,[string]$BuildDirectory,[string]$PlayerExe,[switch]$PortablePlayer,
+    [Parameter(Mandatory=$true)][string]$OutputDirectory,
+    [Parameter(Mandatory=$true)][string]$FixtureRoot)
 # User-authorized local software acceptance, <=300s for this entire suite.
 # Native-4K realtime60 is NOT asserted: user selected an explicit 1080 working realtime profile.
 # Real capture acceptance and proprietary distribution are separate, never synthetic PASS.
@@ -11,8 +13,11 @@ $Root=(Resolve-Path -LiteralPath $Root).Path
 Set-Location -LiteralPath $Root
 $timer=[Diagnostics.Stopwatch]::StartNew()
 $run=[Guid]::NewGuid().ToString('N')
-$dir=Join-Path $Root ('logs/delivery/'+$run)
+$dir=Join-Path ([IO.Path]::GetFullPath($OutputDirectory)) $run
 [IO.Directory]::CreateDirectory($dir)|Out-Null
+# The legacy quality probe accepts narrow paths; relative output avoids losing
+# Unicode directory names while keeping all artifacts in OutputDirectory.
+$qualityDir=(Resolve-Path -LiteralPath $dir -Relative)
 $bin=Join-Path $Root 'out/build/x64-release'
 if($BuildDirectory){$bin=(Resolve-Path -LiteralPath $BuildDirectory).Path}
 if(-not $PlayerExe){$PlayerExe=Join-Path $bin 'veyra.exe'}
@@ -43,12 +48,12 @@ function Run([string]$Name,[string]$Exe,[string[]]$Argv,[int]$Limit=30,[int]$Exp
 }
 try{
     $ffprobe=(Get-Command ffprobe -ErrorAction Stop).Source
-    $clip1080=(Resolve-Path 'loop/local/fixed_clips/test_av_1080p.mp4').Path
-    $clip4k=(Resolve-Path 'loop/local/fixed_clips/test_av_4k.mp4').Path
-    Run quality1080 "$bin/veyra_quality_probe.exe" @('--input',$clip1080,'--native','--guidance','motion','--frames','60','--diag','--json-file',"$dir/quality1080.json",'--dump',"$dir/enhanced.png") 45
+    $clip1080=(Resolve-Path -LiteralPath (Join-Path $FixtureRoot 'test_av_1080p.mp4')).Path
+    $clip4k=(Resolve-Path -LiteralPath (Join-Path $FixtureRoot 'test_av_4k.mp4')).Path
+    Run quality1080 "$bin/veyra_quality_probe.exe" @('--input',$clip1080,'--native','--guidance','motion','--frames','60','--diag','--json-file',"$qualityDir/quality1080.json",'--dump',"$qualityDir/enhanced.png") 45
     $q=Get-Content "$dir/quality1080.json" -Raw|ConvertFrom-Json
     Check core-correct ($q.failures -eq 0 -and $q.processedFrames -eq 60 -and $q.nrEvaluateCount -eq 60 -and $q.nrMotionFrames -gt 0 -and $q.nvofExecuteCount -gt 0 -and $q.nonZeroMotionCount -gt 0 -and $q.diagnosticsEnabled -and $q.d3dDiagErrors -eq 0 -and $q.normalPathReadbackCount -eq 0) 'actual NR/NVOF/motion/GBV/diagnostic PNG'
-    Run quality4k "$bin/veyra_quality_probe.exe" @('--input',$clip4k,'--native','--guidance','motion','--frames','12','--json-file',"$dir/quality4k.json",'--dump',"$dir/enhanced4k.png")
+    Run quality4k "$bin/veyra_quality_probe.exe" @('--input',$clip4k,'--native','--guidance','motion','--frames','12','--json-file',"$qualityDir/quality4k.json",'--dump',"$qualityDir/enhanced4k.png")
     $q4=Get-Content "$dir/quality4k.json" -Raw|ConvertFrom-Json
     Check native4k ($q4.failures -eq 0 -and $q4.sourceExtent.width -eq 3840 -and $q4.workingExtent.width -eq 3840 -and $q4.nrEvaluateCount -eq 12) 'native4K correctness only; not a realtime60 claim'
     Run player $PlayerExe @($clip4k,'--nr','--realtime','--fg','--smoke-seconds','6') 20

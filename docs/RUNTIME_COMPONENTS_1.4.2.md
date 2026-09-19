@@ -1,10 +1,10 @@
-# Veyra 1.4.2beta Runtime Components
+# Veyra 1.4.2 Runtime Components
 
 发布包组件清单 / Shipped components. NVIDIA and Intel DLLs are separate Release assets and never source Git content. NR and DLSS FG are community-experimental integrations, not vendor endorsement or certification.
 
-1.4.2beta 沿用 1.4.1 的全部增强运行组件身份，新增以下官方 TrueHDR 原件，不修改磁盘 DLL。
+1.4.2 正式包沿用 1.4.2beta 已审计的全部组件身份，包括以下官方 TrueHDR 原件，不修改磁盘 DLL。本轮设备帧率与 UI 修复没有新增运行组件。
 
-TrueHDR 来源：RTX Video SDK 1.1.0，文件 nvngx_truehdr.dll，3955752 bytes，版本 1.1.0.0，签名 Valid（NVIDIA），SHA256 `9A80575F247190C05FE80EAC0C4BAA1D0D4D932348F26808310B5EC4BF9EEB4B`。放在 runtime/experimental/，许可证为 licenses/NVIDIA_RTX_VIDEO_SDK_LICENSE.pdf，单独登记 manifest。本次仅用户授权的内测群包，不是 GitHub 正式发布。
+TrueHDR 来源：RTX Video SDK 1.1.0，文件 nvngx_truehdr.dll，3955752 bytes，版本 1.1.0.0，签名 Valid（NVIDIA），SHA256 `9A80575F247190C05FE80EAC0C4BAA1D0D4D932348F26808310B5EC4BF9EEB4B`。放在 runtime/experimental/，许可证为 licenses/NVIDIA_RTX_VIDEO_SDK_LICENSE.pdf，单独登记 manifest。用户于 2026-09-19 授权随 1.4.2 GitHub Release 分发该原件。
 
 NVIDIA FSR4 INT8 研究 provider 已撤回，不在包内；官方 AMD upscaler 保留原文件与原有 FSR3 能力。
 RTX30/40 补帧兼容修复在进程内完成，RTX50 保持原生路径；FSR 补帧界面入口继续隐藏。
@@ -26,6 +26,7 @@ only and do not lock user replacement; ABI, API, driver, and hardware compatibil
 | `runtime/experimental/nvngx_dlss.dll` | 310.7.0.0 | `BE6E434A94CA32499515EB62CA0E6C274526055D568D0426E4C652DCDFB6EE6E` | Valid; DLSS SR |
 | `runtime/experimental/nvngx_dlssg.dll` | 310.7.0.0 | `135EAF0733C1E37381A8C28ABCF7A862404A54132B81787C04E35D09EFC5E36F` | Valid; experimental DLSS FG |
 | `runtime/experimental/nvngx_dlssnr.dll` | 310.8.0.0 | `E16BCF15E16E13F527491CDF7845B2FE6521A738D8F7C9C721866A8496E1FC8E` | Valid; pinned experimental NR |
+| `runtime/experimental/nvngx_truehdr.dll` | 1.1.0.0 | `9A80575F247190C05FE80EAC0C4BAA1D0D4D932348F26808310B5EC4BF9EEB4B` | Valid (NVIDIA); RTX Video HDR |
 | `runtime/experimental/nvngx_vsr.dll` | 1.6.0.0 | `C3D88EEA5FF7A548EDEFA66414CF6E77464D0947277C904F324DD23ABF58A1ED` | Valid; RTX Video SR |
 | `runtime_local/intel/experimental/libxess_fg.dll` | 1.3.1.78 | `EC5E0C65E075570C6EDE72618BB666D0BE0C2E10B2EA9762C0FE8CB8E375AB27` | Valid; XeSS preview FG |
 | `runtime_local/intel/experimental/libxell.dll` | 1.3.2.10 | `D2030DCD694FDA8F2EC7E044B13E6DB8F0B56D4BA9113A5EFAD334E3F3DED8C7` | Valid; XeLL timing |

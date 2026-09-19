@@ -4,7 +4,7 @@
 
 English | [简体中文](README.md)
 
-[Current status and development](docs/CURRENT_STATUS.md) · [Build instructions](docs/BUILD.md). The released version is 1.4.1. The local 1.4.2beta package includes RTX Video HDR; the NVIDIA FSR 4.1 experiment was reverted. Optional frame pacing is implemented on an isolated branch, disabled by default, under Professional mode > Motion. See the [local acceptance and latency report](docs/FRAME_PACING_ACCEPTANCE_2026-09-18.md); this change is not in the existing beta package. Native Reflex is experimental without frame generation; with FG it explicitly falls back to low queue mode while preserving the multiplier.
+[Current status](docs/CURRENT_STATUS.md) · [Build instructions](docs/BUILD.md). **1.4.2** adds RTX Video HDR, optional frame pacing, window/display capture, bitmap subtitles and named grading presets. See the [release notes](docs/RELEASE_NOTES_1.4.2.md).
 
 <p align="center">
   <a href="https://github.com/Likely7/Veyra-NRVideo/blob/main/REAMDE%20MP4.mp4">
@@ -16,7 +16,18 @@ English | [简体中文](README.md)
 
 A Windows video player and capture-card enhancement tool. Play videos, process images, and preview capture devices with optional super resolution, NR enhancement, and frame generation.
 
-[Download 1.4.1 Portable](https://github.com/Likely7/Veyra-NRVideo/releases/tag/v1.4.1) · [Release Notes](docs/RELEASE_NOTES_1.4.1.md) · [Report an Issue](https://github.com/Likely7/Veyra-NRVideo/issues)
+[Download 1.4.2 Portable](https://github.com/Likely7/Veyra-NRVideo/releases/tag/v1.4.2) · [Release Notes](docs/RELEASE_NOTES_1.4.2.md) · [Report an Issue](https://github.com/Likely7/Veyra-NRVideo/issues)
+
+## 1.4.2 Update
+
+**RTX Video HDR** converts SDR content to HDR under Professional mode > Enhancement, with contrast, saturation, middle gray and peak brightness controls. It combines with NR, SR and frame generation and supports HEVC Main10 HDR export. HDR preview requires an HDR display with Windows HDR enabled; SDR displays retain SDR, and HDR export needs no HDR display. This is the video technology, not game RTX HDR.
+
+**Optional frame pacing** under Professional mode > Motion defaults to Off. Choose Low Queue, Uniform Presentation (front-end pacing), or experimental NVIDIA Reflex. With FG, Reflex explicitly falls back to Low Queue; XeSS retains provider scheduling. These options manage queuing and cadence, not GPU throughput. See the [measured latency report](docs/FRAME_PACING_ACCEPTANCE_2026-09-18.md).
+
+Also adds window/display video capture (no audio), editable device FPS negotiated directly with the capture driver, MKV bitmap subtitles and named grading presets. Fixes fullscreen tooltip residue, the obscured PS5 button, scrolling/hover repaint issues, partial HDR metadata/color handling and XeSS presentation resources. The NVIDIA FSR 4.1 experiment was reverted.
+
+<p align="center"><img src="docs/images/1.4.2/rtx-video-hdr-comparison.jpg" alt="User RTX Video HDR off/on comparison" width="720"></p>
+<p align="center"><small>User camera comparison: top off, bottom on. This illustrates one setup; it is not raw HDR pixel fidelity or display luminance measurement.</small></p>
 
 ## 1.4.1 Update
 
@@ -68,7 +79,7 @@ Features introduced in 1.2.0 include HDR file/capture enhancement, HDR10 export 
 
 ## Download and Run
 
-1. Download **Veyra-1.4.1-win64-portable.zip** from [Releases](https://github.com/Likely7/Veyra-NRVideo/releases). The Source code archives are for developers.
+1. Download **Veyra-1.4.2-win64-portable.zip** from [Releases](https://github.com/Likely7/Veyra-NRVideo/releases). The Source code archives are for developers.
 2. Extract the entire archive into a writable directory and run **Veyra.exe**. No SDK, Python, or development tools are needed.
    NR, upscaling and internal frame generation start disabled. Enable them as needed; importing old preferences restores their switches.
 3. Use a current GPU driver. NVIDIA NR, DLSS, RTX Video SR, and NVENC require compatible NVIDIA RTX hardware; this version was primarily tested on an RTX 5070.
@@ -153,7 +164,7 @@ NR and DLSS frame generation are **community-experimental integrations**, not NV
 
 ## Development and License
 
-[Build Instructions](docs/BUILD.md) · [Runtime Components](docs/RUNTIME_COMPONENTS_1.4.1.md) · [Third-Party Notices](THIRD_PARTY_NOTICES.md)
+[Build Instructions](docs/BUILD.md) · [Runtime Components](docs/RUNTIME_COMPONENTS_1.4.2.md) · [Third-Party Notices](THIRD_PARTY_NOTICES.md)
 
 Original Veyra source is [GPLv3](LICENSE); the combined streaming program also falls under [AGPLv3 and the upstream OpenSSL exception](licenses/remoteplay/CHIAKI_AGPL3_OPENSSL.txt). Application source matches the release tag. The RemotePlay-source and FFmpeg-source assets provide dependency source and are not needed to run the player. SDKs, models, and runtimes are excluded from this source repository. Release components retain their separate licenses and experimental distribution boundaries.
 
@@ -171,9 +182,9 @@ multiple instances to the same target file.
 
 In Professional mode, click **Screenshot** in the top toolbar to save the latest processed full-resolution picture under **Pictures / Veyra Screenshots**: PNG for SDR and floating-point JPEG XR (`.jxr`) for HDR output. Use an HDR-capable viewer. Application UI and window zoom are excluded.
 
-## HDR and 5.1 (current 1.4.1)
+## HDR and 5.1 (current 1.4.2)
 
-Native HDR support was introduced in 1.2.0 and is retained in 1.4.1. SDR conversion using RTX Video HDR is a separate development task. Since 1.4.0, supported Dolby/DTS capture streams can be decoded to PCM; this is not compressed bitstream passthrough. Individual HDR displays, 5.1 endpoints, and capture cards still require hardware acceptance.
+Native HDR support is retained. Version 1.4.2 adds SDR conversion using RTX Video HDR. Since 1.4.0, supported Dolby/DTS capture streams can be decoded to PCM; this is not compressed bitstream passthrough. Individual HDR displays, 5.1 endpoints, and capture cards still require hardware acceptance.
 
 - Files, P010/P016 capture and PS5 can use explicitly described BT.2020 NCL PQ/HLG input. Windows HDR enables retained HDR output with NR, DLSS SR / RTX Video SR and DLSS / XeSS FG. NR / Video SR use an SDR proxy plus the retained HDR base, with reduced changes near black and compressed highlights. This is not native HDR NR inference. HLG uses a 1000-nit, gamma-1.2 reference conversion.
 - Capture defaults to device color metadata. Manual PQ / HLG is available for devices that omit it, requiring P010/P016. Ten-bit storage alone does not identify HDR. RGB/YUY2 HDR and BT.2020 constant-luminance input are unsupported.
@@ -197,6 +208,6 @@ If this project helped you, you can buy the author a coffee (WeChat QR below). F
 <p align="center">
   <img src="docs/images/1.4.0/donate-wechat.jpg" alt="WeChat donation" width="220">
   &nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="docs/images/1.4.0/community-group.jpg" alt="Veyra community group / bug reports / beta builds" width="220">
+  <img src="docs/images/1.4.2/community-group.png" alt="Veyra community group / bug reports / beta builds" width="220">
 </p>
 <p align="center"><small>Left: WeChat donation (voluntary; no feature is ever gated behind it) - Right: Veyra community group for bug reports and beta builds.</small></p>

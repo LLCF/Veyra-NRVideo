@@ -348,6 +348,18 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+## Win32CaptureSample (screen capture)
+
+Source: https://github.com/robmikh/Win32CaptureSample
+Fixed commit: `49fefe79fd9b11025f0b5eb91783a98888516070`.
+License: MIT, Copyright (c) 2019 Robert Mikhayelyan.
+Full license: `licenses/WIN32_CAPTURE_SAMPLE_MIT.txt`.
+`src/source/ScreenCaptureSource.cpp` adapts `SimpleCapture.cpp/.h` free-threaded
+WGC session/frame-pool creation and resize lifecycle. Veyra replaces the
+upstream swapchain with bounded leased D3D11/D3D12 shared textures and fences,
+latest-frame polling, crop, explicit scRGB color, timestamps and shared graph
+ingress. DXGI duplication is a Veyra addition. Screen capture is video-only.
+
 ## dav1d (1.3.0 AV1 playback)
 
 FFmpeg dynamically links dav1d 1.5.4 from the pinned local vcpkg build. The portable package includes its complete aggregated copyright/license text in `licenses/DAV1D-COPYRIGHT.txt` and provenance in `licenses/DAV1D-SPDX.json`. The FFmpeg corresponding-source ZIP includes dav1d source and its vcpkg port. Upstream: https://code.videolan.org/videolan/dav1d . License set recorded by the build: Apache-2.0, BSD-2-Clause, ISC and MIT; retain all notices supplied with the source.

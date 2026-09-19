@@ -166,7 +166,7 @@ float3 ColorGradeApply(float3 lin, ColorGradeParams p)
     const float3x3 matrix = float3x3(p.row0.xyz, p.row1.xyz, p.row2.xyz);
     const float exposure = p.controls.x, saturation = p.controls.y, vibrance = p.controls.z, lutStrength = p.controls.w;
     const int lutInputSpace = int(p.flags.y + 0.5);
-    float3 rgb = max(mul(matrix, lin), 0.0) * exp2(exposure);
+    float3 rgb = mul(matrix, lin) * exp2(exposure);
 
     // Tone response: per-channel table lookup in the log domain.
     const float3 encoded = ColorGradeEncodeLog(rgb);
@@ -182,7 +182,9 @@ float3 ColorGradeApply(float3 lin, ColorGradeParams p)
     // linear-light HSV pulls skin towards red, which made the red band grab
     // faces. Encode with a monotone gamma (no clipping, so HDR highlights are
     // safe), mix there, decode back to the linear working image.
-    const float3 mixEncoded = pow(max(rgb, 0.0), 1.0 / 2.2);
+    // scRGB contains legitimate negative components for wide-gamut HDR.
+    // A signed gamma round trip retains them even with neutral grading.
+    const float3 mixEncoded = sign(rgb) * pow(abs(rgb), 1.0 / 2.2);
     const float3 hsv = RgbToHsv(mixEncoded);
     const float4 hueResponse = ColorGradeHue(hsv.x / 360.0);
     if (p.flags.z > 0.5)
@@ -196,7 +198,9 @@ float3 ColorGradeApply(float3 lin, ColorGradeParams p)
     }
     else
     {
-        rgb = pow(max(HsvToRgb(float3(hsv.x + hueResponse.r, saturate(hsv.y * hueResponse.g), max(hsv.z * hueResponse.b, 0.0))), 0.0), 2.2);
+        const float saturationLimit = max(1.0, hsv.y);
+        const float3 mixed = HsvToRgb(float3(hsv.x + hueResponse.r, clamp(hsv.y * hueResponse.g, 0.0, saturationLimit), max(hsv.z * hueResponse.b, 0.0)));
+        rgb = sign(mixed) * pow(abs(mixed), 2.2);
     }
 
     // Luminance-zone grading + calibration shadow tint.
@@ -227,5 +231,5 @@ float3 ColorGradeApply(float3 lin, ColorGradeParams p)
         else decoded = ColorGradeDecodeLog(lutOutput);
         rgb = lerp(rgb, decoded, saturate(lutStrength));
     }
-    return max(rgb, 0.0);
+    return rgb;
 }

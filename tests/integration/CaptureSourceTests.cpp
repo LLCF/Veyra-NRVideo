@@ -1,6 +1,7 @@
 // Optional real-device integration test. Saves no media; validates the product
 // source's deferred Run, bounded mailbox, and reader-buffer lifetime.
 #include "veyra/source/CaptureCardSource.h"
+#include "veyra/source/CaptureFrameRate.h"
 #include <windows.h>
 #include <chrono>
 #include <thread>
@@ -13,6 +14,42 @@ extern "C" {
 #include <libavutil/imgutils.h>
 }
 int wmain(int argc,wchar_t** argv){
+    if(argc==4&&wcscmp(argv[1],L"--rate-test")==0){
+        double expected=0;if(!veyra::source::parseCaptureFrameRate(argv[3],expected))return 2;
+        CoInitializeEx(nullptr,COINIT_MULTITHREADED);
+        veyra::source::CaptureCardSource source;veyra::source::SourceOpenDesc desc;desc.path=argv[2];
+        if(desc.path.starts_with(L"capture:")){
+            unsigned device=0;int format=0,audio=0;
+            if(swscanf_s(argv[2],L"capture:%u:%d:%d",&device,&format,&audio)!=3||audio!=-1)return 2;
+            const auto devices=veyra::source::CaptureCardSource::deviceDetails();if(device>=devices.size())return 2;
+            desc.path=veyra::source::CaptureCardSource::makeCapturePath(device,devices[device],format,audio,nullptr,0,expected);
+        }
+        if(!source.configure(desc)){wprintf(L"RATE_REJECTED %ls\n",source.errorMessage().c_str());return 3;}
+        if(!source.start())return 4;
+        int failures=0;
+        for(int pass=0;pass<2;++pass){
+            // Check physical callbacks, independent of the consumer's mailbox drops.
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            const auto before=source.metrics();const auto begin=std::chrono::steady_clock::now();
+            const auto until=begin+std::chrono::seconds(6);
+            const AVFrame* frame=nullptr;veyra::pipeline::FramePacket packet;
+            double lastPts=-1;unsigned read=0;bool monotonic=true;
+            while(std::chrono::steady_clock::now()<until){
+                if(source.read(packet,&frame)==veyra::source::SourceReadStatus::Frame){
+                    const double pts=packet.pts.toDouble();monotonic&=pts>lastPts;lastPts=pts;++read;
+                }
+            }
+            const auto after=source.metrics();
+            const double seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-begin).count();
+            const double actual=(after.received-before.received)/seconds;
+            const double target=expected>0?expected:source.info().averageFps;
+            const bool ok=read>0&&monotonic&&std::abs(actual-target)<std::max(1.0,target*.05);
+            printf("%s RATE pass=%d requested=%.6f connected=%.6f callback=%.6f reads=%u monotonic=%d\n",ok?"PASS":"FAIL",pass,expected,source.info().averageFps,actual,read,monotonic);
+            if(!ok)++failures;
+            if(pass==0&&!source.reconnect(0,0,0)){printf("FAIL reconnect\n");++failures;break;}
+        }
+        source.close();CoUninitialize();return failures?1:0;
+    }
     if(argc==2&&wcscmp(argv[1],L"--list")==0){
         CoInitializeEx(nullptr,COINIT_MULTITHREADED);auto videos=veyra::source::CaptureCardSource::deviceDetails();auto audios=veyra::source::CaptureCardSource::deviceDetails(true);
         for(unsigned d=0;d<videos.size();++d){wprintf(L"VIDEO %u %ls embeddedAudio=%d path=%ls\n",d,videos[d].name.c_str(),videos[d].hasEmbeddedAudio?1:0,videos[d].path.c_str());const auto formats=videos[d].path.empty()?veyra::source::CaptureCardSource::formats(d):veyra::source::CaptureCardSource::formatsByPath(videos[d].path);for(const auto& f:formats)wprintf(L"FORMAT %u:%d %ls\n",d,f.index,f.label.c_str());}

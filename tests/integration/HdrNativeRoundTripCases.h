@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include "veyra/source/CaptureMediaType.h"
 
 namespace hdrRoundTrip {
 inline double pq(double nits){const double p=std::pow(std::max(nits,0.0)/10000,2610.0/16384);return std::pow((3424.0/4096+2413.0/128*p)/(1+2392.0/128*p),2523.0/32);}
@@ -53,6 +54,37 @@ inline int run(veyra::gfx::D3D12DeviceContext& ctx,veyra::gfx::CommandSlotRing& 
         gd.hdrInput=gd.hdrOutput=true;gd.noFeatures=gd.noNgx=true;gd.enableNr=gd.enableSr=false;gd.enableFg=packed;
         pipeline::EnhanceGraph::FrameOutputs out;std::vector<float> output;
         bool ok=graph.initialize(gd)&&graph.createViews()&&graph.process(f,0,true,out,1)&&read(ctx,ring,graph.videoFrameResource(out.videoSlot),output);
+        if(ok&&!planar){
+            VIDEOINFOHEADER2 vi{};vi.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);vi.bmiHeader.biWidth=f->width;vi.bmiHeader.biHeight=f->height;
+            DXVA2_ExtendedFormat flags{};flags.NominalRange=full?DXVA2_NominalRange_0_255:DXVA2_NominalRange_16_235;flags.VideoTransferFunction=hlg?16:15;
+            vi.dwControlFlags=flags.value|AMCONTROL_COLORINFO_PRESENT;
+            AM_MEDIA_TYPE mt{};mt.majortype=MEDIATYPE_Video;mt.subtype={source::captureFourcc('P','0','1','0'),0,0x10,{0x80,0,0,0xaa,0,0x38,0x9b,0x71}};
+            mt.formattype=FORMAT_VideoInfo2;mt.pbFormat=reinterpret_cast<BYTE*>(&vi);mt.cbFormat=sizeof(vi);
+            source::CaptureMediaLayout layout;AVFrame* capture=av_frame_clone(f);
+            bool pass=capture&&source::captureMediaLayout(mt,layout);
+            if(capture){capture->color_range=AVCOL_RANGE_UNSPECIFIED;capture->colorspace=AVCOL_SPC_UNSPECIFIED;capture->color_trc=AVCOL_TRC_UNSPECIFIED;capture->color_primaries=AVCOL_PRI_UNSPECIFIED;}
+            pipeline::EnhanceGraph captureGraph(ctx,ring);pipeline::EnhanceGraph::FrameOutputs captureOut;std::vector<float> captured;
+            auto captureDesc=gd;captureDesc.hdrInput=layout.color.isHdrPath();captureDesc.captureBitDepth=10;
+            pass=pass&&captureGraph.initialize(captureDesc)&&captureGraph.createViews()&&captureGraph.process(capture,0,true,captureOut,1,&layout.color)&&read(ctx,ring,captureGraph.videoFrameResource(captureOut.videoSlot),captured)&&captured==output;
+            std::cout<<"HDR_CAPTURE_PARTIAL_TAGS hlg="<<hlg<<" full="<<full<<" pqOutput="<<packed<<" exact="<<pass<<std::endl;
+            failures+=!pass;captureOut={};ring.drainQueue();captureGraph.shutdown();av_frame_free(&capture);
+        }
+        if(ok&&!planar&&!packed){
+            // HDR primaries extend beyond BT.709. Enabling neutral grading
+            // must preserve them; exposure must multiply signed light equally.
+            std::vector<float> baseline;
+            bool gradeOk=captureReadFp16(ctx,ring,graph.diagnosticLinearInput(),baseline);
+            for(float exposure:{0.0f,1.0f}){
+                auto gradedDesc=gd;gradedDesc.color.enabled=true;gradedDesc.color.exposure=exposure;
+                pipeline::EnhanceGraph gradedGraph(ctx,ring);pipeline::EnhanceGraph::FrameOutputs gradedOut;std::vector<float> graded;
+                bool pass=gradeOk&&gradedGraph.initialize(gradedDesc)&&gradedGraph.createViews()&&gradedGraph.process(f,0,true,gradedOut,1)&&captureReadFp16(ctx,ring,gradedGraph.diagnosticLinearInput(),graded);
+                double error=0;
+                if(pass)for(size_t p=0;p<baseline.size();++p)if(p%4!=3)error=std::max(error,double(std::abs(graded[p]-baseline[p]*std::exp2(exposure))/std::max(1.0f,std::abs(baseline[p]*std::exp2(exposure)))));
+                pass=pass&&error<.003;
+                std::cout<<"HDR_GRADE_SIGNED hlg="<<hlg<<" full="<<full<<" exposure="<<exposure<<" relativeError="<<error<<" pass="<<pass<<std::endl;
+                failures+=!pass;gradedOut={};ring.drainQueue();gradedGraph.shutdown();
+            }
+        }
         double relative=0,nearBlack=0,neutralSpread=0,neutralRelative=0;
         if(ok)for(unsigned i=0;i<patches.size();++i){const auto* p=output.data()+(i*4+2)*3;std::array<double,3> actual;
             if(packed)actual={nits(p[0]),nits(p[1]),nits(p[2])};

@@ -43,6 +43,7 @@ enum class SourceKind : uint8_t {
     RemotePlay,   // PS5 Remote Play stream (Chiaki transport)
     Image,        // WIC single image
     TestPattern,  // synthetic harness input
+    ScreenCapture,
 };
 
 inline const char* sourceKindName(SourceKind k) {
@@ -52,6 +53,7 @@ inline const char* sourceKindName(SourceKind k) {
     case SourceKind::RemotePlay: return "RemotePlay";
     case SourceKind::Image: return "Image";
     case SourceKind::TestPattern: return "TestPattern";
+    case SourceKind::ScreenCapture: return "ScreenCapture";
     default: return "Unknown";
     }
 }
@@ -127,9 +129,10 @@ struct ColorDescription {
     // Static HDR metadata in cd/m2; zero means absent/unspecified. These are
     // declarations, not measured frame peaks or dynamic Dolby Vision metadata.
     float hdrMaxCllNits = 0, hdrMaxFallNits = 0, hdrMasteringPeakNits = 0;
+    bool scRgb = false; // Explicit WGC FP16 linear BT.709, 1.0 = 80 nits.
 
     bool isHdrPath() const {
-        return transfer == TransferFunction::PQ || transfer == TransferFunction::HLG;
+        return scRgb || transfer == TransferFunction::PQ || transfer == TransferFunction::HLG;
     }
 };
 

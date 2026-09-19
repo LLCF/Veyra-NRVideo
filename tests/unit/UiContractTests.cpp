@@ -61,6 +61,20 @@ int wmain(int argc,wchar_t** argv){try{
         ui::CapturePreferenceStore store(argv[1]);ui::CapturePreferences p{L"\\\\?\\usb#video-\u91c7\u96c6",L"1920:1080:166833:{SUBTYPE}:RGB32",L"{audio-endpoint}",-3,2};
         require(store.load().videoPath.empty(),"fresh capture preference empty");require(store.save(p),"capture preference atomic save");
         const auto restored=store.load();require(restored.videoPath==p.videoPath&&restored.formatKey==p.formatKey&&restored.audioPath==p.audioPath&&restored.audioMode==p.audioMode&&restored.colorOverride==p.colorOverride,"capture stable identifiers and Unicode round trip");
+        for(double fps:{0.0,29.97,30.0,40.0,50.0,60.0}){p.requestedFps=fps;require(store.save(p)&&store.load().requestedFps==fps,"device capture rate survives restart");}
+        p.requestedFps=-1;require(!store.save(p),"invalid capture rate not persisted");
+        for(int version:{1,2}){
+            std::wstring legacy=L"VEYRA_CAPTURE "+std::to_wstring(version)+L"\n\"video\" \"format\" -1 \"\" 0"+(version==2?L" 1":L"")+L"\n";
+            {std::ofstream file(std::filesystem::path(argv[1])/"capture-preferences.v1",std::ios::binary|std::ios::trunc);file.write(reinterpret_cast<const char*>(legacy.data()),std::streamsize(legacy.size()*sizeof(wchar_t)));}
+            const auto old=store.load();require(old.videoPath==L"video"&&old.requestedFps==0&&old.formatHintDismissed==(version==2),"old capture preferences migrate without changing device rate");
+        }
+    }
+    {
+        double fps=0;
+        for(auto value:{L"nan",L"inf",L"-1",L"0.5",L"1001",L"30x",L"30.0.1",L"",L"30?fps=60"})require(!source::parseCaptureFrameRate(value,fps),"invalid device rate rejected");
+        require(source::parseCaptureFrameRate(L"29.97",fps)&&fps==29.97,"fractional rate accepted");
+        require(source::captureFrameInterval(30)==333333&&source::captureFrameInterval(40)==250000,"device receives 100ns intervals");
+        require(source::captureFrameRateMatches(30,333667)&&!source::captureFrameRateMatches(30,166667)&&!source::captureFrameRateMatches(40,333333),"driver rounded or ignored rate distinguished");
     }
     require(ResolutionPlan::make({1448,1086},true,NrSizePolicy::Native,true).output==Extent{2880,2160},"4:3 SR preserves aspect");
     {

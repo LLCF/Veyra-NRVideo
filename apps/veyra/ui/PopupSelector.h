@@ -18,8 +18,9 @@ inline LRESULT CALLBACK listProc(HWND h,UINT m,WPARAM w,LPARAM l,UINT_PTR,DWORD_
     auto& s=*reinterpret_cast<State*>(context);
     if(m==WM_KEYDOWN){if(w==VK_ESCAPE||w==VK_F4||w==VK_TAB){if(w==VK_TAB)s.tab=(GetKeyState(VK_SHIFT)&0x8000)?-1:1;s.done=true;return 0;}if(w==VK_RETURN||w==VK_SPACE){accept(s);return 0;}}
     if(m==WM_SYSKEYDOWN&&w==VK_UP){s.done=true;return 0;}
-    if(m==WM_MOUSEMOVE){auto item=SendMessageW(h,LB_ITEMFROMPOINT,0,l);if(!HIWORD(item))SendMessageW(h,LB_SETCURSEL,LOWORD(item),0);}
-    if(m==WM_LBUTTONUP){auto item=SendMessageW(h,LB_ITEMFROMPOINT,0,l);auto result=DefSubclassProc(h,m,w,l);if(!HIWORD(item)){SendMessageW(h,LB_SETCURSEL,LOWORD(item),0);accept(s);}return result;}
+    if(m==WM_MOUSEMOVE){auto item=SendMessageW(h,LB_ITEMFROMPOINT,0,l);if(!HIWORD(item)&&SendMessageW(h,LB_GETCURSEL,0,0)!=LOWORD(item))SendMessageW(h,LB_SETCURSEL,LOWORD(item),0);return 0;}
+    if(m==WM_LBUTTONDOWN||m==WM_LBUTTONDBLCLK){auto item=SendMessageW(h,LB_ITEMFROMPOINT,0,l);if(!HIWORD(item))SendMessageW(h,LB_SETCURSEL,LOWORD(item),0);return 0;}
+    if(m==WM_LBUTTONUP){auto item=SendMessageW(h,LB_ITEMFROMPOINT,0,l);if(!HIWORD(item)){SendMessageW(h,LB_SETCURSEL,LOWORD(item),0);accept(s);}return 0;}
     if(m==WM_ERASEBKGND)return 1;
     if(m==WM_PAINT||m==WM_PRINTCLIENT){PaintBuffer paint(h,reinterpret_cast<HDC>(w));fillSurface(paint.dc,paint.rect,h);int first=int(SendMessageW(h,LB_GETTOPINDEX,0,0));int selected=int(SendMessageW(h,LB_GETCURSEL,0,0));
         for(int i=std::max(0,first);size_t(i)<s.options->size();++i){RECT r{};if(SendMessageW(h,LB_GETITEMRECT,i,LPARAM(&r))==LB_ERR||r.top>=paint.rect.bottom)break;DRAWITEMSTRUCT draw{ODT_LISTBOX,1,UINT(i),ODA_DRAWENTIRE,UINT(i==selected?ODS_SELECTED:0),h,paint.dc,r,0};SendMessageW(s.window,WM_DRAWITEM,1,LPARAM(&draw));}return 0;}

@@ -63,9 +63,9 @@ if ([version]$Version -ge [version]'1.3.1') {
 if ([version]$Version -ge [version]'1.1.1') {
   $runtimeFiles += @{ Name='nvngx_dlssnr.dll'; Folder='runtime/experimental/nr-ampere'; Source='runtime_local/nvidia/nr-ampere/nvngx_dlssnr.dll'; Hash='DCC0DC2414AEDEC4A8E084647070383BE068554042587180C20C784D4772D36F'; Signature='HashMismatch'; Size=165840496; Version='310.8.0.0'; Category='user-provided-NeuralScreen-1.8.2-modified-RTX30-experimental-runtime'; Experimental=$true }
 }
-if ($LocalVideoHdr) {
-  if (-not $Label) { throw 'Local HDR package requires an explicit test label.' }
-  $runtimeFiles += @{ Name='nvngx_truehdr.dll'; Folder='runtime/experimental'; Source='third_party_local/nvidia/RTX_Video_SDK_1.1.0/bin/Windows/x64/rel/nvngx_truehdr.dll'; Hash='9A80575F247190C05FE80EAC0C4BAA1D0D4D932348F26808310B5EC4BF9EEB4B'; Size=3955752; Version='1.1.0.0'; Category='official-rtx-video-sdk-1.1.0-local-evaluation'; Experimental=$true }
+if ($LocalVideoHdr -or [version]$Version -ge [version]'1.4.2') {
+  if ($LocalVideoHdr -and -not $Label) { throw 'Local HDR package requires an explicit test label.' }
+  $runtimeFiles += @{ Name='nvngx_truehdr.dll'; Folder='runtime/experimental'; Source='third_party_local/nvidia/RTX_Video_SDK_1.1.0/bin/Windows/x64/rel/nvngx_truehdr.dll'; Hash='9A80575F247190C05FE80EAC0C4BAA1D0D4D932348F26808310B5EC4BF9EEB4B'; Size=3955752; Version='1.1.0.0'; Category='official-rtx-video-sdk-1.1.0'; Experimental=$true }
 }
 function Runtime-Source($Item) {
   if ([IO.Path]::IsPathRooted($Item.Source)) { return $Item.Source }
@@ -101,6 +101,10 @@ foreach ($name in @('vcruntime140.dll','vcruntime140_1.dll','msvcp140.dll')) {
   Copy-Payload (Join-Path $crt.FullName "x64/Microsoft.VC143.CRT/$name") $name
 }
 foreach ($name in @('LICENSE','README.md','README_EN.md','THIRD_PARTY_NOTICES.md')) { Copy-Payload (Join-Path $resolvedRoot $name) $name }
+foreach ($image in Get-ChildItem -LiteralPath (Join-Path $resolvedRoot 'docs/images') -Recurse -File) {
+  $relative = $image.FullName.Substring((Join-Path $resolvedRoot 'docs/images').Length+1).Replace('\','/')
+  Copy-Payload $image.FullName "docs/images/$relative"
+}
 foreach ($name in @('BUILD.md',"RUNTIME_COMPONENTS_$Version.md","RELEASE_NOTES_$Version.md")) { Copy-Payload (Join-Path $resolvedRoot "docs/$name") "docs/$name" }
 Copy-Payload (Join-Path $resolvedRoot "docs/RELEASE_NOTES_$Version.md") 'RELEASE_NOTES.md'
 # Remote Play is statically linked. Retain all dependency notices and source instructions.
@@ -141,6 +145,7 @@ if (Test-Path -LiteralPath $ffmpegLocalBuild) {
   Copy-Payload $ffmpegLocalBuild 'licenses/FFMPEG-VEYRA-BUILD.json'
 }
 Copy-Payload (Join-Path $resolvedRoot 'assets/icons/lucide/LICENSE') 'licenses/LUCIDE-LICENSE.txt'
+Copy-Payload (Join-Path $resolvedRoot 'licenses/WIN32_CAPTURE_SAMPLE_MIT.txt') 'licenses/WIN32_CAPTURE_SAMPLE_MIT.txt'
 foreach ($name in @('RTX40MFG_LICENSE.txt','HDE_LICENSE.txt')) {
   Copy-Payload (Join-Path $resolvedRoot "src/ngx/compat/$name") "licenses/$name"
 }

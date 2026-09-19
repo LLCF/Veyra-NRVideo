@@ -4,6 +4,7 @@
   "generator": "fonttools 4.64.0; SVG paths converted to GDI+ cubic paths",
   "sha256": {
     "LICENSE": "b495047bd93a9b06913511076f504daba17d5bbeb3e0650f3bb53a4220329c57",
+    "app-window.svg": "78635d0da597104f526ea01dede8ab4d04ccabc7a2229c4baf17f921b15985de",
     "captions.svg": "37c4e3ed84224b7d07ee6f5b0f51cc2c5d17e8bf80f86c48059cdcc747607a55",
     "check.svg": "7f33acc9a77a61659531044525fc008edebe215bf4dcf1c789c8674ad3277db0",
     "chevron-down.svg": "66ea878e72ed3488bb3b464c39dfdccee8d1f78e560dccea40e5e12da0e87e87",

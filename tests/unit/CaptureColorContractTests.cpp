@@ -115,6 +115,20 @@ int main(){
         for(unsigned transfer:{15u,16u}){hdrFlags.VideoTransferFunction=transfer;hdrVi.dwControlFlags=hdrFlags.value|AMCONTROL_COLORINFO_PRESENT;
             check(source::captureMediaLayout(hdrType,layout)&&layout.color.isHdrPath()&&layout.color.primaries==pipeline::ColorPrimaries::BT2020&&layout.color.matrix==pipeline::YuvMatrix::BT2020NCL&&!layout.color.transferAssumed,"capture negotiates explicit PQ/HLG BT2020 metadata");
         }
+        hdrFlags.VideoTransferMatrix=0;hdrFlags.VideoPrimaries=0;
+        for(unsigned transfer:{15u,16u}){hdrFlags.VideoTransferFunction=transfer;hdrVi.dwControlFlags=hdrFlags.value|AMCONTROL_COLORINFO_PRESENT;
+            check(source::captureMediaLayout(hdrType,layout)&&layout.color.isHdrPath()&&layout.color.matrix==pipeline::YuvMatrix::BT2020NCL&&layout.color.primaries==pipeline::ColorPrimaries::BT2020&&layout.color.matrixAssumed&&layout.color.primariesAssumed&&!layout.color.transferAssumed,"explicit HDR transfer supplies labelled BT2100 fallback for missing gamut");
+        }
+        hdrFlags.VideoTransferMatrix=DXVA2_VideoTransferMatrix_BT709;hdrFlags.VideoPrimaries=DXVA2_VideoPrimaries_BT709;hdrVi.dwControlFlags=hdrFlags.value|AMCONTROL_COLORINFO_PRESENT;
+        check(source::captureMediaLayout(hdrType,layout)&&layout.color.matrix==pipeline::YuvMatrix::BT709&&layout.color.primaries==pipeline::ColorPrimaries::BT709&&!layout.color.primariesAssumed,"explicit conflicting gamut is never overwritten by HDR fallback");
+        hdrVi.dwControlFlags=0;
+        check(source::captureMediaLayout(hdrType,layout)&&!layout.color.isHdrPath()&&layout.color.transferAssumed,"untagged P010 is not proof of HDR");
+        for(auto [code,location]:{std::pair{DXVA2_VideoChromaSubsampling_MPEG2,pipeline::ChromaLocation::Left},std::pair{DXVA2_VideoChromaSubsampling_MPEG1,pipeline::ChromaLocation::Center},std::pair{DXVA2_VideoChromaSubsampling_Cosited,pipeline::ChromaLocation::TopLeft}}){
+            hdrFlags.VideoChromaSubsampling=code|DXVA2_VideoChromaSubsampling_ProgressiveChroma;hdrVi.dwControlFlags=hdrFlags.value|AMCONTROL_COLORINFO_PRESENT;
+            check(source::captureMediaLayout(hdrType,layout)&&layout.color.chromaLocation==location,"capture preserves explicit chroma siting");
+            auto otherVi=hdrVi;otherVi.dwControlFlags&=~(15u<<8);auto otherType=hdrType;otherType.pbFormat=reinterpret_cast<BYTE*>(&otherVi);
+            check(!source::equivalentCaptureTypes(hdrType,otherType),"chroma siting change cannot reuse stale capture contract");
+        }
         auto multi=sink::floatWave({6,0x60f});AM_MEDIA_TYPE mt=audio;mt.subtype=KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;mt.cbFormat=sizeof(multi);mt.pbFormat=reinterpret_cast<BYTE*>(&multi);
         output.Attach(new OutputPin);auto* peer=static_cast<OutputPin*>(output.Get());peer->supportsBuffering=true;
         check(source::suggestCaptureAudioBuffering(output.Get(),multi.Format)==S_OK&&peer->suggested.cbBuffer==11520,"six-channel float upstream negotiation retains 10ms target");

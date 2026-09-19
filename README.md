@@ -4,7 +4,11 @@
 
 [English](README_EN.md) | 简体中文
 
-[当前状态与开发任务](docs/CURRENT_STATUS.md) · [本机构建](docs/BUILD.md)。正式版为 1.4.1；1.4.2beta 已本地交付 RTX Video HDR 内测，NVIDIA FSR 4.1 实验已撤回。隔离分支已实现默认关闭的帧同步，入口为专业模式 → 运动 → 帧同步；[本机验收与延迟报告](docs/FRAME_PACING_ACCEPTANCE_2026-09-18.md)记录适用范围，尚未加入现有内测包。
+[当前状态与开发任务](docs/CURRENT_STATUS.md) · [本机构建](docs/BUILD.md)。正式版 **1.4.2** 新增 RTX Video HDR、可关闭的帧同步、屏幕采集、图形字幕和命名调色预设，并修复采集 HDR、XeSS 与界面细节。[完整更新说明](docs/RELEASE_NOTES_1.4.2.md)。
+
+采集卡连接设置新增 **设备帧率 FPS**：手输 30、40 或小数，0 沿用所选格式，重新连接生效。直接请求设备输出该帧率，失败明确报错；不是软件丢帧限速，也不承诺识别并删除游戏重复画面。实卡是否接受由驱动与所选分辨率/格式决定。
+
+新增 **专业模式 → 左侧屏幕采集（窗口图标）**：窗口 / 显示器选择、预览、裁剪、鼠标指针与帧率上限，默认跟随采集目标所在显示器的刷新率，也可手动选择，接入现有增强链。只采集画面，声音由原应用直接播放，可能领先经过增强的画面。本机 WGC / DXGI 采集和 NR + DLSS 4X 短测通过；多显卡和各类游戏兼容性仍需按设备验证。详见[实现与验证记录](docs/SCREEN_CAPTURE_PLAN_2026-09-19.md)。
 
 <p align="center">
   <a href="https://github.com/Likely7/Veyra-NRVideo/blob/main/REAMDE%20MP4.mp4">
@@ -15,7 +19,18 @@
 
 Windows 视频播放器与采集卡增强工具。支持视频、图片、采集卡实时预览和 PS5 局域网串流，可组合使用超分辨率、NR 画面增强与补帧。
 
-[下载 1.4.1 免安装版](https://github.com/Likely7/Veyra-NRVideo/releases/tag/v1.4.1) · [更新记录](docs/RELEASE_NOTES_1.4.1.md) · [反馈问题](https://github.com/Likely7/Veyra-NRVideo/issues)
+[下载 1.4.2 免安装版](https://github.com/Likely7/Veyra-NRVideo/releases/tag/v1.4.2) · [更新记录](docs/RELEASE_NOTES_1.4.2.md) · [反馈问题](https://github.com/Likely7/Veyra-NRVideo/issues)
+
+## 1.4.2 更新
+
+**RTX Video HDR**：在专业模式的增强设置中开启，将 SDR 视频转换为 HDR，可调整对比度、饱和度、中间灰和峰值亮度，与 NR、超分和补帧组合，支持 HEVC Main10 HDR 导出。HDR 预览需要兼容的 HDR 显示器并开启 Windows HDR；SDR 屏保持 SDR，导出不要求 HDR 屏。集成的是视频版技术，不是游戏 RTX HDR。
+
+**帧同步**：专业模式 → 运动 → 帧同步，默认关闭，可选低排队、均匀呈现（前端同步）、NVIDIA Reflex（实验）。用于控制排队与提交节奏，不凭空提高性能；开启补帧时 Reflex 明确回退低排队，XeSS 保持自身调度。[延迟实测与边界](docs/FRAME_PACING_ACCEPTANCE_2026-09-18.md)。
+
+**其他更新**：窗口/显示器画面采集、手动协商采集卡设备帧率、MKV 图形字幕、命名调色预设；修复全屏提示残留、PS5 入口遮挡、滚动残影、选框闪烁、部分 HDR 红色异常和 XeSS 呈现资源问题。撤回 NVIDIA FSR 4.1 画质实验，保留 RTX 超分。
+
+<p align="center"><img src="docs/images/1.4.2/rtx-video-hdr-comparison.jpg" alt="用户提供 RTX Video HDR 关闭与开启对比" width="720"></p>
+<p align="center"><small>用户拍摄对比：上图关闭，下图开启。照片仅展示该设备下的观感，不是原始 HDR 像素或显示器亮度测量。</small></p>
 
 ## 1.4.1 更新
 
@@ -46,7 +61,7 @@ Windows 视频播放器与采集卡增强工具。支持视频、图片、采集
 
 ## 下载与运行
 
-1. 在 [Releases](https://github.com/Likely7/Veyra-NRVideo/releases) 下载 **Veyra-1.4.1-win64-portable.zip**，不要下载 Source code。
+1. 在 [Releases](https://github.com/Likely7/Veyra-NRVideo/releases) 下载 **Veyra-1.4.2-win64-portable.zip**，不要下载 Source code。
 2. 完整解压到一个可写文件夹，双击 **Veyra.exe**。无需安装 SDK、Python 或开发工具。
    首次启动 NR、超分和内部补帧均关闭，确认基础画面后按需开启；导入旧设置会恢复原来的开关。
 3. 使用当前显卡驱动。要使用 NVIDIA NR、DLSS、RTX Video SR 和 NVENC，需兼容的 NVIDIA RTX 显卡；本版本主要在 RTX 5070 上验证。
@@ -141,13 +156,13 @@ NR 与 DLSS 帧生成属于 **community experimental / 社区实验集成**，�
 
 ## 开发与许可
 
-[构建说明](docs/BUILD.md) · [组件清单](docs/RUNTIME_COMPONENTS_1.4.1.md) · [第三方许可](THIRD_PARTY_NOTICES.md)
+[构建说明](docs/BUILD.md) · [组件清单](docs/RUNTIME_COMPONENTS_1.4.2.md) · [第三方许可](THIRD_PARTY_NOTICES.md)
 
 Veyra 原有源码采用 [GPLv3](LICENSE)；含串流的组合程序同时适用 [AGPLv3 与上游 OpenSSL 例外](licenses/remoteplay/CHIAKI_AGPL3_OPENSSL.txt)。应用源码对应版本标签，Release 另附串流依赖与 FFmpeg 对应源码包，普通用户无需下载。SDK、模型和运行时不进入源码仓库；Release 组件按各自许可与实验发布范围单独提供。
 
-## HDR 与 5.1（当前 1.4.1）
+## HDR 与 5.1（当前 1.4.2）
 
-原生 HDR 能力自 1.2.0 引入并保留至 1.4.1；SDR 转 RTX Video HDR 是独立的新开发任务。真实 HDR 屏、5.1 扬声器和不同采集卡仍须逐台验收。1.4.0 起采集 Dolby/DTS 可解码到 PCM，不等于压缩码流直通。
+保留原生 HDR 能力，1.4.2 新增 SDR 转 RTX Video HDR。真实 HDR 屏、5.1 扬声器和不同采集卡仍须逐台验收。1.4.0 起采集 Dolby/DTS 可解码到 PCM，不等于压缩码流直通。
 
 - **HDR 输入 / 增强**：文件、P010/P016 采集与 PS5 HDR；支持明确标记的 BT.2020 NCL / PQ 或 HLG。Windows HDR 开启时，可组合 NR、DLSS SR / RTX Video SR、DLSS / XeSS 补帧。NR / Video SR 使用 SDR 代理和 HDR 基底合成，压缩高光和近黑区域的增强会衰减；不把 SDR 结果逆造为原始 HDR。HLG 使用 1000nit / gamma 1.2 参考转换。
 - **SDR 显示开关**：采集卡面板的“转为 SDR 显示”默认关闭，控制所有实时预览。打开后将 HDR 映射为 SDR，增强照常可用；播放中切换无需重连，可能短暂停顿。关闭后跟随显示器 HDR 状态。截图跟随当前画面，视频导出保持原有 HDR 规则。
@@ -170,6 +185,6 @@ Veyra 原有源码采用 [GPLv3](LICENSE)；含串流的组合程序同时适用
 <p align="center">
   <img src="docs/images/1.4.0/donate-wechat.jpg" alt="微信赞助" width="220">
   &nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="docs/images/1.4.0/community-group.jpg" alt="Veyra 交流群 / bug 反馈 / beta 测试" width="220">
+  <img src="docs/images/1.4.2/community-group.png" alt="Veyra 交流群 / bug 反馈 / beta 测试" width="220">
 </p>
 <p align="center"><small>左：微信赞助（自愿，不影响任何功能的可用性）　右：Veyra 交流群——bug 反馈与 beta 版本发布</small></p>

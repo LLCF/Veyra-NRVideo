@@ -1,4 +1,5 @@
 #include "HdrColor.hlsli"
+#include "HdrToSdr.hlsli"
 #include "ColorGrade.hlsli"
 cbuffer RgbParams : register(b0) { uint width; uint height; uint transfer; uint limited; float2 reserved; float primaries2020; float padding;
     float4 colorRow0; float4 colorRow1; float4 colorRow2; float4 colorControls; float4 colorFlags; };
@@ -18,6 +19,8 @@ void main(uint3 p : SV_DispatchThreadID) {
     // Present onto the player's opaque black canvas; never discard RGB chroma.
     float3 decoded=float3(decode(c.r),decode(c.g),decode(c.b));
     if(primaries2020>0.5)decoded=HdrTo709(decoded);
-    if(colorFlags.x>0.5){ColorGradeParams grade={colorRow0,colorRow1,colorRow2,colorControls,colorFlags};decoded=ColorGradeApply(decoded,grade);}
+    const bool scRgb=transfer==0&&reserved.x>0.5;
+    if(colorFlags.x>0.5){ColorGradeParams grade={colorRow0,colorRow1,colorRow2,colorControls,colorFlags};decoded=scRgb?ColorGradeApply(decoded*(80.0/203.0),grade)*(203.0/80.0):ColorGradeApply(decoded,grade);}
+    if(scRgb&&reserved.x>1.5)decoded=HdrToSdr(decoded*80.0,reserved.y,203.0);
     linearRgb[p.xy]=float4(decoded*c.a,1);
 }

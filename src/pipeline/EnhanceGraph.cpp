@@ -1282,11 +1282,11 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
         veyra::log::error("hdr","HDR source transfer changed to SDR; reopen/rebuild required");return false;
     }
     if(resolved.matrix==YuvMatrix::BT2020CL){veyra::log::error("graph","BT.2020 constant-luminance requires a dedicated conversion; refusing NCL substitution");return false;}
-    if(resolved.isHdrPath()&&(resolved.matrix!=YuvMatrix::BT2020NCL||resolved.primaries!=ColorPrimaries::BT2020)){
+    if(resolved.isHdrPath()&&!resolved.scRgb&&(resolved.matrix!=YuvMatrix::BT2020NCL||resolved.primaries!=ColorPrimaries::BT2020)){
         veyra::log::error("hdr","Unsupported PQ/HLG colorimetry: requires signaled/fallback BT2020 NCL and BT2020 primaries");return false;
     }
     if(reset||!realFrameIndex_)veyra::log::info("color",std::format("range={} assumed={} matrix={} assumed={} transfer={} assumed={} display709={} preserveSdrCodes={} workingTransfer={}",int(resolved.range),resolved.rangeAssumed,int(resolved.matrix),resolved.matrixAssumed,int(resolved.transfer),resolved.transferAssumed,resolved.displayReferred709,resolved.preserveSdrCodeValues,workingTransferCode(resolved)));
-    if(resolved.isHdrPath()&&(reset||!realFrameIndex_)){
+    if(resolved.isHdrPath()&&!resolved.scRgb&&(reset||!realFrameIndex_)){
         veyra::log::info("hdr-route",std::format("input={} range={} matrix=BT2020-NCL primaries=BT2020 decode={} working={} output={} toneMap={} hdrReferenceWhiteNits=203 hlgReferencePeakNits=1000; SDR workingTransfer field is unused for PQ/HLG",
             resolved.transfer==TransferFunction::HLG?"HLG":"PQ",resolved.range==ColorRange::Full?"full":"limited",
             resolved.transfer==TransferFunction::HLG?"inverse-OETF+OOTF-gamma1.2":"ST2084-EOTF-absolute-nits",
@@ -1294,7 +1294,9 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
             hdr10Output()?"PQ-BT2020-RGB10":desc_.hdrOutput?"scRGB-FP16":"sRGB-RGB8",
             desc_.hdrOutput?"none":"BT2390-luminance+neutral-ray-gamut-compression"));
     }
-    if (resolved.isHdrPath()&&(!desc_.hdrInput||desc_.rgbInput||desc_.yuy2Input||desc_.packedInput)) {
+    const bool gpuRgb=desc_.rgbInput&&frame->format==AV_PIX_FMT_D3D11&&hardwareSurface&&hardwareSurface->present();
+    if(resolved.scRgb&&(!gpuRgb||resolved.transfer!=TransferFunction::Linear||resolved.primaries!=ColorPrimaries::BT709||hardwareSurface->texture->GetDesc().Format!=DXGI_FORMAT_R16G16B16A16_FLOAT))return false;
+    if (resolved.isHdrPath()&&(!desc_.hdrInput||(!resolved.scRgb&&desc_.rgbInput)||desc_.yuy2Input||desc_.packedInput)) {
         veyra::log::error("graph", "HDR input requires an explicit YUV HDR contract; RGB/YUY2 HDR ingress is unsupported"); return false;
     }
     if(std::abs(ptsMs)>9e13){veyra::log::error("timeline","PTS outside representable range");return false;}
@@ -1361,7 +1363,15 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
         previousLuma_=std::move(sample);
     };
 
-    if(desc_.rgbInput||desc_.yuy2Input||desc_.packedInput){
+    if(gpuRgb){
+        auto* texture=hardwareSurface->texture;const auto td=texture->GetDesc();
+        if(td.Width!=srcW_||td.Height!=srcH_||(td.Format!=DXGI_FORMAT_B8G8R8A8_UNORM&&td.Format!=DXGI_FORMAT_R16G16B16A16_FLOAT))return false;
+        if(hardwareSurface->waitFence&&FAILED(context_.directQueue()->Wait(hardwareSurface->waitFence,hardwareSurface->waitValue)))return false;
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};srv.Format=td.Format;srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;srv.Texture2D.MipLevels=1;
+        stager_.stageSrv(texture,&srv,rgbPass_.heap.Get(),3+parity);
+        tracker_.transition(list,texture,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }else if(desc_.rgbInput||desc_.yuy2Input||desc_.packedInput){
         const bool packed=desc_.packedInput!=0;
         if(packed?frame->format!=packedIngressFormat(desc_.packedInput):(desc_.yuy2Input?frame->format!=AV_PIX_FMT_YUYV422:(frame->format!=AV_PIX_FMT_RGBA&&frame->format!=AV_PIX_FMT_BGRA&&frame->format!=AV_PIX_FMT_RGB0&&frame->format!=AV_PIX_FMT_BGR0))){
             veyra::log::error("graph",std::format("direct capture input contract mismatch packing={} frameFormat={}",desc_.packedInput,int(frame->format)));return false;
@@ -1525,7 +1535,8 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
         float c[8+kColorGradeConstantCount]={uintBits(srcW_),uintBits(srcH_),uintBits(workingTransferCode(resolved)),uintBits(resolved.range==ColorRange::Limited?1u:0u),
             resolved.range==ColorRange::Full?0.0f:1.0f,resolved.matrix==YuvMatrix::BT2020NCL?2.0f:resolved.matrix==YuvMatrix::BT601?0.0f:1.0f,resolved.primaries==ColorPrimaries::BT2020?1.0f:0.0f,uintBits(desc_.packedInput)};
         if(colorActive_)packColorGradeConstants(colorTables_,c+8);
-        rgbPass_.bind(list,c,gpuHandleOf(rgbPass_,0).ptr,gpuHandleOf(rgbPass_,1).ptr,gpuHandleOf(rgbPass_,8).ptr);
+        if(resolved.scRgb){c[4]=desc_.hdrWorking()?1.f:2.f;c[5]=toneMapPeakNits_;}
+        rgbPass_.bind(list,c,gpuHandleOf(rgbPass_,gpuRgb?3+parity:0).ptr,gpuHandleOf(rgbPass_,1).ptr,gpuHandleOf(rgbPass_,8).ptr);
         list->Dispatch((srcW_+15)/16,(srcH_+15)/16,1);
     }else{
         float constants[12+kColorGradeConstantCount] = { resolved.range==ColorRange::Full?0.0f:1.0f,
@@ -1539,6 +1550,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
     }
     tracker_.uavBarrier(list, srcRgba_.Get());
     tracker_.transition(list, srcRgba_.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    if(gpuRgb)tracker_.transition(list,hardwareSurface->texture,D3D12_RESOURCE_STATE_COMMON);
     if (nv12Texture != nullptr) {
         tracker_.transition(list, nv12Texture, D3D12_RESOURCE_STATE_COMMON);
     }

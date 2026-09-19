@@ -17,6 +17,7 @@ struct CaptureMediaLayout {
     bool bottomUp=false;
     AVPixelFormat format=AV_PIX_FMT_NONE;
     REFERENCE_TIME duration=0;
+    DWORD colorControlFlags=0;
     pipeline::ColorDescription color;
     CapturePacking packing=CapturePacking::Unknown;
     unsigned planes=1,chromaStride=0,chromaRowBytes=0;
@@ -97,6 +98,7 @@ inline bool captureMediaLayout(const AM_MEDIA_TYPE& type,CaptureMediaLayout& out
     // the old RGB ingress, instead of applying a camera OETF a second time.
     out.color.transfer=pipeline::TransferFunction::SRGB;out.color.transferAssumed=true;
     out.color.preserveSdrCodeValues=true;
+    out.colorControlFlags=flags;
     if(flags&AMCONTROL_COLORINFO_PRESENT){
         DXVA2_ExtendedFormat ext{};ext.value=flags;
         if(ext.NominalRange==DXVA2_NominalRange_0_255){out.color.range=pipeline::ColorRange::Full;out.color.rangeAssumed=false;}
@@ -109,11 +111,26 @@ inline bool captureMediaLayout(const AM_MEDIA_TYPE& type,CaptureMediaLayout& out
         else if(ext.VideoTransferMatrix==4||ext.VideoTransferMatrix==5){out.color.matrix=pipeline::YuvMatrix::BT2020NCL;out.color.matrixAssumed=false;}
         else if(ext.VideoTransferMatrix!=DXVA2_VideoTransferMatrix_Unknown)return false;
         if(ext.VideoPrimaries==9){out.color.primaries=pipeline::ColorPrimaries::BT2020;out.color.primariesAssumed=false;}
+        else if(ext.VideoPrimaries==DXVA2_VideoPrimaries_BT709){out.color.primaries=pipeline::ColorPrimaries::BT709;out.color.primariesAssumed=false;}
+        else if(ext.VideoPrimaries==DXVA2_VideoPrimaries_BT470_2_SysBG){out.color.primaries=pipeline::ColorPrimaries::BT601_625;out.color.primariesAssumed=false;}
+        else if(ext.VideoPrimaries==DXVA2_VideoPrimaries_SMPTE170M){out.color.primaries=pipeline::ColorPrimaries::BT601_525;out.color.primariesAssumed=false;}
         if(ext.VideoTransferFunction==DXVA2_VideoTransFunc_10){out.color.transfer=pipeline::TransferFunction::Linear;out.color.transferAssumed=false;}
         else if(ext.VideoTransferFunction==DXVA2_VideoTransFunc_sRGB){out.color.transferAssumed=false;}
         else if(ext.VideoTransferFunction==DXVA2_VideoTransFunc_709){out.color.transfer=pipeline::TransferFunction::BT709;out.color.transferAssumed=false;}
         else if(ext.VideoTransferFunction==15||ext.VideoTransferFunction==16){out.color.transfer=ext.VideoTransferFunction==15?pipeline::TransferFunction::PQ:pipeline::TransferFunction::HLG;out.color.transferAssumed=false;}
         else if(ext.VideoTransferFunction!=DXVA2_VideoTransFunc_Unknown&&ext.VideoTransferFunction!=DXVA2_VideoTransFunc_709&&ext.VideoTransferFunction!=DXVA2_VideoTransFunc_22)return false;
+        // BT.2100 fallback needs an explicit HDR transfer, never just P010.
+        // Keep missing fields marked assumed and preserve conflicting tags.
+        if(out.color.isHdrPath()){
+            if(ext.VideoTransferMatrix==DXVA2_VideoTransferMatrix_Unknown)out.color.matrix=pipeline::YuvMatrix::BT2020NCL;
+            if(ext.VideoPrimaries==DXVA2_VideoPrimaries_Unknown)out.color.primaries=pipeline::ColorPrimaries::BT2020;
+        }
+        if(out.planes>1){
+            const unsigned chroma=ext.VideoChromaSubsampling&~DXVA2_VideoChromaSubsampling_ProgressiveChroma;
+            if(chroma==DXVA2_VideoChromaSubsampling_MPEG2)out.color.chromaLocation=pipeline::ChromaLocation::Left;
+            else if(chroma==DXVA2_VideoChromaSubsampling_MPEG1)out.color.chromaLocation=pipeline::ChromaLocation::Center;
+            else if(chroma==DXVA2_VideoChromaSubsampling_Cosited)out.color.chromaLocation=pipeline::ChromaLocation::TopLeft;
+        }
     }
     return true;
 }
@@ -171,6 +188,7 @@ inline bool equivalentCaptureTypes(const AM_MEDIA_TYPE& a,const AM_MEDIA_TYPE& b
     return x.packing==y.packing&&x.format==y.format&&x.width==y.width&&x.height==y.height&&x.stride==y.stride&&x.bottomUp==y.bottomUp&&x.duration==y.duration&&
         x.color.range==y.color.range&&x.color.matrix==y.color.matrix&&x.color.transfer==y.color.transfer&&
         x.color.primaries==y.color.primaries&&x.color.displayReferred709==y.color.displayReferred709&&x.color.preserveSdrCodeValues==y.color.preserveSdrCodeValues&&
-        x.color.rangeAssumed==y.color.rangeAssumed&&x.color.matrixAssumed==y.color.matrixAssumed&&x.color.transferAssumed==y.color.transferAssumed;
+        x.color.rangeAssumed==y.color.rangeAssumed&&x.color.matrixAssumed==y.color.matrixAssumed&&x.color.transferAssumed==y.color.transferAssumed&&
+        x.color.primariesAssumed==y.color.primariesAssumed&&x.color.chromaLocation==y.color.chromaLocation;
 }
 }

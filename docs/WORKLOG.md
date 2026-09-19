@@ -1,5 +1,95 @@
 # Veyra 工作记录
 
+## 2026-09-19 1.4.2 测试包、设备帧率与 UI 修复
+
+隔离分支 `codex/screen-capture-20260919`，保留全部既有工作树改动。具体文件、实现与边界见 [验收记录](UI_CAPTURE_RATE_1.4.2_2026-09-19.md)。采集设置新增手输设备帧率，DirectShow AvgTimePerFrame 协商及连接结果检查、v3 保存/旧配置迁移和重连保留。没有新增软件丢帧器或画面去重。恢复被最近打开遮挡的 PS5 按钮；统一控件热跟踪重绘，滚动面板组合绘制。更新 README、CURRENT_STATUS、1.4.2 notes、组件与源码说明，打包添加窗口采集 MIT 许可。
+
+实际命令与证据：`scripts/build-isolated.ps1 -Root . -BuildDirectory E:/项目/Veyra/build/screen-capture-20260919 -DependencyCache E:/项目/Veyra/build/frame-pacing-20260918/CMakeCache.txt -TempDirectory E:/项目/Veyra/tmp/ui-1.4.2-20260919 -DisplayVersion 1.4.2`，目标 veyra / veyra_ui_contract_tests / veyra_capture_tests / veyra_popup_selector_tests；build1/2/3 均 exit0。`scripts/run-short-test.ps1` 执行 UI contracts、popup --test、capture --list、capture --rate-test 30/40/0 及 screen --engine 均 exit0。日志 `E:/项目/Veyra/logs/ui-1.4.2-20260919/`，设置与截图 `E:/项目/Veyra/tests/ui-1.4.2-20260919/`，子进程 TEMP/TMP 为对应 tmp。虚拟OBS摄像头30FPS重连前后29.981/29.989，40FPS为39.796/40.156，默认60FPS为59.956/60.202。VC-007PRO未连接，没有物理卡降帧率验收。
+
+RTX5070屏幕源NR+DLSS4X短测：NR CreateFeature id=18 result=0x1 seh=0，DLSSG Create result=0x1；584源帧、1752FG执行、1455生成呈现、294生成帧过期，failures=0。GUI观察PS5面板可打开、采集FPS输入和滚动/下拉显示正常。首次rate测试用旧URI导致重连失败，修正测试用稳定设备身份后通过；首次GUI误传不存在的--log，被解析为媒体，正确参数重开通过。均没有当作产品通过证据掩盖。
+
+打包命令：`scripts/package-portable.ps1 -Root . -Version 1.4.2 -Label '-test' -OutputDirectory E:/项目/Veyra/test-packages/1.4.2 -BuildDirectory E:/项目/Veyra/build/screen-capture-20260919 -DependencyRoot 'C:/Users/123/Desktop/Veyra DLSS Video Player' -LocalVideoHdr`，exit0。便携ZIP 467110278字节，SHA256 `23E4427065B36AE94D9FA118A0441DA12F5017D3EAB8047E8DB87A183826BD7E`。包内114文件逐一按manifest校验通过，两个二维码width=220保留；运行组件沿用已批准身份，无SDK/个人配置/媒体/日志。
+
+`scripts/acceptance/portable-smoke.ps1 -PackageDirectory <package-stage> -InputFile E:/项目/Veyra/tests/1.4.2beta/visible-scene.mp4 -OutputDirectory E:/项目/Veyra/tests/ui-1.4.2-20260919/portable-smoke -CaseSeconds 7`，exit0，7组通过；临时关闭manifest及限制PATH后仍能播放和增强，依赖来自包内。检查实际截图非空、有正常内容。源码包使用本轮tmp/package-source.ps1生成当前工作树快照，包括未跟踪新源码及未改动的1.4.1 FFmpeg/RemotePlay对应源码，每项SHA256回读核对。保留最终ZIP、当前构建和证据，包stage仅为本轮中间副本，可清理。
+
+本轮没有合并main、提交、push或GitHub发布。尚未执行反馈者5060、RTX30/40本轮实卡、物理HDR和采集卡30/40FPS验收；不宣称游戏重复画面去重或所有卡顿根治。下一步由用户测试设备实际接受的帧率及UI动态表现。
+
+## 2026-09-19 屏幕采集默认跟随显示器刷新率
+
+GUI 实际打开专业模式的屏幕采集面板，截图及可访问性树确认默认选中“跟随显示器刷新率”，下拉框与指针开关无重叠、文字完整；保留测试窗口供用户试用。最初 Hidden 启动无法获取可交互窗口，停止该次自建进程后通过 computer-use 正常打开。`git diff --check` 通过，仅已有换行转换提示。
+
+用户要求新增并默认选择跟随显示器。修改 ScreenCaptureSource.h/.cpp、ScreenCapturePanel.cpp、ScreenCaptureTests.cpp：fps=0 表示自动，窗口取所在屏幕、显示器取目标屏幕；保留 DisplayConfig 有理数刷新率，每秒检查变化；查询失败保留已有值，首次失败警告并回退 60。保留手动 30/60/120/144/240，预览不再强制 30；新 RateMode 配置避免旧索引错位，初次升级默认自动，此后记忆选择。仍为采集上限，不重复静止帧凑数。
+
+实际命令：`./scripts/build-isolated.ps1 -Root . -BuildDirectory E:/项目/Veyra/build/screen-capture-20260919 -DependencyCache E:/项目/Veyra/build/frame-pacing-20260918/CMakeCache.txt -TempDirectory E:/项目/Veyra/tmp/screen-capture-20260919 -DisplayVersion 1.4.2beta -Targets veyra_screen_capture_tests,veyra`，exit 0，日志 `E:/项目/Veyra/logs/screen-capture-20260919/build10.log`。
+`scripts/run-short-test.ps1 -Exe E:/项目/Veyra/build/screen-capture-20260919/veyra_screen_capture_tests.exe -Arguments --base -TimeoutSeconds 60 -LogPrefix E:/项目/Veyra/logs/screen-capture-20260919/screen-test5`，测试工作目录为同任务 tests，TEMP/TMP 为同任务 tmp；exit 0 / failures=0。本机自动识别 100/1 Hz；自动窗口、WGC 显示器与 DXGI 显示器真实 RGB 像素通过，首帧时长、URI、租约、恢复、缩放、关闭及手动 60 回归通过。实际小数刷新率、不同刷新率跨屏及实时系统改刷新率未测试，本轮未执行 NR/FG Create/Evaluate。没有新增专有组件、打包、推送或发布。
+
+## 2026-09-19 窗口 / 显示器采集与纯画面收尾
+
+用户追加反馈静止 0 FPS、网页视频约 50 FPS，询问固定 30/60。只读核对 gui.log：04:20:16.353 到 04:20:22.353 UTC 收到和交付均新增 300 帧、dropped=0，即此样本 WGC 实际交付 50 FPS；后续多个六秒区间相同。`Get-CimInstance Win32_VideoController` 显示当前 RTX5070 输出 2560x1440@100Hz，但未独立证明浏览器/DWM 半刷新率是原因。现有选项是上限、没有固定输出时钟；本轮未新增重复呈现机制，不将重复画面宣称为新采集/AI 插帧。详见本轮实现记录末节。
+
+隔离分支 `codex/screen-capture-20260919`，基线 `12238df`；保留已有 P010 HDR 修复和 XeSS 回退测试改动。
+专业模式左侧新增屏幕采集，使用独立 Lucide app-window 图标；支持 WGC 窗口/显示器、DXGI 显示器兼容、预览、裁剪、帧率上限、指针及开始/切换/停止。用户明确不采集声音，已撤去本轮 loopback 实现、音频控件和参数；原应用直接发声，Veyra 不补偿这一路声音与增强画面的时差。
+
+主要文件：ScreenCaptureSource.h/.cpp、ScreenCapturePanel.h/.cpp、AppShell.cpp、EngineController.cpp、FramePacket.h、EnhanceGraph.cpp、RgbToLinear.hlsl、Subtitles.cpp、SourceTitle.h、CMakeLists.txt、Lucide 资源生成脚本与头文件、ScreenCaptureTests.cpp / ScreenScRgbCases.h；上游固定提交和 MIT 许可写入 THIRD_PARTY_NOTICES.md 与 licenses/WIN32_CAPTURE_SAMPLE_MIT.txt。README 与[本轮实现记录](SCREEN_CAPTURE_PLAN_2026-09-19.md)同步更新。
+
+实际构建命令：`./scripts/build-isolated.ps1 -Root . -BuildDirectory E:/项目/Veyra/build/screen-capture-20260919 -DependencyCache E:/项目/Veyra/build/frame-pacing-20260918/CMakeCache.txt -TempDirectory E:/项目/Veyra/tmp/screen-capture-20260919 -DisplayVersion 1.4.2beta -Targets veyra_screen_capture_tests,veyra`，build9 成功；build8 另含 HDR/采集颜色/原有音频测试目标。
+通过 `scripts/run-short-test.ps1 -Exe <build>/veyra_screen_capture_tests.exe -Arguments --engine -TimeoutSeconds 120 -LogPrefix <logs>/screen-test3`，以及 `--base / 60 / screen-test4` 执行真实采集，均 failures=0。WGC/DXGI 实际 RGB 内容、时间戳、六槽租约、缩放、最小化恢复、关闭重开、引擎停止和自身窗口排除/恢复通过。NR CreateFeature18=0x1、seh=0；652 源帧 / 1956 FG 执行 / 1665 生成呈现，287 生成帧过期，不能宣称零丢帧或物理显示满 4X。
+
+`veyra_wasapi_input_tests.exe --offline`：18 checks / 0 failures；采集颜色合同 failures=0；HDR GPU 测试四组 SCREEN_SCRGB 通过。GUI 已观察预览、无音频选项和新图标；未独立完成全部鼠标交互验收。物理 HDR、实际游戏、多 GPU、全发布/导出回归未执行。详细失败过程和边界见实现记录。
+
+产物统一在 `E:/项目/Veyra/{build,tests,logs,tmp,deps}/screen-capture-20260919`；日志含 build8/9、screen-test3/4、hdr-test、wasapi-offline、capture-color、gui。fonttools 仅安装到本任务 deps/python；没有新增专有运行库或包。构建目录借用已批准 portable runtime，并复制其根目录 FFmpeg/MSVC DLL 供测试 EXE 启动。临时目录为空，测试进程已结束，保留用户正在使用的 GUI。未合并 main、推送、打包或发布；下一步由用户验收实际窗口采集效果。
+
+## 2026-09-19 P010 HDR 识别与调色修复
+
+见 [排查与验证记录](CAPTURE_HDR_REPAIR_2026-09-19.md)。修复明确 PQ/HLG 但色域字段缺失时的错误 SDR 默认值；保留驱动声明的 chroma siting，补充原始颜色元数据日志。GPU 复现非中性调色截断 HDR 合法负分量，修复有符号线性光及 HSV 往返。
+采集合同单测、P010 部分元数据与文件输入 8 组逐像素对照、HDR 调色 8 组、原有 HDR/SDR GPU 回归和 SDR 调色专项通过；详细命令、失败记录、日志见报告。
+新产物统一在 `E:/项目/Veyra/{build,logs,tmp}/capture-hdr-20260919/`，早期增量验证复用已有 `build/xess-view-reset-20260919`。未发布/合并/打包，未执行反馈者实卡及物理 HDR 显示验收，不能把 P010 位深当 HDR 检测依据。
+
+## 2026-09-19 XeSS 拖动方案完整回退
+
+首次尝试把 `PreviewView` 变化作为 present-sink 时域边界，并在拖动期间暂停 XeSS/FSR generation。
+用户实测反馈 XeSS 无法打开，确认该策略回归严重，已完整撤回：删除视图历史状态机、拖动期间禁用生成、
+稳定后 reset 以及对应测试，恢复原有拖动时继续生成、偶发掉帧的行为。
+
+同批 `HUDLESS_COLOR` 裁剪修改也已撤回，产品代码恢复本轮修改前的路径。
+闪烁原因仍待独立复现，不能宣称已经修复。
+
+回退后重新构建命令：
+`./scripts/build-isolated.ps1 -Root . -BuildDirectory E:/项目/Veyra/build/xess-view-reset-20260919 -DependencyCache E:/项目/Veyra/build/frame-pacing-20260918/CMakeCache.txt -TempDirectory E:/项目/Veyra/tmp/xess-view-reset-20260919 -DisplayVersion 1.4.2beta -Targets veyra_presentation_worker_tests,veyra_preview_geometry_tests,veyra`
+构建 exit 0，`veyra_presentation_worker_tests.exe` 与 `veyra_preview_geometry_tests.exe` 全部通过，
+日志为 `E:/项目/Veyra/logs/xess-view-reset-20260919/build.log`。
+
+便携包已替换为回退后的主程序：
+`E:/项目/Veyra/test-packages/xess-view-reset-20260919/Veyra-xess-view-reset-20260919-win64-portable/`。
+首次回退（仍带裁剪修改）`Veyra.exe` SHA-256 为 `E842F9B9FFD9635B6EF4447BC42BBEF5ABE23E2EF5F1D42A01A7DCDE8C731C64`，已被下述完整回退构建替换。
+直接 `--no-nr --no-sr --no-fg --smoke-seconds 3` 启动 exit 0，日志为
+`E:/项目/Veyra/logs/xess-view-reset-20260919/package-smoke-after-revert.log`。
+该 smoke 关闭了 FG，只证明普通播放启动，不能作为 XeSS 验收。
+
+完整回退后沿用上述构建参数，目标改为 `veyra,veyra_experimental_backend_tests`，exit 0；
+日志 `E:/项目/Veyra/logs/xess-view-reset-20260919/build-full-revert.log`。
+本机 RTX 5070 / 616.56 实际执行：
+
+- `veyra_experimental_backend_tests.exe xess-pan2 E:/项目/Veyra/tests/xess-view-reset-20260919/pan2`：
+  48 个源帧，总生成提交 43，连续平移区间生成 37，D3D debugErrors=0，exit 0。
+- 同命令 `xess-pan4` / `pan4`：总生成提交 129，连续平移区间生成 111，debugErrors=0，exit 0。
+  两项均使用真实 NVOF/XeSS，包含重复源帧不额外生成与窗口尺寸变化检查。
+- 便携版 `Veyra.exe E:/项目/Veyra/tests/1.4.2beta/visible-scene.mkv --no-nr --no-sr --fg-xess --fg-multiplier 2 --smoke-seconds 12`：
+  276 处理帧、272 生成提交、failed=false、exit 0。4X 同参数改倍率 4：276 / 816，failed=false、exit 0。
+  两项 XeSS Create/Init result=0；稳态 framesPresented 分别为 2/4，result=0。
+  日志 `E:/项目/Veyra/logs/xess-view-reset-20260919/package-xess2.engine.log` 和 `package-xess4.engine.log`，
+  包含此前追加的历史会话，当前两次从 02:46:59Z / 02:47:26Z 起。
+
+上述测试均经 `scripts/run-short-test.ps1`，TimeoutSeconds=60，LogPrefix 显式指向本任务 logs；
+仅进程 TEMP/TMP 指向本任务 tmp。测试程序通过 build 下 runtime_local junction 使用已有便携运行库，未引入新 DLL。
+便携 EXE 已更新，package-manifest.json 的 EXE 大小和哈希同步；最终 SHA-256：
+`DE81DC0C84C2845B8D933695B2CD92DAEECBB8F07292FFAB1EF5DD5519D17A6A`。
+
+产品源码与本轮修改前 HEAD 一致，剩余源码差异只有后端测试；新增文档记录于本文件。
+以上生成计数为 SDK 提交，不是扫描输出/人眼画质证明；未实际模拟鼠标消息、未执行 NR/SR 组合或其他显卡回归。
+下一步由用户使用此 EXE 确认原故障恢复；闪烁和偶发拖动掉帧仍待独立复现。
+未合并 main、未推送、未发布。
+
 ## 2026-09-19 次日交付复核
 
 核对 `4c41ffa` 干净工作区及已交付EXE SHA256一致。Windows System事件1074/6006确认00:08关机、6005确认08:41再次启动；本次仅补记实际结果，不再次关机。5060旧日志无更新，仍需该用户在新构建启用DLSS后回传复现日志；不将现有5070短测扩大为5060故障根治证明。详见本轮报告末尾。
@@ -4407,3 +4497,15 @@ Blackwell 上会改变一条已经正常工作的路径，无法区分"补丁生
 已更新：构建依赖与便携打包命令改为1.3.0，补充dav1d/RemotePlay对应说明；本地整合状态新增当前1.3.0发布、main/tag和远端资产核验，并把dc44c48候选、未发布结论和待办明确标为历史快照。没有改动运行时代码、SDK、DLL、版本标签或发布资产。
 
 验证：`git diff --check`通过（仅换行格式提示）；随后提交文档并推送`nrvideo/main`。本次不重新构建、不替换便携包，功能与硬件验收边界继续以`docs/RELEASE_NOTES_1.3.0.md`为准。
+
+## 2026-09-19 XeSS 回退验证补充
+
+曾将旧 `XessGenerationGate` 推测为本次回归根因，但该门控早于拖动修改，现有证据不能支持此结论。
+相关额外删除已全部撤销。此次只回退拖动暂停方案及同批未验证的裁剪修改。
+现有普通播放 smoke 使用 `--no-fg`，不能证明 XeSS 可用；新增现有后端集成测试的
+`xess-pan2` / `xess-pan4` 模式，核对开启、连续平移时 SDK 实际生成计数、重复原帧和 D3D 错误。
+# 2026-09-19 1.4.2 正式发布
+
+用户授权本轮修复、整合 main、GitHub 发布及新群/HDR 对比图片公开。AppShell 全屏切换先 TTM_POP，再按 full 状态 TTM_ACTIVATE，退出恢复正常提示。更新中英文 README、1.4.2 notes、组件与对应源码说明、RELEASE_SUPPORT；打包正式纳入已授权 TrueHDR，附 README 图片与窗口采集 MIT 许可。具体命令与最终状态见 RELEASE_1.4.2_EXECUTION.md。
+
+产物统一在 E:/项目/Veyra/releases/1.4.2、build/screen-capture-20260919，以及 logs/tests/tmp/release-1.4.2-20260919。未覆盖上一轮内测包。
