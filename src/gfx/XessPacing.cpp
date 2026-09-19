@@ -4,6 +4,7 @@
 #include "veyra/ThunkHook.h"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <filesystem>
 #include <intrin.h>
@@ -21,6 +22,7 @@ using RingSnapshotFn = void* (*)(void*, void*);
 
 struct PacingState {
     std::mutex mutex;
+    std::mutex statsMutex;
     ThunkHook hook;
     bool installed = false;
     uint8_t* base = nullptr;
@@ -43,6 +45,12 @@ struct PacingState {
     int64_t statsDeadlineQpc = 0;
     int64_t lastMultiplier = 0;
     int32_t logBudget = 6;
+    int64_t lastPresentQpc = 0, presentGapSum = 0, presentGapMax = 0;
+    uint64_t presentGapSamples = 0;
+    std::array<int64_t,15> periods{};
+    size_t periodCount=0,periodPosition=0;
+    int64_t lastBurstQpc=0,periodQpc=0,intervalQpc=0,targetQpc=0;
+    uint64_t fallbackFrames=0;
 };
 
 PacingState& state() {
@@ -71,6 +79,39 @@ bool schedulerUsable(void* ctx) {
     return bytes[XessPacing::kSchedLimiterOffset] == 0 && bytes[XessPacing::kSchedEnableOffset] != 0;
 }
 
+// Adapted from OptiScaler 70676c5f XeFGPacing.h NoteFrame/PaceFrame/WaitUntil.
+// The provider present thread owns this bounded median and deadline state.
+void noteBurst(uint64_t index,uint64_t count,int64_t now) {
+    if(index>1)return;
+    auto& s=state();
+    if(s.lastBurstQpc&&now>s.lastBurstQpc){
+        s.periods[s.periodPosition]=(now-s.lastBurstQpc);
+        s.periodPosition=(s.periodPosition+1)%s.periods.size();
+        s.periodCount=(std::min)(s.periodCount+1,s.periods.size());
+        auto sorted=s.periods;std::sort(sorted.begin(),sorted.begin()+s.periodCount);
+        s.periodQpc=sorted[s.periodCount/2];
+    }
+    s.lastBurstQpc=now;
+    s.intervalQpc=s.periodQpc/int64_t(count+1);
+}
+
+void paceFallback(void* ctx,uint8_t* burst,uint64_t index,uint64_t count,bool isLast) {
+    // Match the provider's tail-frame limiter condition; never wait twice.
+    if(isLast&&count>2&&reinterpret_cast<uint8_t*>(ctx)[XessPacing::kSchedLimiterOffset]!=0&&
+       *reinterpret_cast<uint32_t*>(burst+0x28)==0)return;
+    auto& s=state();LARGE_INTEGER now{};QueryPerformanceCounter(&now);
+    if(s.intervalQpc<=0)return;
+    if(index<=1)s.targetQpc=now.QuadPart+s.intervalQpc;
+    else s.targetQpc+=s.intervalQpc;
+    s.targetQpc=(std::min)(s.targetQpc,now.QuadPart+s.periodQpc);
+    const auto yieldBelow=s.frequency.QuadPart/5000;
+    while(now.QuadPart<s.targetQpc){
+        if(s.targetQpc-now.QuadPart>yieldBelow)Sleep(0);else YieldProcessor();
+        QueryPerformanceCounter(&now);
+    }
+    std::lock_guard statsLock(s.statsMutex);++s.fallbackFrames;
+}
+
 // One schedule call per generated frame, mirroring the provider's own order:
 // snapshot the ring first, then schedule. Every argument is in hand because we
 // sit inside the present call the provider itself made.
@@ -87,6 +128,7 @@ void scheduleFrame(void* ctx, uint8_t* burst, uint64_t index) {
     const bool ok = s.sched(ctx, burst, gate, timing, static_cast<uint32_t>(index));
     QueryPerformanceCounter(&after);
 
+    std::lock_guard statsLock(s.statsMutex);
     ++s.scheduled;
     if (!ok) ++s.refused;
 
@@ -136,7 +178,7 @@ void tryPace(void* ctx, void* arg5, void* arg6, uint64_t arg7, bool isLast) {
     if ((flag == 1) == isLast) return;
     auto* burst = reinterpret_cast<uint8_t*>(arg5) - 0x38;
     const uint64_t count = *reinterpret_cast<uint64_t*>(burst + 8);
-    if (count < 1 || count > 5) return;
+    if (count < 2 || count > 5) return;
     uint64_t index = count;
     if (!isLast) {
         auto* frames = *reinterpret_cast<uint8_t**>(burst);
@@ -147,14 +189,15 @@ void tryPace(void* ctx, void* arg5, void* arg6, uint64_t arg7, bool isLast) {
         if (index < 1 || index >= count) return;
     }
     auto& s = state();
+    LARGE_INTEGER burstNow{};QueryPerformanceCounter(&burstNow);noteBurst(index,count,burstNow.QuadPart);
     if (s.sched != nullptr && schedulerUsable(ctx)) {
         // The provider keeps the last frame of the burst; scheduling it twice
         // would put two timestamps on one frame.
         if (!isLast) scheduleFrame(ctx, burst, index);
         return;
     }
-    // Limiter owns the pacing: the provider already waits for the last frame,
-    // and nothing here pretends to have paced the intermediate ones.
+    paceFallback(ctx,burst,index,count,isLast);
+    std::lock_guard statsLock(s.statsMutex);
     ++s.bypassed;
 }
 
@@ -164,9 +207,21 @@ int64_t detour(void* ctx, uint32_t a2, uint32_t a3, uint64_t a4, void* arg5, voi
         auto* caller = static_cast<uint8_t*>(_ReturnAddress());
         if (caller == s.base + XessPacing::kPacedCallerRva) tryPace(ctx, arg5, arg6, arg7, false);
         else if (caller == s.base + XessPacing::kLastFrameCallerRva) tryPace(ctx, arg5, arg6, arg7, true);
-        else ++s.forwarded;
+        else {std::lock_guard statsLock(s.statsMutex);++s.forwarded;}
     }
-    return s.native(ctx, a2, a3, a4, arg5, arg6, arg7);
+    const auto result=s.native(ctx, a2, a3, a4, arg5, arg6, arg7);
+    LARGE_INTEGER now{};QueryPerformanceCounter(&now);
+    std::lock_guard statsLock(s.statsMutex);
+    if(s.lastPresentQpc!=0){
+        const auto gap=now.QuadPart-s.lastPresentQpc;
+        s.presentGapSum+=gap;s.presentGapMax=(std::max)(s.presentGapMax,gap);
+        if(++s.presentGapSamples==240){
+            log::info("xess-present-gaps",std::format("samples={} meanMs={:.3f} maxMs={:.3f} (all hooked present returns, includes burst boundaries; not scanout)",s.presentGapSamples,msFromQpc(s,s.presentGapSum/int64_t(s.presentGapSamples)),msFromQpc(s,s.presentGapMax)));
+            s.presentGapSamples=0;s.presentGapSum=s.presentGapMax=0;
+        }
+    }
+    s.lastPresentQpc=now.QuadPart;
+    return result;
 }
 
 // A thunk is `E9 rel32` followed by 0xCC padding; the rel32 must reach
@@ -185,7 +240,7 @@ bool thunkTargets(const uint8_t* base, uint32_t rva, uint32_t expectedTargetRva)
 
 XessPacing::State XessPacing::install(HMODULE provider, uint32_t generatedFrames) {
     auto& s = state();
-    std::lock_guard lock(s.mutex);
+    std::unique_lock lock(s.mutex);
     State result{};
     result.generatedFrames = generatedFrames;
     if (provider == nullptr) {
@@ -198,6 +253,7 @@ XessPacing::State XessPacing::install(HMODULE provider, uint32_t generatedFrames
         return result;
     }
     if (s.installed) {
+        lock.unlock();
         result = snapshot();
         return result;
     }
@@ -230,6 +286,9 @@ XessPacing::State XessPacing::install(HMODULE provider, uint32_t generatedFrames
     s.generatedFrames = generatedFrames;
     s.scheduled = s.refused = s.forwarded = s.bypassed = 0;
     s.lastScheduledQpc = 0;
+    s.lastPresentQpc=s.presentGapSum=s.presentGapMax=0;s.presentGapSamples=0;
+    s.periods={};s.periodCount=s.periodPosition=0;
+    s.lastBurstQpc=s.periodQpc=s.intervalQpc=s.targetQpc=0;s.fallbackFrames=0;
     s.gapSum = s.gapSamples = 0;
     s.gapMin = s.gapMax = 0;
     s.lastMultiplier = 0;
@@ -265,13 +324,14 @@ void XessPacing::release() {
     s.native = nullptr;
     s.sched = nullptr;
     s.ringSnapshot = nullptr;
-    log::info("xess-pacing", std::format("removed (scheduled={} refused={} bypassed={} forwarded={})",
-                                         s.scheduled, s.refused, s.bypassed, s.forwarded));
+    log::info("xess-pacing", std::format("removed (scheduled={} refused={} bypassed={} forwarded={} fallbackFrames={})",
+                                         s.scheduled, s.refused, s.bypassed, s.forwarded,s.fallbackFrames));
 }
 
 XessPacing::State XessPacing::snapshot() {
     auto& s = state();
     std::lock_guard lock(s.mutex);
+    std::lock_guard statsLock(s.statsMutex);
     State result{};
     result.providerLoaded = s.base != nullptr;
     result.structureVerified = s.sched != nullptr;

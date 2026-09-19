@@ -4,6 +4,7 @@
 #include "veyra/gfx/CommandSlotRing.h"
 #include "veyra/sink/ImageExportSink.h"
 #include "veyra/RuntimePaths.h"
+#include "veyra/gfx/XessPacing.h"
 #include <d3d12sdklayers.h>
 #include <wrl/client.h>
 #include <algorithm>
@@ -11,6 +12,7 @@
 #include <cmath>
 #include <filesystem>
 #include <iostream>
+#include <thread>
 #include <vector>
 extern "C" {
 #include <libavutil/frame.h>
@@ -121,22 +123,75 @@ bool readCanonicalFlow(gfx::D3D12DeviceContext& ctx, gfx::CommandSlotRing& ring,
     return true;
 }
 
+bool checkDisplayMotion(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& ring){
+    constexpr unsigned w=640,h=360;
+    auto source=pipeline::makeTexture(ctx.device(),w,h,DXGI_FORMAT_R16G16_FLOAT,true);
+    auto output=pipeline::makeTexture(ctx.device(),w,h,DXGI_FORMAT_R16G16_FLOAT,true);
+    pipeline::ComputePass pass;std::vector<uint8_t> cs;
+    if(!source||!output||!pipeline::loadShaderBytes("PresentMotion.dxil",cs)||!pass.create(ctx.device(),cs,3,1,1,16))return false;
+    const auto cpu=pass.heap->GetCPUDescriptorHandleForHeapStart();
+    const auto gpu=pass.heap->GetGPUDescriptorHandleForHeapStart();
+    pipeline::makeSrv(ctx.device(),source.Get(),DXGI_FORMAT_R16G16_FLOAT,cpu);
+    pipeline::makeUav(ctx.device(),output.Get(),DXGI_FORMAT_R16G16_FLOAT,{cpu.ptr+pass.increment});
+    pipeline::makeUav(ctx.device(),source.Get(),DXGI_FORMAT_R16G16_FLOAT,{cpu.ptr+2*pass.increment});
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> clearHeap;
+    D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;hd.NumDescriptors=1;
+    if(FAILED(ctx.device()->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&clearHeap))))return false;
+    pipeline::makeUav(ctx.device(),source.Get(),DXGI_FORMAT_R16G16_FLOAT,clearHeap->GetCPUDescriptorHandleForHeapStart());
+    for(unsigned test=0;test<4;++test){
+        Status st;uint32_t slot=0;auto* list=ring.acquireNext(slot,st);if(!list)return false;
+        pipeline::StateTracker states;
+        states.transition(list,source.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        ID3D12DescriptorHeap* heaps[]={pass.heap.Get()};list->SetDescriptorHeaps(1,heaps);
+        const float velocity[4]={-2,1,0,0};
+        list->ClearUnorderedAccessViewFloat({gpu.ptr+2*pass.increment},clearHeap->GetCPUDescriptorHandleForHeapStart(),source.Get(),velocity,0,nullptr);
+        states.transition(list,source.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        states.transition(list,output.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        // Identity; 2X zoom; view shifted 10% right; explicit history reset.
+        const float zoom=test==1?2.0f:1.0f;
+        const float map[16]={640,360,960,540,zoom,test==2?.6f:.5f,.5f,test==3?1.0f:0.0f,
+            zoom,.5f,.5f,0,960,540,0,0};
+        pass.bind(list,map,gpu.ptr,gpu.ptr+pass.increment);list->Dispatch(w/8,h/8,1);
+        states.transition(list,source.Get(),D3D12_RESOURCE_STATE_COMMON);
+        states.transition(list,output.Get(),D3D12_RESOURCE_STATE_COMMON);
+        if(!ring.submitAndSignal(slot)||!ring.drainQueue())return false;
+        list=ring.acquireNext(slot,st);if(!list)return false;
+        pipeline::StateTracker readStates;
+        readStates.transition(list,output.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        if(!ring.submitAndSignal(slot))return false;
+        FlowSample sample;if(!readCanonicalFlow(ctx,ring,output.Get(),sample))return false;
+        const float expectedX=test==3?0:test==2?62:-2*zoom;
+        const float expectedY=test==3?0:zoom;
+        const bool ok=std::abs(sample.x-expectedX)<.08f&&std::abs(sample.y-expectedY)<.08f;
+        std::cout<<"DISPLAY_MOTION case="<<test<<" actual="<<sample.x<<","<<sample.y<<" expected="<<expectedX<<","<<expectedY<<" pass="<<ok<<std::endl;
+        list=ring.acquireNext(slot,st);if(!list)return false;
+        D3D12_RESOURCE_BARRIER b{};b.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition={output.Get(),D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON};
+        list->ResourceBarrier(1,&b);
+        if(!ring.submitAndSignal(slot)||!ring.drainQueue()||!ok)return false;
+    }
+    return true;
+}
+
 } // namespace
 
 int wmain(int argc,wchar_t** argv){
     if(argc!=3)return 2;
     const bool dis=std::wstring(argv[1]).find(L"dis")==0;
     const bool pan=wcscmp(argv[1],L"xess-pan2")==0||wcscmp(argv[1],L"xess-pan4")==0;
-    const bool xess=pan||wcscmp(argv[1],L"xess")==0||wcscmp(argv[1],L"dis-xess")==0;
+    const bool recovery=wcscmp(argv[1],L"xess-recovery2")==0||wcscmp(argv[1],L"xess-recovery3")==0||wcscmp(argv[1],L"xess-recovery4")==0||wcscmp(argv[1],L"xess-resize4")==0;
+    const bool resizeRecovery=wcscmp(argv[1],L"xess-resize4")==0;
+    const bool soak=wcscmp(argv[1],L"xess-soak4")==0;
+    const bool xess=soak||recovery||pan||wcscmp(argv[1],L"xess")==0||wcscmp(argv[1],L"dis-xess")==0;
     const bool amd=wcscmp(argv[1],L"amd")==0;
     const bool sr=std::wstring(argv[1]).find(L"sr")==0;
     if(!xess&&!amd&&!sr&&!dis&&wcscmp(argv[1],L"nvof1080")!=0)return 2;
     const bool full=std::wstring(argv[1]).find(L"1080")!=std::wstring::npos;
-    const unsigned width=(sr||full)?1920:640,height=(sr||full)?1080:360,frames=sr?3:48;
+    const unsigned width=(sr||full)?1920:640,height=(sr||full)?1080:360,frames=soak?3600:sr?3:48;
     CoInitializeEx(nullptr,COINIT_MULTITHREADED);
     std::filesystem::create_directories(argv[2]);
     Logger::instance().openFile((std::filesystem::path(argv[2])/"engine.log").wstring());
-    SetEnvironmentVariableW(L"VEYRA_VERBOSE_FRAME_LOGS",L"1");
+    SetEnvironmentVariableW(L"VEYRA_VERBOSE_FRAME_LOGS",soak?nullptr:L"1");
     HWND window=CreateWindowExW(0,L"STATIC",L"Veyra experimental backend test",WS_POPUP,0,0,960,540,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
     if(!window)return 1;
     ShowWindow(window,SW_SHOWNOACTIVATE);
@@ -150,7 +205,8 @@ int wmain(int argc,wchar_t** argv){
     desc.rgbInput=true;desc.enableNr=false;desc.enableFg=xess;desc.noNgx=true;
     desc.enableNvofStandalone=true;
     desc.frameGenerationBackend=engine::FrameGenerationBackend::XeSS;
-    if(wcscmp(argv[1],L"xess-pan4")==0)desc.fgMultiplier=4;
+    if(soak||wcscmp(argv[1],L"xess-pan4")==0)desc.fgMultiplier=4;
+    if(recovery)desc.fgMultiplier=(resizeRecovery||wcscmp(argv[1],L"xess-recovery4")==0)?4:wcscmp(argv[1],L"xess-recovery3")==0?3:2;
     desc.opticalFlowBackend=dis?engine::OpticalFlowBackend::GpuDis:amd?engine::OpticalFlowBackend::AmdFidelityFx:engine::OpticalFlowBackend::Nvidia;
     if(sr){
         desc.sourceWidth=width;desc.sourceHeight=height;
@@ -163,14 +219,24 @@ int wmain(int argc,wchar_t** argv){
     }
     bool ok=graph.initialize(desc)&&presenter.open(ctx,window,graph)&&graph.createViews();
     if(xess)ok=ok&&presenter.xessActive();
+    if(xess)ok=ok&&checkDisplayMotion(ctx,ring);
+    if(xess&&desc.fgMultiplier>2&&ok){
+        const auto again=gfx::XessPacing::install(GetModuleHandleW(L"libxess_fg.dll"),desc.fgMultiplier-1);
+        ok=again.installed;
+    }
     AVFrame* frame=av_frame_alloc();frame->format=AV_PIX_FMT_RGBA;frame->width=int(width);frame->height=int(height);frame->color_trc=AVCOL_TRC_IEC61966_2_1;
     ok=ok&&av_frame_get_buffer(frame,32)>=0;
     pipeline::EnhanceGraph::FrameOutputs out;
     FlowSample rightward{}, leftward{};
     engine::PreviewView view;
     uint64_t panGenerated=0;
+    unsigned recovered=0;
+    UINT64 previousMessages=0;
     if(pan)view.zoom=1.5f;
+    const auto cadenceStart=std::chrono::steady_clock::now();
     for(unsigned i=0;ok&&i<frames;++i){
+        if(soak)std::this_thread::sleep_until(cadenceStart+std::chrono::microseconds(uint64_t(i)*1000000/30));
+        ok=presenter.beginSourceInput()&&ok;
         MSG msg;while(PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)){TranslateMessage(&msg);DispatchMessageW(&msg);}
         const int phase = i < 24 ? int(i) : int(i - 24);
         const int velocity = i < 24 ? 2 : -2;
@@ -182,24 +248,45 @@ int wmain(int argc,wchar_t** argv){
             hash^=hash>>16;hash*=0x7FEB352Du;hash^=hash>>15;hash*=0x846CA68Bu;hash^=hash>>16;
             p[0]=uint8_t(hash);p[1]=uint8_t(hash>>8);p[2]=uint8_t(hash>>16);p[3]=255;
         }
-        out={};ok=graph.process(frame,i*1000.0/30,i==0||i==24,out,i+1);
+        const bool forcedReset=i==0||i==24||(recovery&&(i==8||i==32||i==40));
+        out={};ok=ok&&presenter.beginSourceProcessing()&&graph.process(frame,i*1000.0/30,forcedReset,out,i+1);
+        if(ok)presenter.sourceProcessed(out.batch.identity);
+        if(ok&&recovery&&i==18){
+            // Repaint an older identity while the next source is prepared.
+            // It must not consume that source's identity or add generated frames.
+            const auto before=presenter.xessGeneratedCount();
+            auto older=out.batch.identity;--older.sourceFrameId;
+            ok=presenter.present(ctx,ring,graph,out.videoSlot,false,false,0,false,.5f,older,view);
+            ok=ok&&presenter.xessGeneratedCount()==before;
+        }
         const bool moving=pan&&i>=4&&i<44;
         if(moving)view.pan(i<24?3.0f:-3.0f,1.0f,960,540,float(width),float(height));
         const auto beforePresent=presenter.xessGeneratedCount();
         if(ok)ok=presenter.present(ctx,ring,graph,out.videoSlot,false,false,0,false,.5f,out.batch.identity,view);
         if(moving)panGenerated+=presenter.xessGeneratedCount()-beforePresent;
+        if(recovery&&(i==9||i==33||i==41)){
+            const auto delta=presenter.xessGeneratedCount()-beforePresent;
+            std::cout<<"RECOVERY frame="<<i<<" generated="<<delta<<" expected="<<desc.fgMultiplier-1<<std::endl;
+            ok=ok&&delta==desc.fgMultiplier-1;
+            if(delta==desc.fgMultiplier-1)++recovered;
+        }
         if(ok&&i==16){
             const auto before=presenter.xessGeneratedCount();
             ok=presenter.present(ctx,ring,graph,out.videoSlot,false,false,0,false,.5f,out.batch.identity,view);
             if(xess)ok=ok&&presenter.xessGeneratedCount()==before;
         }
-        if(i==24)SetWindowPos(window,nullptr,0,0,800,600,SWP_NOACTIVATE|SWP_NOZORDER);
+        if(i==24&&(!recovery||resizeRecovery))SetWindowPos(window,nullptr,0,0,800,600,SWP_NOACTIVATE|SWP_NOZORDER);
         if((amd||dis)&&(i==23||i==47)){
             ok=ring.drainQueue()&&ok;
             FlowSample& sample=i==23?rightward:leftward;
             ok=ok&&readCanonicalFlow(ctx,ring,graph.flowResource(),sample);
         }
-        Sleep(34);
+        if(!soak)Sleep(34);
+        if(recovery&&info){
+            const auto messages=info->GetNumStoredMessagesAllowedByRetrievalFilter();
+            if(messages!=previousMessages)std::cout<<"DEBUG frame="<<i<<" messages="<<messages<<std::endl;
+            previousMessages=messages;
+        }
     }
     ok=ring.drainQueue()&&ok;
     const auto generated=presenter.xessGeneratedCount();
@@ -212,6 +299,7 @@ int wmain(int argc,wchar_t** argv){
         std::cout<<"SR extent="<<image.width<<"x"<<image.height<<" evaluate="<<graph.metrics().srEvaluateCount<<" nonblack="<<nonblack<<" pass="<<ok<<std::endl;
     }
     if(xess)ok=ok&&generated>10;
+    if(recovery)ok=ok&&recovered==3;
     if(pan){
         ok=ok&&panGenerated>10;
         std::cout<<"PAN multiplier="<<desc.fgMultiplier<<" generatedWhileMoving="<<panGenerated<<" pass="<<ok<<std::endl;

@@ -1,5 +1,25 @@
 # Veyra 工作记录
 
+## 2026-09-19 XeSS 游玩转身卡顿深度审计（方案，未施工）
+
+用户要求排查与修复方案。保留当前 `codex/cross-monitor-20260919` 上已有跨屏、V 原图等未提交修改，新增 `docs/XESS_GAMEPLAY_STUTTER_REPAIR_PLAN_2026-09-19.md`。审计确认 XeLL 标记未覆盖 graph 工作、暂时 motion 无效触发 SetEnabled 造成额外历史预热、多倍 pacing 省略上游 fallback、统计遗漏批次边界，以及重复 install 嵌套 mutex 的条件死锁。快速转身误切、mailbox Drop 反馈、双重排期、motion 空间域为待实证假说，不称作已复现根因。采集不走文件 XessGenerationGate，明确排除该误判。
+
+实际检查：`git status --short`、针对 Engine/Graph/Presenter/Pacing/Scene 的 `rg` 和文件读取；对照本机 Intel XeSS 3.0.2 官方开发文档；本地 OptiScaler 固定 `70676c5f037c8c26f1ec355b250a72303cd268da`；`git ls-remote https://github.com/Coldwood1026/OptiScaler.git HEAD` 返回 `68d4c37c0c60eeda64234a106bf9d93289d2eb53`（未逐行审计新 HEAD）。读取旧 `E:/项目/Veyra/logs/xess-view-reset-20260919/` pan/package 证据，实际旧测试 bypassed/refused 均为 0，不能声称 fallback 缺失曾在该测试触发。桌面旧用户日志虽有 XeSS 2X 会话，无本次转身关联。首次查找 `include/veyra/engine/LiveTimeline.h` 路径不存在，已定位真正的 `PresentationScheduler.h`，未据失败搜索下结论。
+
+未运行新的构建、实机游玩、功耗或屏幕延迟测试；本轮仅文档，`git diff --check` 通过。后续产物约定 `E:/项目/Veyra/{tests,logs,tmp,build}/xess-gameplay-20260919/`，本轮未生成这些产物，未新增运行组件或上传发布。
+
+## 2026-09-19 按住 V 的原图对照排除调色
+
+在 `codex/cross-monitor-20260919` 保留已有跨屏修复，修正原图引用在输入转换融合调色后才复制的问题。
+
+- `src/pipeline/EnhanceGraph.cpp`：仅在调色开启且请求对照时，按相同输入颜色合同生成未调色 FP16 引用，再执行正常调色输入。原图与增强基底引用分离，基底保持既有调色语义；不增加产品路径 CPU 像素回读。普通播放未请求对照时没有额外转换。
+- `apps/veyra/ui/AppShell.cpp`：按住 V 或原图按钮强制选择源图；释放时恢复原对照模式及基底选项，不改写调色设置。
+- `tests/integration/ColorGradeGpuTests.cpp`：新增 RGB/NV12 GPU 回归，强曝光下交替覆盖两个帧槽，原图与中性基准逐字节一致、基底仍带调色、取消引用后输出仍等于调色输出。
+
+实际验证：`scripts/build-isolated.ps1 -Root . -BuildDirectory E:/项目/Veyra/build/slider-reset-20260919 -DependencyCache E:/项目/Veyra/build/frame-pacing-20260918/CMakeCache.txt -TempDirectory E:/项目/Veyra/tmp/original-grade-20260919 -DisplayVersion 1.4.2 -Targets veyra,veyra_color_grade_gpu_tests` 成功；`veyra_color_grade_gpu_tests.exe` 退出 0，新增案例及原有调色/LUT 回归全部通过。`scripts/run-short-test.ps1` 主程序 `--smoke-empty --smoke-seconds 5` 退出 0；`git diff --check` 通过。未实际操作键盘验收，未覆盖 HDR/补帧组合，不以 GPU 引用测试冒充全链路人工验收。
+
+构建复用 `E:/项目/Veyra/build/slider-reset-20260919/`；证据在 `E:/项目/Veyra/logs/original-grade-20260919/`（build.log、gpu-test.log、gpu.log、app.log、smoke.*），临时目录 `E:/项目/Veyra/tmp/original-grade-20260919/`。未打包、推送或发布，未新增运行组件。
+
 ## 2026-09-19 字幕按钮弹窗立即关闭修复
 
 分支 `codex/subtitle-popup-20260919`，基线 `fd67b58`。`Theme.h` 的按钮鼠标消息曾在 `WM_SETREDRAW(FALSE)` 内调用原生按钮过程；`WM_LBUTTONUP` 同步发出 `BN_CLICKED` 并进入字幕菜单消息循环。此时按钮的 `WS_VISIBLE` 被临时移除，菜单 100ms 的锚点检查关闭弹窗。旧代码真实复现：菜单打开约 100ms 后 selection=-1，新增测试报告按钮在通知期间不可见。
@@ -4527,7 +4547,47 @@ Blackwell 上会改变一条已经正常工作的路径，无法区分"补丁生
 用户授权本轮修复、整合 main、GitHub 发布及新群/HDR 对比图片公开。AppShell 全屏切换先 TTM_POP，再按 full 状态 TTM_ACTIVATE，退出恢复正常提示。更新中英文 README、1.4.2 notes、组件与对应源码说明、RELEASE_SUPPORT；打包正式纳入已授权 TrueHDR，附 README 图片与窗口采集 MIT 许可。具体命令与最终状态见 RELEASE_1.4.2_EXECUTION.md。
 
 产物统一在 E:/项目/Veyra/releases/1.4.2、build/screen-capture-20260919，以及 logs/tests/tmp/release-1.4.2-20260919。未覆盖上一轮内测包。
+# 2026-09-19 跨屏拖动卡住/闪退：首轮排查与重建时机修正
+
+分支 `codex/cross-monitor-20260919`，基于 `412a19f`。尚未确认用户闪退根因，不标记真实多屏问题已解决。本机 EnumDisplayMonitors 仅返回一块 2560x1440 显示器；原程序空白页合成 96/144/192 DPI 切换通过，先前 user-preview.log 正常退出，没有对应崩溃证据。待补充空白/播放、DLSS/XeSS、双屏缩放及问题日志。
+
+- `AppShell.cpp` 在原生移动循环及 DPI 更新期间向视频窗口标记状态，增加开始/结束日志。
+- `VideoPresenter.cpp` 在上述状态下保留现有缓冲继续呈现，不执行队列 drain/ResizeBuffers；松开后沿用原来的尺寸更新路径。没有关闭补帧，也不修改源时间线。此修改减少拖动过程中反复重建的风险，不等于已经证明用户崩溃就是该原因。
+- `scripts/acceptance/ui-cross-monitor.py` 为独立进程回归，120 秒总超时；枚举实际显示器，三轮模拟移动循环、DPI、尺寸切换，验证窗口响应及正常退出。播放模式额外断言移动期间持续呈现且不重建、松开后恢复重建。单屏上的模拟事件不代表真实多屏拖动验收。
+
+实际验证：
+
+1. `scripts/build-isolated.ps1 -Root . -BuildDirectory E:/项目/Veyra/build/slider-reset-20260919 -DependencyCache E:/项目/Veyra/build/frame-pacing-20260918/CMakeCache.txt -TempDirectory E:/项目/Veyra/tmp/cross-monitor-20260919 -DisplayVersion 1.4.2 -Targets veyra` 通过，复用上轮构建目录及已核验运行库。
+2. `python scripts/acceptance/ui-cross-monitor.py <上述目录>/veyra.exe E:/项目/Veyra/logs/cross-monitor-20260919/baseline` 原版空白页通过。
+3. 同脚本对修改后程序运行 `.../playback E:/项目/Veyra/tests/1.4.2beta/visible-scene.mp4 --no-nr --no-sr --no-fg` 通过；`.../dlss4x <同媒体> --no-nr --no-sr --fg-multiplier 4` 通过，实际 generated=true / Present hr=0，最终 706x414 缓冲恢复调整。DLSS 本机实际执行，不推广到其他硬件；XeSS 未测。
+4. 音轨测试媒体记录 decoder rejected stream=1 code=-22，不将该次视频呈现测试冒充音频验收。
+
+证据 `E:/项目/Veyra/logs/cross-monitor-20260919/`，临时目录 `E:/项目/Veyra/tmp/cross-monitor-20260919/`。未打包/推送/发布；真实双屏闪退仍待复现和验收。
+
 # 2026-09-19 参数滑杆单项还原（方案一）
+
+## 2026-09-19 XeSS 转身卡顿接入修复（本轮执行补记）
+
+当前分支 `codex/cross-monitor-20260919`，基线 `412a19f`；保留已有跨屏、V 对照、UI 修改。实施范围与证据边界见 `docs/XESS_GAMEPLAY_STUTTER_REPAIR_PLAN_2026-09-19.md`。未打包、提交、推送或发布。
+
+修改 EngineController/VideoPresenter/XessPresenter 的 XeLL 输入/处理/呈现生命周期及有界身份关联；合法历史断点用零 motion + resetHistory；新增 PresentMotion shader 和 CMake 依赖，使 motion 与 contain/zoom/pan 的显示域一致、固定插值区域；未知 frameRenderTime 为 0；XessPacing 修重复安装死锁、统计锁、补固定上游 fallback 与跨批间隔日志。THIRD_PARTY_NOTICES 保留固定提交和许可证。没有修改磁盘运行库或引入 SDK 到 Git。
+
+实际命令：`scripts/build-isolated.ps1 -Root . -BuildDirectory E:/项目/Veyra/build/slider-reset-20260919 -DependencyCache E:/项目/Veyra/build/frame-pacing-20260918/CMakeCache.txt -TempDirectory E:/项目/Veyra/tmp/xess-gameplay-20260919 -DisplayVersion 1.4.2 -Targets veyra,veyra_experimental_backend_tests`；主程序/测试均构建成功，日志 `build-final.log`，随后仅增加测试 soak 模式构建 `build-soak.log` 成功。
+
+测试统一使用 `scripts/run-short-test.ps1 -Exe <上述构建目录>/veyra_experimental_backend_tests.exe -Arguments <mode>,E:/项目/Veyra/tests/xess-gameplay-20260919/<case> -TimeoutSeconds 60 -LogPrefix E:/项目/Veyra/logs/xess-gameplay-20260919/<case>`；soak 使用 160 秒超时。TEMP/TMP 仅对子进程设为本轮 tmp；PATH 加已发布 1.4.2 便携包依赖。
+
+- `xess-recovery2/3/4`、`xess-resize4`、`xess-pan2/4` 通过；证据 final2/final3/verified4/mapped-resize4/verified-pan2/final-pan4。最终4X三次断点后的下一帧均生成3帧，重复呈现未生成；准备帧被重绘超越编号回归通过。2X/4X移动期间分别生成37/111帧，未通过移动时关闭补帧取巧。
+- GPU motion 数值回读仅存在于集成测试：恒定 (-2,1)、2X缩放约(-4,1.99902)、平移(62,1)、reset(0,0)，四项通过。所有上述成功场景 debugErrors=0。
+- 尺寸变化旧路径复现119条GPU状态错误；仅改时间或仅改资源生命周期均仍119条，日志 zero-resize4/deferred-resize4；稳定插值域与motion映射后 mapped-resize4 为0。不把失败实验当成修复收益。
+- `xess-soak4`：3600源帧，绝对30fps期限约120秒，640x360合成移动纹理、NR关闭、真实提供方4X；generated=10788、debugErrors=0、scheduled=7192、refused=0、bypassed=0、fallbackFrames=0，退出0。最后约30秒附近与主程序smoke重叠，仅作稳定性检查，不作隔离性能A/B。完整hook返回间隔日志包含批次边界，不能当物理扫描事件。
+- 主程序 `-Arguments E:/项目/Veyra/tests/1.4.2beta/visible-scene.mp4,--fg-xess,--fg-multiplier,4,--nr,--no-sr,--smoke-seconds,15`，TimeoutSeconds45，final-engine退出0，生成591帧。此前25秒engine-nr4退出0、生成588。媒体会先结束而进入暂停重绘，不声称全程连续补帧或真实游戏画质验收。
+- 早期误列XeSS6X的测试初始化失败，已纠正文档/测试为XeSS2/3/4X，DLSS6X不变；一次PowerShell数组经`-File`传参错误退出2，非产品失败。`git diff --check`通过（仅CRLF提示）。
+
+当前未验证：fallback在真实提供方scheduler不可用时的触发、用户转身录屏/实卡NV12/P010、30/40显卡、功耗因果与屏幕延迟。未改切镜检测阈值或capture pairDelay。完整A/B验收矩阵仍待对应输入与设备；本轮只能宣称上述接入缺陷修复及本机回归通过。
+
+本轮产物保留 `E:/项目/Veyra/build/slider-reset-20260919` 可运行构建，`E:/项目/Veyra/{logs,tests,tmp}/xess-gameplay-20260919/` 诊断证据；无中间便携包或解压副本。
+
+## 以下为此前滑杆修复记录
 
 用户选择数值右侧固定还原图标。分支 `codex/slider-reset-20260919` 从字幕弹窗修复 `4bce05e` 创建，未合并、推送或发布。
 

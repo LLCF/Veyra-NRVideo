@@ -68,13 +68,13 @@ struct Graph {
     gfx::D3D12DeviceContext ctx;gfx::CommandSlotRing ring;
     pipeline::EnhanceGraph g{ctx,ring};
     bool up=false;
-    bool start(bool colorEnabled){
+    bool start(bool colorEnabled,bool rgb=true){
         gfx::DeviceContextDesc device;Status st;
         if(!ctx.initialize(device,st)||!ring.initialize(ctx.device(),ctx.directQueue(),ctx.fence(),ctx.fenceEvent(),4,st))return false;
         up=true;
         pipeline::EnhanceGraphDesc gd;
         gd.sourceWidth=gd.sourceHeight=gd.workWidth=gd.workHeight=kSize;
-        gd.rgbInput=true;gd.stillImage=true;gd.noFeatures=true;gd.enableNr=false;gd.enableSr=false;gd.enableFg=false;
+        gd.rgbInput=rgb;gd.stillImage=true;gd.noFeatures=true;gd.enableNr=false;gd.enableSr=false;gd.enableFg=false;
         gd.color.enabled=colorEnabled;
         return g.initialize(gd)&&g.createViews();
     }
@@ -112,12 +112,67 @@ struct Graph {
     ~Graph(){if(up){ring.drainQueue();g.shutdown();ring.shutdown();ctx.shutdown();}}
 };
 struct Pixel { int r=0,g=0,b=0; };
+// Test-only raw FP16 readback preserves exact comparison-reference values.
+bool readReference(Graph& graph,ID3D12Resource* texture,std::vector<uint8_t>& pixels){
+    if(!texture)return false;
+    const auto desc=texture->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};UINT64 bytes=0;
+    graph.ctx.device()->GetCopyableFootprints(&desc,0,1,0,&fp,nullptr,nullptr,&bytes);
+    D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_READBACK;
+    D3D12_RESOURCE_DESC buffer{};buffer.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;buffer.Width=bytes;
+    buffer.Height=1;buffer.DepthOrArraySize=1;buffer.MipLevels=1;buffer.SampleDesc.Count=1;buffer.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    Microsoft::WRL::ComPtr<ID3D12Resource> readback;
+    if(FAILED(graph.ctx.device()->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&buffer,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&readback))))return false;
+    Status status;uint32_t slot;auto* list=graph.ring.acquireNext(slot,status);if(!list)return false;
+    D3D12_RESOURCE_BARRIER barrier{};barrier.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition={texture,D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_SOURCE};
+    list->ResourceBarrier(1,&barrier);
+    D3D12_TEXTURE_COPY_LOCATION src{},dst{};src.pResource=texture;src.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dst.pResource=readback.Get();dst.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;dst.PlacedFootprint=fp;
+    list->CopyTextureRegion(&dst,0,0,0,&src,nullptr);
+    std::swap(barrier.Transition.StateBefore,barrier.Transition.StateAfter);list->ResourceBarrier(1,&barrier);
+    if(!graph.ring.submitAndSignal(slot)||!graph.ring.waitIdle())return false;
+    void* data=nullptr;D3D12_RANGE range{0,SIZE_T(bytes)};if(FAILED(readback->Map(0,&range,&data)))return false;
+    pixels.resize(size_t(desc.Width)*desc.Height*8);
+    for(unsigned y=0;y<desc.Height;++y)memcpy(pixels.data()+size_t(y)*desc.Width*8,static_cast<uint8_t*>(data)+fp.Offset+size_t(y)*fp.Footprint.RowPitch,size_t(desc.Width)*8);
+    D3D12_RANGE empty{};readback->Unmap(0,&empty);return true;
+}
 Pixel center(const sink::RgbaImage& image){
     const auto index=(std::size_t(kSize/2)*std::size_t(image.width)+std::size_t(kSize/2))*4;
     return {image.pixels[index],image.pixels[index+1],image.pixels[index+2]};
 }
 }
 int wmain(){
+    for(bool rgb:{true,false}){
+        Graph graph;Frame frame;
+        bool ok=graph.start(true,rgb);
+        if(rgb)ok=ok&&frame.make(100,120,140);
+        else{
+            frame.frame=av_frame_alloc();frame.frame->format=AV_PIX_FMT_NV12;frame.frame->width=frame.frame->height=kSize;
+            frame.frame->color_range=AVCOL_RANGE_MPEG;frame.frame->colorspace=AVCOL_SPC_BT709;frame.frame->color_trc=AVCOL_TRC_BT709;
+            ok=ok&&av_frame_get_buffer(frame.frame,32)>=0;
+            if(ok){for(int y=0;y<kSize;++y)memset(frame.frame->data[0]+y*frame.frame->linesize[0],100,kSize);
+                for(int y=0;y<kSize/2;++y)memset(frame.frame->data[1]+y*frame.frame->linesize[1],128,kSize);}
+        }
+        pipeline::EnhanceGraph::FrameOutputs out;
+        std::vector<uint8_t> baseline,original,base;
+        sink::RgbaImage graded,released;
+        ok=ok&&graph.g.process(frame.frame,0,true,out,1)&&readReference(graph,graph.g.sourceReference(out.videoSlot),baseline);
+        engine::EnhancementSettings settings;settings.color.enabled=true;settings.color.exposure=1.5f;
+        ok=ok&&graph.apply(settings);
+        for(uint64_t id=2;ok&&id<=5;++id){
+            out={};
+            ok=graph.g.process(frame.frame,double(id)*33,false,out,id)&&
+                readReference(graph,graph.g.sourceReference(out.videoSlot),original)&&
+                readReference(graph,graph.g.baseReference(out.videoSlot),base)&&
+                sink::readRgba8(graph.ctx,graph.ring,graph.g.videoFrameResource(out.videoSlot),graded);
+            ok=ok&&original==baseline&&base!=original;
+        }
+        out={};
+        ok=ok&&graph.g.process(frame.frame,200,false,out,6,nullptr,nullptr,false)&&
+            sink::readRgba8(graph.ctx,graph.ring,graph.g.videoFrameResource(out.videoSlot),released)&&released.pixels==graded.pixels;
+        check(ok,rgb?"RGB original excludes grade across both slots; base and released output retain grade":"NV12 original excludes grade across both slots; base and released output retain grade");
+    }
     // 1. Master switch off and enabled-neutral are both identity.
     {
         Graph off,on;

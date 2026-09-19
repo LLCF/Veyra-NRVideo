@@ -248,7 +248,7 @@ std::wstring screenshotPath;ULONGLONG screenshotTick=0;bool screenshotPending=fa
 #include "SeekPreview.h"
 void openFile(const std::wstring&);
 void layout();
-void updateComparison(){engine.comparison(holdOriginal?1:compareMode,referenceBase,compareSplit);}
+void updateComparison(){engine.comparison(holdOriginal?1:compareMode,holdOriginal?false:referenceBase,compareSplit);}
 void toggleFullscreen(){endTransition();full=!full;if(tooltips){SendMessageW(tooltips,TTM_POP,0,0);SendMessageW(tooltips,TTM_ACTIVATE,full?FALSE:TRUE,0);}DWORD corner=full?1:2;DwmSetWindowAttribute(mainWindow,33,&corner,sizeof(corner));fullControls=true;pointerTick=GetTickCount64();if(full){GetWindowPlacement(mainWindow,&windowPlacement);SetWindowLongPtrW(mainWindow,GWL_STYLE,WS_POPUP|WS_VISIBLE|WS_CLIPCHILDREN);MONITORINFO mi{sizeof(mi)};GetMonitorInfoW(MonitorFromWindow(mainWindow,MONITOR_DEFAULTTONEAREST),&mi);SetWindowPos(mainWindow,HWND_TOP,mi.rcMonitor.left,mi.rcMonitor.top,mi.rcMonitor.right-mi.rcMonitor.left,mi.rcMonitor.bottom-mi.rcMonitor.top,SWP_FRAMECHANGED);}else{SetWindowLongPtrW(mainWindow,GWL_STYLE,ShellStyle|WS_VISIBLE);MONITORINFO mi{sizeof(mi)};GetMonitorInfoW(MonitorFromRect(&windowPlacement.rcNormalPosition,MONITOR_DEFAULTTONEAREST),&mi);auto& r=windowPlacement.rcNormalPosition;if(r.right<mi.rcWork.left||r.left>mi.rcWork.right||r.bottom<mi.rcWork.top||r.top>mi.rcWork.bottom){OffsetRect(&r,mi.rcWork.left-r.left,mi.rcWork.top-r.top);}SetWindowPlacement(mainWindow,&windowPlacement);SetWindowPos(mainWindow,nullptr,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_FRAMECHANGED);}SetWindowTextW(GetDlgItem(mainWindow,Fullscreen),full?L"退出全屏":L"全屏 F11");SetCursor(LoadCursorW(nullptr,IDC_ARROW));layout();SetFocus(mainWindow);veyra::log::info("ui-fullscreen",std::format("enabled={} video-only viewport; transport auto-hides",full));}
 bool smokeProtection=false;int protectionStep=0;uint64_t protectionSession=0;bool protectionOverlayShown=false;
 bool protectionArmed=false,protectionDragging=false;POINT protectionStart{};std::pair<float,float> protectionSourceStart;HWND protectionOverlay=nullptr;
@@ -601,6 +601,16 @@ case WM_APP+44:{if(masterPendingRevision)return 0;auto setting=uiState.enhanced?
     const bool enablesMaster=enabled&&!uiState.enhanced;if(enablesMaster){masterPreviousEnabled=false;uiState.enhanced=true;}applySettings(setting);if(auto pending=engine.snapshot();enablesMaster&&pending.running){masterPendingRevision=pending.desired.revision;masterPendingSession=pending.sessionId;}veyra::log::info("ui-feature",std::format("click={} enabled={} requestedRevision={} draft-independent=true",wp==200?"NR":wp==201?"SR":wp==230?"VideoHDR":"FG",enabled,engine.snapshot().desired.revision));return 1;}
 case WM_APP+43:showDiagnostics=false;layout();return 0;
 case WM_APP+41:switch(wp){case 501:startVideoExport(lp!=0);break;case 502:{auto path=fileDialog(true);if(!path.empty())engine.saveFrame(path);break;}case 503:jobPaused=!jobPaused;exportJob.pause(jobPaused);break;case 504:exportJob.cancel();break;case 505:preferWatching=lp==BST_CHECKED;break;}return 0;
+case WM_ENTERSIZEMOVE:
+    endTransition();
+    SetPropW(video,L"Veyra.InteractiveMove",HANDLE(1));
+    veyra::log::info("ui-display","interactive move begin; retaining presentation buffers");
+    return 0;
+case WM_EXITSIZEMOVE:
+    RemovePropW(video,L"Veyra.InteractiveMove");
+    layout();
+    veyra::log::info("ui-display","interactive move end; presentation resize released");
+    return 0;
 case WM_SIZE:cancelProtection();if(wp!=SIZE_MINIMIZED){endTransition();layout();}return 0;
 case WM_DROPFILES:{std::vector<wchar_t> file(32768);DragQueryFileW(reinterpret_cast<HDROP>(wp),0,file.data(),32768);DragFinish(reinterpret_cast<HDROP>(wp));openFile(file.data());layout();return 0;}
 case WM_COMMAND:switch(LOWORD(wp)){
@@ -670,12 +680,16 @@ case WM_APP+90:
     [[fallthrough]];
 case WM_DPICHANGED:{
     endTransition();veyra::ui::cancelPopupSelector();
+    veyra::log::info("ui-display",std::format("DPI transition begin dpi={} synthetic={} moving={}",veyra::ui::layoutDpi(hwnd),msg!=WM_DPICHANGED,GetPropW(video,L"Veyra.InteractiveMove")!=nullptr));
+    SetPropW(video,L"Veyra.DpiTransition",HANDLE(1));
     if(msg==WM_DPICHANGED&&!full){auto rect=reinterpret_cast<RECT*>(lp);SetWindowPos(hwnd,nullptr,rect->left,rect->top,rect->right-rect->left,rect->bottom-rect->top,SWP_NOZORDER|SWP_NOACTIVATE);}
     auto oldFont=font;font=veyra::ui::makeFont(hwnd);
     EnumChildWindows(hwnd,[](HWND c,LPARAM f)->BOOL{SendMessageW(c,WM_SETFONT,WPARAM(f),FALSE);return TRUE;},LPARAM(font));
     DeleteObject(oldFont);DeleteObject(emptyFont);emptyFont=veyra::ui::makeFont(hwnd,26);
     SendDlgItemMessageW(hwnd,EmptyTitle,WM_SETFONT,WPARAM(emptyFont),FALSE);
-    veyra::ui::settingsDpi();veyra::ui::telemetryDpi();layout();return 0;}
+    veyra::ui::settingsDpi();veyra::ui::telemetryDpi();layout();
+    RemovePropW(video,L"Veyra.DpiTransition");
+    veyra::log::info("ui-display","DPI transition complete");return 0;}
 
 case WM_TIMER:
 #ifdef VEYRA_ENABLE_REMOTEPLAY

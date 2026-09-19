@@ -21,7 +21,9 @@ namespace veyra::gfx {
 // thunk, recognises the two call sites that present generated frames, and hands
 // the loop's frames to the provider's own scheduler with the arguments the
 // present already carries (burst, frame index, gate byte, ring snapshot).
-// Everything else is forwarded untouched.
+// If that scheduler is unavailable, the upstream bounded 15-period median
+// supplies wall-clock pacing, respecting the provider's tail-frame limiter.
+// Everything outside those generated-frame call sites is forwarded untouched.
 //
 // Provider identity and structure are verified before the thunk is touched; a
 // mismatch refuses the hook instead of guessing, and release() restores the
@@ -56,7 +58,7 @@ public:
         uint64_t scheduled = 0;           // frames handed to the provider scheduler
         uint64_t refused = 0;             // scheduler said no (its own gate)
         uint64_t forwarded = 0;           // presents left untouched
-        uint64_t bypassed = 0;            // frames skipped because the scheduler was off
+        uint64_t bypassed = 0;            // frames routed to the wall-clock fallback
         // Measured spacing between two consecutive scheduled frames.
         double meanGapMs = 0.0, minGapMs = 0.0, maxGapMs = 0.0;
         uint64_t gapSamples = 0;

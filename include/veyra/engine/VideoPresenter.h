@@ -7,6 +7,7 @@
 #include "veyra/gfx/ReflexSession.h"
 #include "veyra/engine/PresentationSettings.h"
 #include <chrono>
+#include <array>
 namespace veyra::gfx { class D3D12DeviceContext; class CommandSlotRing; }
 namespace veyra::pipeline { class EnhanceGraph; }
 namespace veyra::sink { struct RgbaImage; }
@@ -17,6 +18,9 @@ public:
     bool open(gfx::D3D12DeviceContext&, HWND, pipeline::EnhanceGraph&, bool captureCompatible=false);
     bool present(gfx::D3D12DeviceContext&,gfx::CommandSlotRing&,pipeline::EnhanceGraph&,unsigned slot,bool generated,bool referencesValid=true,int comparison=0,bool baseReference=false,float split=.5f,pipeline::FrameIdentity identity={},PreviewView view={});
     void close();
+    bool beginSourceInput();
+    bool beginSourceProcessing();
+    void sourceProcessed(pipeline::FrameIdentity);
     PresentationSettings configurePresentation(gfx::D3D12DeviceContext&,PresentationSettings,bool fg,std::wstring& status);
     bool presentationReady(){return sink_.presentationReady();}
     uint64_t beginReflex(){return reflex_.begin();}
@@ -66,6 +70,10 @@ private:
     diagnostics::GpuTimer gpuTimer_;
     gfx::PresentSink sink_;
     pipeline::GraphicsPass pass_;
+    pipeline::ComputePass presentMotionPass_;
+    std::array<Microsoft::WRL::ComPtr<ID3D12Resource>,2> presentMotion_;
+    PreviewView previousXessView_{};
+    unsigned previousXessWidth_=0,previousXessHeight_=0;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> rtvs_;
     unsigned inc_=0;
     unsigned lastBuffer_=0;bool hasPresented_=false;
@@ -80,6 +88,10 @@ private:
     bool xessWasEnabled_=false;
     bool xessFailed_=false;
     bool xessGenerationSuppressed_=false;
+    uint32_t xessInputId_=0;
+    struct XessWork {pipeline::FrameIdentity identity{};uint32_t id=0;};
+    std::array<XessWork,4> xessWork_{};
+    size_t xessWorkPosition_=0;
     std::chrono::steady_clock::time_point lastFsrFrame_{};
     pipeline::FrameIdentity lastFsrIdentity_{};
     bool fsrWasEnabled_=false;

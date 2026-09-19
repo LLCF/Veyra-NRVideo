@@ -5,6 +5,21 @@
 #include "veyra/gfx/CommandSlotRing.h"
 #include "veyra/sink/ImageExportSink.h"
 namespace veyra::engine {
+bool VideoPresenter::beginSourceInput(){
+    auto* xess=sink_.xess();if(!xess)return true;
+    // Waiting/filtered inputs keep the same preparation ID. Do not sleep again
+    // until one accepted source has been submitted to the enhancement graph.
+    if(!xessInputId_)xessInputId_=xess->beginInput();
+    return xessInputId_!=0;
+}
+bool VideoPresenter::beginSourceProcessing(){
+    auto* xess=sink_.xess();return !xess||(beginSourceInput()&&xess->beginProcessing(xessInputId_));
+}
+void VideoPresenter::sourceProcessed(pipeline::FrameIdentity identity){
+    if(!xessInputId_)return;
+    xessWork_[xessWorkPosition_]={identity,xessInputId_};
+    xessWorkPosition_=(xessWorkPosition_+1)%xessWork_.size();xessInputId_=0;
+}
 bool VideoPresenter::open(gfx::D3D12DeviceContext& ctx,HWND window,pipeline::EnhanceGraph& graph,bool captureCompatible) {
     close();
     viewWidth_=viewHeight_=0;bufferMonitor_=nullptr;monitorWidth_=monitorHeight_=0;
@@ -38,6 +53,18 @@ bool VideoPresenter::open(gfx::D3D12DeviceContext& ctx,HWND window,pipeline::Enh
     // SRV layout: 0..1 video frames, 2..11 generated frames (2 parities x 5
     // subframes, 6X), 12..15 comparison references.
     if(!pipeline::loadShaderBytes("PresentBlit_vs.dxil",vs)||!pipeline::loadShaderBytes("PresentBlit_ps.dxil",ps)||!pass_.create(ctx.device(),vs,ps,16,graph.outputFormat()))return false;
+    if(sink_.xess()){
+        std::vector<uint8_t> cs;
+        if(!pipeline::loadShaderBytes("PresentMotion.dxil",cs)||!presentMotionPass_.create(ctx.device(),cs,4,1,1,16))return false;
+        const auto heap=presentMotionPass_.heap->GetCPUDescriptorHandleForHeapStart();
+        for(unsigned i=0;i<2;++i){
+            presentMotion_[i]=pipeline::makeTexture(ctx.device(),graph.workWidth(),graph.workHeight(),DXGI_FORMAT_R16G16_FLOAT,true);
+            if(!presentMotion_[i])return false;
+            presentMotion_[i]->SetName(L"Veyra XeSS display motion");
+            pipeline::makeSrv(ctx.device(),graph.presentMotion(i),DXGI_FORMAT_R16G16_FLOAT,{heap.ptr+size_t(i*2)*presentMotionPass_.increment});
+            pipeline::makeUav(ctx.device(),presentMotion_[i].Get(),DXGI_FORMAT_R16G16_FLOAT,{heap.ptr+size_t(i*2+1)*presentMotionPass_.increment});
+        }
+    }
     D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;hd.NumDescriptors=3;
     if(FAILED(ctx.device()->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&rtvs_))))return false;
     inc_=ctx.device()->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);refresh(ctx.device());
@@ -71,7 +98,11 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
         targetWidth=std::max({targetWidth,sink_.width(),monitorWidth_});
         targetHeight=std::max({targetHeight,sink_.height(),monitorHeight_});
     }
-    if((targetWidth!=sink_.width()||targetHeight!=sink_.height())&&GetTickCount64()>=deferUntil&&now-lastResize_>=std::chrono::milliseconds(100)) {
+    // The UI keeps pumping messages during the native move loop. Retain and
+    // stretch current buffers there instead of repeatedly draining the GPU
+    // and rebuilding provider resources at monitor/DPI boundaries.
+    const bool windowChanging=GetPropW(window_,L"Veyra.InteractiveMove")||GetPropW(window_,L"Veyra.DpiTransition");
+    if(!windowChanging&&(targetWidth!=sink_.width()||targetHeight!=sink_.height())&&GetTickCount64()>=deferUntil&&now-lastResize_>=std::chrono::milliseconds(100)) {
         resized=true;
         if(!ring.drainQueue())return false;sink_.resize(targetWidth,targetHeight);
         // A capture hook may temporarily retain a DXGI buffer. Keep the old
@@ -80,7 +111,11 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
         refresh(ctx.device());lastResize_=now;xessWasEnabled_=false;
     }
     const auto resizeEnd=std::chrono::steady_clock::now();
-    if(sink_.xess()&&!sink_.xess()->beginFrame()){xessFailed_=true;return false;}
+    if(auto* xess=sink_.xess()){
+        uint32_t preparedId=0;
+        for(auto& work:xessWork_)if(work.id&&work.identity==identity){preparedId=work.id;work.id=0;break;}
+        if(!xess->beginFrame(preparedId)){xessFailed_=true;return false;}
+    }
     const auto beginEnd=std::chrono::steady_clock::now();
     if(presentationQueue_){
         const HRESULT hr=presentationQueue_->Wait(ctx.fence(),graph.presentationReadyFence(slot,generated));
@@ -128,35 +163,44 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
         if(GetEnvironmentVariableW(L"VEYRA_TEST_XESS_PRESENT_FAILURE",nullptr,0)>0){
             veyra::log::warn("backend-test","Injected XeSS tagging failure with recorded commands");xessFailed_=true;return false;
         }
-        const bool enabled=regionVisible&&!generated&&!comparison&&graph.presentMotionValid(slot)&&identity.sourceFrameId!=lastXessIdentity_.sourceFrameId&&!xessGenerationSuppressed_;
-        const bool reset=!xessWasEnabled_||identity.epoch!=lastXessIdentity_.epoch||identity.settingsRevision!=lastXessIdentity_.settingsRevision||graph.motionPreviousSource(slot)!=lastXessIdentity_.sourceFrameId;
-        const float elapsed=lastXessFrame_==std::chrono::steady_clock::time_point{}?0.0f:float(std::chrono::duration<double,std::milli>(now-lastXessFrame_).count());
+        // A history break is not a user disable: the graph supplies initialized
+        // zero motion in this case. Keep the current color in XeSS history so
+        // the next continuous frame can interpolate without another warmup.
+        const bool enabled=regionVisible&&!generated&&!comparison&&graph.presentMotion(slot)&&graph.presentDepth()&&identity.sourceFrameId!=lastXessIdentity_.sourceFrameId&&!xessGenerationSuppressed_;
+        const bool reset=!graph.presentMotionValid(slot)||!xessWasEnabled_||identity.epoch!=lastXessIdentity_.epoch||identity.settingsRevision!=lastXessIdentity_.settingsRevision||graph.motionPreviousSource(slot)!=lastXessIdentity_.sourceFrameId;
+        // Present-to-present time includes provider waits. Feeding it back as
+        // render time can lengthen the next burst. Intel documents zero as the
+        // supported value when an independent frame-time estimate is absent.
+        constexpr float elapsed=0.0f;
         auto* motion=graph.presentMotion(slot);
         auto* depth=graph.presentDepth();
         if(enabled){
-            // XeSS-FG ONLY_NOW records its input copies on this same command
-            // list. Keep the Veyra state contract explicit on both sides.
-            // Timed as the application-side frame-generation stage: the
-            // provider's internal interpolation cannot be timestamped, but the
-            // copies and barriers it makes us record can, and that is what the
-            // dashboard shows for present-sink FG backends.
+            // Stable full-buffer interpolation avoids provider letterbox
+            // reallocations. Guidance must follow the same displayed domain.
+            auto* mapped=presentMotion_[slot].Get();
+            pipeline::StateTracker states;
+            states.transition(list,motion,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            states.transition(list,mapped,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            const auto previous=reset?view:previousXessView_;
+            const float mapping[16]={float(graph.workWidth()),float(graph.workHeight()),float(rc.right),float(rc.bottom),
+                view.zoom,view.centerX,view.centerY,reset?1.0f:0.0f,
+                previous.zoom,previous.centerX,previous.centerY,0,
+                float(reset?rc.right:previousXessWidth_),float(reset?rc.bottom:previousXessHeight_),0,0};
+            const auto heap=presentMotionPass_.heap->GetGPUDescriptorHandleForHeapStart().ptr;
+            presentMotionPass_.bind(list,mapping,heap+size_t(slot*2)*presentMotionPass_.increment,heap+size_t(slot*2+1)*presentMotionPass_.increment);
+            list->Dispatch((graph.workWidth()+7)/8,(graph.workHeight()+7)/8,1);
+            states.transition(list,mapped,D3D12_RESOURCE_STATE_COMMON);
+            states.transition(list,motion,D3D12_RESOURCE_STATE_COMMON);
+            // No graph work or resource reuse may occur between tagging and
+            // Present. XeSS transitions from/to COMMON on this same queue.
+            // This timer covers application commands, not provider execution.
             gpuTimer_.mark(list,diagnostics::GpuStage::FgBatch);
-            ID3D12Resource* resources[]={bb,motion,depth};
-            D3D12_RESOURCE_BARRIER toCopy[3]{};
-            for(unsigned i=0;i<3;++i){
-                toCopy[i].Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-                toCopy[i].Transition.pResource=resources[i];
-                toCopy[i].Transition.Subresource=D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-                toCopy[i].Transition.StateBefore=D3D12_RESOURCE_STATE_COMMON;
-                toCopy[i].Transition.StateAfter=D3D12_RESOURCE_STATE_COPY_SOURCE;
-            }
-            list->ResourceBarrier(3,toCopy);
-            if(!xess->tag(list,bb,motion,depth,fgRect,true,reset,elapsed)){xessFailed_=true;return false;}
-            for(auto& barrier:toCopy)std::swap(barrier.Transition.StateBefore,barrier.Transition.StateAfter);
-            list->ResourceBarrier(3,toCopy);
+            const RECT fullBuffer{0,0,LONG(sink_.bufferWidth()),LONG(sink_.bufferHeight())};
+            if(!xess->tag(list,bb,mapped,depth,fullBuffer,true,reset,elapsed)){xessFailed_=true;return false;}
             gpuTimer_.mark(list,diagnostics::GpuStage::FgBatch,true);
         }else if(!xess->tag(list,bb,motion,depth,fgRect,false,reset,elapsed)){xessFailed_=true;return false;}
         lastXessFrame_=now;lastXessIdentity_=identity;xessWasEnabled_=enabled;
+        previousXessView_=view;previousXessWidth_=rc.right;previousXessHeight_=rc.bottom;
     }
     if(auto* fsr=sink_.fsr()){
         const bool enabled=regionVisible&&!generated&&!comparison&&graph.presentMotionValid(slot)&&identity.sourceFrameId!=lastFsrIdentity_.sourceFrameId;
@@ -199,9 +243,11 @@ bool VideoPresenter::readPresentedFrameForTest(gfx::D3D12DeviceContext& ctx,gfx:
     return SUCCEEDED(sink_.swapChain()->GetBuffer(lastBuffer_,IID_PPV_ARGS(&buffer)))&&sink::readRgba8(ctx,ring,buffer.Get(),image);
 }
 void VideoPresenter::close(){
+    xessInputId_=0;xessWork_={};xessWorkPosition_=0;
     reflex_.close();reflexFrame_=0;
     if(presentationRing_.initialized())presentationRing_.drainQueue();
     hasPresented_=false;gpuTimer_.close();rtvs_.Reset();pass_={};sink_.shutdown();
+    presentMotionPass_={};presentMotion_={};previousXessWidth_=previousXessHeight_=0;
     presentationRing_.shutdown();presentationFence_.Reset();presentationQueue_.Reset();
     if(presentationEvent_){CloseHandle(presentationEvent_);presentationEvent_=nullptr;}
 }
