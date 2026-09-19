@@ -6,6 +6,12 @@ with15ms holes; acceptance remains open. Fallback is not the requested fix.
 
 ## Next experiment: overlap enhancement and interpolation
 
+2026-09-20 result: producer-fence prerequisite saved as1b955b5. The explicit
+independent-queue feasibility run async6 failed performance acceptance
+(58.764 retained submissions/s,1629 expired generated frames). Its code was
+removed; serial processing remains. See WORKLOG for implementation boundaries
+and timings. Do not repeat this same queue split as an untested proposal.
+
 The retained trace attributes every >10ms gap to a rejected interpolation
 group. Test whether NR for input N+1 can overlap FG for input N, instead of
 assuming the current serial stage sum is an immutable hardware limit.

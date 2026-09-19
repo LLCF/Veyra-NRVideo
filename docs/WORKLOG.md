@@ -1,5 +1,33 @@
 # Veyra 工作记录
 
+## Independent FG queue experiment (rejected)
+
+After checkpoint1b955b5, tested an explicit file-preview-only independent
+DIRECT queue, twelve FG command slots, two parity motion snapshots, separate
+fence/event and timestamp ring, producer/consumer GPU waits and drain. The
+serial budget controller was bypassed only for this feasibility run, with
+fixed6X retained. No extra input jobs, NR/quality reduction or audio slowdown.
+Build async-build.log passed; async6 ran30s, watchdog95s, lifecycle exit0.
+Retained5.616s:58.764 submissions/s, P95/max18.417/20.034ms,1629 discarded
+subframes,329 real-only groups. NR sample rose to about11.5ms and FG batch
+to15.8ms versus serial6.8/10ms. This is evidence of contention/no benefit in
+this experiment, not proof every possible asynchronous architecture fails.
+The entire uncommitted queue experiment was removed with apply_patch;
+producer-fence checkpoint remains. No mixed-clock duration was used for
+admission. Scripts/build-isolated.ps1 and run-short-test.ps1 parameters match
+the preceding records; extra process env VEYRA_TEST_ASYNC_FG=1 applied only
+to async6. Evidence and JSON: tests/fg-cadence-repair-20260920/async6;
+build log: logs/fg-cadence-repair-20260920/async-build.log, all under E:/项目/Veyra.
+
+Reviewed SDK310.7 nvsdk_ngx_params_dlssg.h and defs_dlssg.h: sixfold output
+requires five indexed evaluations for the same pair. There is no documented
+one-call replacement in the inspected interface. Status output describes
+whether interpolation may be shown; do not remove validation to inflate FPS.
+Fixed6 cadence acceptance remains open. No package, publication or shutdown.
+Restored-code build async-revert-build.log passed (main, sustained, worker).
+CPU policy regression fence-cpu exited0. The available main executable is
+the verified serial producer-fence implementation, not the failed queue experiment.
+
 Queue identity final regression: fence-fixed2 (30s) retained119.99565/s,
 P95/max8.7444/9.009ms, no >10ms gaps or discarded generated frames;
 fence-xess4 (30s) final samples app60/SDK240, limited/skipped/expired0;
