@@ -61,14 +61,17 @@ public:
     int64_t processingAllowance(int64_t now,int64_t interval)const{
         return int64_t(std::min(double(std::max<int64_t>(0,interval)),baseCost(now).value_or(0)*10000));
     }
-    bool admit(int64_t now,int64_t deadline,double elapsed,double present,bool warmingHistory=false,double queuedMs=0){
+    bool canAdmit(int64_t now,int64_t deadline,double elapsed,double present,bool warmingHistory=false,double queuedMs=0)const{
         const auto cost=predicted(now,warmingHistory);
         // FG has not been submitted at admission. CPU time can at most cover
         // the base work; it must never erase the cost of future FG calls.
         const double queued=std::isfinite(queuedMs)?std::max(0.0,queuedMs):0.0;
         const double progress=std::clamp(elapsed,0.0,queued+baseCost(now).value_or(0));
         const bool fits=double(deadline-now)/10000+10>=std::max(0.0,queued+cost.value_or(0)-progress)+std::max(0.0,present);
-        return recordAdmission(fits);
+        return fits;
+    }
+    bool admit(int64_t now,int64_t deadline,double elapsed,double present,bool warmingHistory=false,double queuedMs=0){
+        return recordAdmission(canAdmit(now,deadline,elapsed,present,warmingHistory,queuedMs));
     }
     bool admitFile(int64_t now,int64_t firstDeadline,int64_t lastDeadline,int64_t outputInterval,
                    double elapsed,double present,std::optional<double> firstFgMs,bool warmingHistory,double queuedMs){

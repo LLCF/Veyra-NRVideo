@@ -1,5 +1,9 @@
 # Fixed-media DLSS cadence repair
 
+Continuation: affordable same-input reseeding removes a second lost group
+after budget rejection. Fixed6 now measures about280 submissions/s, still
+with15ms holes; acceptance remains open. Fallback is not the requested fix.
+
 Latest continuation: prefix admission, carried queue prediction and minimum
 file output spacing are now enabled normally; command allocator budget16,
 two-job capacity unchanged. Experimental admission/spacing flags removed.

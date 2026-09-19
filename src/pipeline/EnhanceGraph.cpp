@@ -1890,13 +1890,22 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
     const bool fgBackendAvailable=fgEnabled_&&(fgBackend_&&fgBackend_->created());
     const unsigned fgMultiplier=previewMultiplier&&fgBackendAvailable?std::clamp(previewMultiplier,2u,desc_.fgMultiplier):desc_.fgMultiplier;
     out.fgCandidates=fgBackendAvailable?fgMultiplier-1:0;
-    const bool resetFg=reset||!prevValid_||fgHistorySkipped_;
-    const bool runFg=fgBackendAvailable&&(!admitFg||admitFg(out.batch,resetFg));
+    bool resetFg=reset||!prevValid_||fgHistorySkipped_;
+    const auto decision=fgBackendAvailable?(admitFg?admitFg(out.batch,resetFg):FgDecision::Evaluate):FgDecision::Skip;
+    const bool runFg=decision!=FgDecision::Skip;
+    // An overloaded preview pair may afford one reset evaluation now. Seed
+    // on this real input so the following pair does not lose another group.
+    const bool reseedRejected=decision==FgDecision::Seed;
+    out.fgBudgetSeed=reseedRejected;
+    if(reseedRejected)resetFg=true;
     // A reset has no usable A/B pair. Seed one complete 2X evaluation group;
     // all later subframes would repeat reset work and cannot be presented.
     const uint32_t fgCalls=resetFg?1:fgMultiplier-1;
-    if(runFg&&resetFg)out.fgSkippedForReset=out.fgCandidates-fgCalls;
-    out.fgRecovery=runFg&&fgHistorySkipped_;
+    if(runFg&&resetFg){
+        if(reseedRejected)out.fgSkippedBeforeEval=out.fgCandidates-fgCalls;
+        else out.fgSkippedForReset=out.fgCandidates-fgCalls;
+    }
+    out.fgRecovery=runFg&&(fgHistorySkipped_||reseedRejected);
     if(fgBackendAvailable&&!runFg){out.fgSkippedBeforeEval=out.fgCandidates;fgHistorySkipped_=true;}
     if(!runFg)gpuTimer_.resolve(list);
     if (!ring_.submitAndSignal(slot)) return false;

@@ -82,6 +82,11 @@ int main(){
         check(!prefix.admitFile(10000000,10000000,10250000,27778,100,0,3,false,0),"CPU delay cannot erase future first interpolation work");
         prefix.complete(4,true,true,10000000);
         check(prefix.admitFile(10000000,9900000,10010000,27778,0,0,3,true,0),"history seed has no generated prefix to present");
+        check(!prefix.admit(10000000,9900000,0,0),"reject overload before seed budget check");
+        check(prefix.canAdmit(10000000,10010000,0,0,true),"cheap seed fits when complete group cannot");
+        check(!prefix.canAdmit(10000000,9900000,0,0,true),"expired seed deadline still rejects");
+        check(prefix.admit(10000000,10200000,0,0)&&prefix.recovering(),"first admitted group begins recovery");
+        check(prefix.canAdmit(10000000,10010000,0,0,true)&&prefix.recovering(),"seed affordability query cannot falsely complete recovery");
     }
     {
         veyra::engine::FgRecoveryBudget queued;

@@ -39,7 +39,7 @@ int wmain(int argc,wchar_t** argv){
         bool observedWarmup=false;
         auto admission=[&](const auto&,bool warmingHistory){
             observedWarmup=warmingHistory;
-            return engine::admitLiveFg(reject?2000000:900000,1000000,0,std::nullopt,0);
+            return engine::admitLiveFg(reject?2000000:900000,1000000,0,std::nullopt,0)?pipeline::EnhanceGraph::FgDecision::Evaluate:pipeline::EnhanceGraph::FgDecision::Skip;
         };
         ok=graph.process(frame,packet.pts.toDouble()*1000,i==0||i==20,out,packet.sequence,&packet.colorInfo,nullptr,false,admission);
         ok=ok&&(observedWarmup==(i==0||i==9||i==10||i==11||i==12||i==20||i==25||i==26||i==27||i==28));
@@ -109,6 +109,34 @@ int wmain(int argc,wchar_t** argv){
             ok=ok&&nonblack>image.width*image.height/20;
         }
         std::cout<<"ADAPT requested="<<requested<<" effective="<<effective<<" pass="<<ok<<std::endl;
+    }
+    // Budget seeding must prime the current real input, publish no reset
+    // interpolation, then resume on the very next adjacent input pair.
+    for(unsigned i=0;ok&&i<9;++i){
+        using Decision=pipeline::EnhanceGraph::FgDecision;
+        const auto decision=(i==0||i==2||i==7)?Decision::Seed:i==4?Decision::Skip:Decision::Evaluate;
+        pipeline::FramePacket packet;const AVFrame* frame=nullptr;
+        ok=source.read(packet,&frame)==source::SourceReadStatus::Frame;
+        pipeline::EnhanceGraph::FrameOutputs output;
+        unsigned calls=0;
+        auto admission=[&](const auto&,bool){++calls;return decision;};
+        ok=ok&&graph.process(frame,packet.pts.toDouble()*1000,i==7,output,packet.sequence,&packet.colorInfo,nullptr,false,admission);
+        const auto start=std::chrono::steady_clock::now();
+        while(ok&&!graph.resolveGeneration(output)){
+            if(std::chrono::steady_clock::now()-start>std::chrono::seconds(2)){ok=false;break;}wait.slice(.2);
+        }
+        const bool seed=decision==Decision::Seed||i==5;
+        ok=ok&&calls==1&&output.fgBudgetSeed==(decision==Decision::Seed)&&output.fgCandidates==output.fgEvaluated+output.fgSkippedBeforeEval+output.fgSkippedForReset;
+        if(seed)ok=ok&&output.fgEvaluated==1&&!output.hasGenerated&&output.batch.count==1&&output.fgRecovery;
+        else if(decision==Decision::Skip)ok=ok&&!output.fgEvaluated&&output.batch.count==1;
+        else ok=ok&&output.hasGenerated&&output.batch.count==multiplier&&output.fgEvaluated==multiplier-1;
+        if(decision==Decision::Seed)ok=ok&&output.fgSkippedBeforeEval==multiplier-2&&output.fgSkippedForReset==0;
+        for(unsigned j=0;ok&&j<output.batch.count;++j){
+            const auto& f=output.batch.frames[j];
+            if(f.kind==pipeline::FrameKind::Generated)ok=f.validity==pipeline::GenerationValidity::Valid&&f.pts100ns==pipeline::FrameBatch::interpolate(output.batch.a100ns,output.batch.b100ns,j+1,multiplier);
+            else ok=f.pts100ns==packet.pts.to100ns();
+        }
+        std::cout<<"SEED frame="<<i<<" decision="<<unsigned(decision)<<" batch="<<output.batch.count<<" pass="<<ok<<std::endl;
     }
     ring.drainQueue();graph.shutdown();source.close();
     unsigned errors=0;if(info)for(UINT64 i=0;i<info->GetNumStoredMessagesAllowedByRetrievalFilter();++i){SIZE_T size=0;info->GetMessage(i,nullptr,&size);std::vector<uint8_t> data(size);auto* m=reinterpret_cast<D3D12_MESSAGE*>(data.data());if(SUCCEEDED(info->GetMessage(i,m,&size))&&m->Severity<=D3D12_MESSAGE_SEVERITY_ERROR){++errors;log::error("debug",m->pDescription);}}

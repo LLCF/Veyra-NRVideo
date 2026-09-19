@@ -1,5 +1,36 @@
 # FG cadence: partial acceptance, fixed 6X still open
 
+## Latest continuation: seed on rejected input
+
+Rejected full groups may now perform one affordable reset evaluation on the
+same real input. The next adjacent input can generate immediately, avoiding
+an additional real-only warmup group. The admission callback returns an
+explicit Skip/Evaluate/Seed decision exactly once. Seed affordability does
+not advance budget recovery, and seed-only output remains budget-limited.
+
+Current sequential RTX5070 runs, same media/settings as below:
+
+| Run | Duration | Retained seconds | Submit FPS | P95 / max gap ms |
+| --- | ---: | ---: | ---: | ---: |
+| reseed-default6, NR on fixed 6X | 45s | 5.483 | 279.593 | 15.105 / 16.747 |
+| reseed-default2, NR on 2X | 30s | 9.742 | 119.998 | 8.782 / 9.039 |
+
+The fixed6 retained window contains 240 full groups and 88 seed-only groups;
+rejection and warmup counters refer to the same 88 inputs, not 176 inputs.
+It has one sub-ms gap, one gap over 16.667ms and no generated discards.
+This is an improvement, **not fixed6 uniform-cadence acceptance**. No physical
+scanout or screen latency measurement. Prior rollback is ec0f57d.
+
+CPU suite: 126 PASS. reseed-content2/content6 validate reset, seed, true skip,
+single callback, dynamic multipliers, PTS and accounting, with zero D3D12
+errors. reseed-lifecycle passes pause/seek/resume/mode changes/resize/stop.
+reseed-smoke passes main startup and exit. reseed-xess2 runs 30s, app60/s,
+SDK120/s in final samples, no admission skips or expirations; not scanout.
+All targets built in reseed-metrics-build.log. Evidence under
+E:/项目/Veyra/{tests,logs}/fg-cadence-repair-20260920.
+The temporary double-callback experiment switch was removed before these
+final runs. The historical results below describe the prior checkpoint.
+
 ## Scope and result
 
 Branch: `codex/fg-cadence-audit-20260920`. RTX5070, user p001.mp4,

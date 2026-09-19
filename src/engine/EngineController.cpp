@@ -1099,7 +1099,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                         const double elapsed=elapsedMs(processStart);
                         const bool admitted=fgBudget.admit(now,deadline,elapsed,presentP95,warmingHistory);
                         logAdmission(batch,now,deadline,elapsed,presentP95,admitted,warmingHistory,pairAnchoredLive?(isRemote?"decoded-pair":"capture-pair"):"continuous");
-                        return admitted;
+                        return admitted?pipeline::EnhanceGraph::FgDecision::Evaluate:pipeline::EnhanceGraph::FgDecision::Skip;
                     };
                 }
                 // File playback checks both the first output and whole-group
@@ -1119,7 +1119,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                         queuedGpuMs=double(std::max<int64_t>(0,finish-start))/10000;
                     }
                     admitFg=[&,historyReset,queuedGpuMs](const pipeline::FrameBatch& batch,bool warmingHistory){
-                        if(fileAwaitingVideo)return true; // Bounded startup lookahead; audio has not started.
+                        if(fileAwaitingVideo)return pipeline::EnhanceGraph::FgDecision::Evaluate; // Bounded startup lookahead; audio has not started.
                         const auto interval=liveSourceInterval100ns(pkt.duration,activeSource->info().averageFps);
                         const auto a=(historyReset||batch.b100ns<=batch.a100ns||batch.b100ns-batch.a100ns>10000000)?batch.b100ns-interval:batch.a100ns;
                         const auto lastGenerated=pipeline::FrameBatch::interpolate(a,batch.b100ns,previewFgMultiplier-1,previewFgMultiplier);
@@ -1131,7 +1131,10 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                         const auto elapsed=elapsedMs(processStart),blit=livePresentGpu.p95();
                         const auto admitted=fgBudget.admitFile(now,firstDeadline,deadline,interval/previewFgMultiplier,elapsed,blit,first,warmingHistory,queuedGpuMs);
                         logAdmission(batch,now,deadline,elapsed,blit,admitted,warmingHistory,"file-audio",firstDeadline,queuedGpuMs);
-                        return admitted;
+                        if(admitted)return pipeline::EnhanceGraph::FgDecision::Evaluate;
+                        if(!warmingHistory&&fgBudget.canAdmit(now,deadline,elapsed,blit,true,queuedGpuMs))
+                            return pipeline::EnhanceGraph::FgDecision::Seed;
+                        return pipeline::EnhanceGraph::FgDecision::Skip;
                     };
                 }
                 uint64_t processWaitBase=0,processSubmitBase=0;double processWaitMsBase=0,processSlotWaitMs=0;
@@ -1237,7 +1240,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 frameFlow->update([&](auto& m){m.lastSubmit100ns=host100ns();});
                 frameFlow->cpu(diagnostics::CpuStage::Submit,processMs,host100ns());
                 frameFlow->cpu(diagnostics::CpuStage::SlotWait,processSlotWaitMs,host100ns());
-                frameFlow->update([&](auto& m){m.latest.frame=out.batch.identity;m.latest.batchId=out.batch.batchId;m.latest.readyFence=std::max(out.videoFenceValue,out.genFenceValue);m.counters.sourceAccepted+=!rereadCached;++m.counters.realSubmitted;m.counters.previewSkippedBeforeGraph+=previewSkippedSinceSubmit;m.counters.fgCandidate+=out.fgCandidates;m.counters.fgEvaluated+=out.fgEvaluated;m.counters.fgSkippedForReset+=out.fgSkippedForReset;m.counters.fgSkippedBeforeEval+=out.fgSkippedBeforeEval;if(out.fgSkippedBeforeEval)m.lastFgRejected100ns=host100ns();if(!out.hasGenerated)m.counters.fgWarmup+=out.fgEvaluated;});
+                frameFlow->update([&](auto& m){m.latest.frame=out.batch.identity;m.latest.batchId=out.batch.batchId;m.latest.readyFence=std::max(out.videoFenceValue,out.genFenceValue);m.counters.sourceAccepted+=!rereadCached;++m.counters.realSubmitted;m.counters.previewSkippedBeforeGraph+=previewSkippedSinceSubmit;m.counters.fgCandidate+=out.fgCandidates;m.counters.fgEvaluated+=out.fgEvaluated;m.counters.fgSkippedForReset+=out.fgSkippedForReset;m.counters.fgSkippedBeforeEval+=out.fgSkippedBeforeEval;if(out.fgSkippedBeforeEval||out.fgBudgetSeed)m.lastFgRejected100ns=host100ns();if(!out.hasGenerated)m.counters.fgWarmup+=out.fgEvaluated;});
                 previewSkippedSinceSubmit=0;
                 if(transaction||frames==0){
                     std::lock_guard lock(mutex_);snapshot_.captureHalfRate=halfRate;

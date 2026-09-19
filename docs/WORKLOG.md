@@ -1,5 +1,28 @@
 # Veyra 工作记录
 
+## 2026-09-20 Affordable same-input FG seed
+
+Full-group rejection previously forced another real-only warmup on the next
+input. Introduced explicit single-call Skip/Evaluate/Seed admission; an
+affordable reset seeds the rejected input without publishing interpolation.
+GPU candidate accounting and budget-limited reporting remain honest.
+Build command: scripts/build-isolated.ps1, reused build/slider-reset-20260919,
+targets veyra_fg_sustained_tests, veyra_fg_admission_tests,
+veyra_presentation_worker_tests, veyra_presentation_pacing_tests, veyra.
+Build log: E:/项目/Veyra/logs/fg-cadence-repair-20260920/reseed-metrics-build.log.
+run-short-test.ps1 runs: reseed-default6 (45s, fixed6 NR on), reseed-default2
+(30s, >=95% throughput), reseed-content2/content6, reseed-xess2 (30s),
+reseed-lifecycle and reseed-smoke (--smoke-empty --smoke-seconds 5). All exit0.
+CPU reseed-cpu.log:126 PASS. Integration debugErrors0. Trace analysis via
+scripts/acceptance/analyze-fg-cadence.py: fixed6 retained5.483s,279.593/s,
+P95/max15.105/16.747ms; 2X retained9.742s,119.998/s,P95/max8.782/9.039ms.
+XeSS final app60 SDK120/s, no rejection/expiration. These are software
+measurements, not scanout. Outputs E:/项目/Veyra/tests/fg-cadence-repair-20260920;
+temporary environment E:/项目/Veyra/tmp/fg-cadence-repair-20260920.
+No new runtime, package or publication. Fixed6 uniform cadence still fails.
+Two documentation patches failed context validation without changing files;
+corrected patch applied. Prior known checkpoint ec0f57d remains available.
+
 ## 2026-09-20 存档与 DLSS 高读数低流畅度调查
 
 按用户要求先提交已有修复与验收文档为 `b2c3d0e`，标签 `checkpoint/pre-fg-cadence-audit-20260920`，创建 `codex/fg-cadence-audit-20260920`。本轮只改持续测试的停机后内存 trace 导出、新增分析脚本及文档，未改变产品调度。完整命令、设置、统计与下一步修复门槛见 `docs/FG_CADENCE_AUDIT_2026-09-20.md`。
