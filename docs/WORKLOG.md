@@ -1,5 +1,17 @@
 # Veyra 工作记录
 
+## 2026-09-19 字幕按钮弹窗立即关闭修复
+
+分支 `codex/subtitle-popup-20260919`，基线 `fd67b58`。`Theme.h` 的按钮鼠标消息曾在 `WM_SETREDRAW(FALSE)` 内调用原生按钮过程；`WM_LBUTTONUP` 同步发出 `BN_CLICKED` 并进入字幕菜单消息循环。此时按钮的 `WS_VISIBLE` 被临时移除，菜单 100ms 的锚点检查关闭弹窗。旧代码真实复现：菜单打开约 100ms 后 selection=-1，新增测试报告按钮在通知期间不可见。
+
+修复 `apps/veyra/ui/Theme.h`：鼠标按下/抬起不再包裹 redraw suppression；按压状态的 `BM_SETSTATE` 与其他视觉状态仍走缓冲重绘。不放宽弹窗对隐藏/禁用/销毁锚点的关闭检查。`tests/integration/PopupSelectorTests.cpp` 新增真实主题按钮鼠标消息、BM_CLICK、空格键三条同步通知路径，菜单等待至少 300ms 后选择第二项，并检查可见性与弹窗状态回收。
+
+实际构建：`scripts/build-isolated.ps1 -Root . -BuildDirectory E:/项目/Veyra/build/subtitle-popup-20260919 -DependencyCache E:/项目/Veyra/build/frame-pacing-20260918/CMakeCache.txt -TempDirectory E:/项目/Veyra/tmp/subtitle-popup-20260919 -DisplayVersion 1.4.2 -Targets veyra_popup_selector_tests,veyra`，exit0；最终测试源码重编译 exit0。日志目录 `E:/项目/Veyra/logs/subtitle-popup-20260919/`，含 build.log、final-build.log。所有新产物在 E 盘对应 build/logs/tmp 下，无新 SDK 或运行库进入 Git。
+
+验证：`scripts/run-short-test.ps1 -Exe E:/项目/Veyra/build/subtitle-popup-20260919/veyra_popup_selector_tests.exe -Arguments --test -TimeoutSeconds 30 -LogPrefix E:/项目/Veyra/logs/subtitle-popup-20260919/final`，exit0，case0-17全部通过，含原有悬停、取消、Tab、隐藏、禁用、销毁测试。before日志为旧版失败证据；after/fixed两次误用了未重编译的测试二进制，仍失败，不算修复验证；修改测试源强制重编后 trace/final 均通过。未扩大改动到构建依赖跟踪。
+
+应用短测：同一 runner 运行新 `veyra.exe --smoke-empty --smoke-seconds 5`，30秒限时，exit0。PATH 临时加入现有 1.4.2 便携目录以提供运行依赖，VEYRA_LOG_FILE 指向同目录 app-smoke.log；TEMP/TMP仅对子进程设置到本轮 tmp。新版应用完成全量构建，未沿用旧 AppShell 对象。本轮未执行 NGX Create/Evaluate、媒体字幕渲染或人工整机交互验收；改动仅为 UI 按钮事件生命周期。没有推送或替换 GitHub Release。交付为 build/subtitle-popup-20260919/veyra.exe，可放入已有 1.4.2 完整便携目录替换主程序。
+
 ## 2026-09-19 1.4.2 正式发布验收
 
 发布完成：https://github.com/Likely7/Veyra-NRVideo/releases/tag/v1.4.2 。main与标签发布提交274d826；本条为发布后文档记录，不改变标签源码或可执行文件。四资产均uploaded，GitHub digest/大小与本地一致：便携472315996字节，SHA256 6C425177854DECD1FC4ED0D5BBECEFECE114AD28B72C638D7A5786CFC3210890；对应源码214922039字节，SHA256 71B3B8C8A21A577D1B1802DB6BDFCA3377B3AE513560F8F7DCF23BE1E4BD0467；另附两个.sha256。源码ZIP824文件回读验证。Release由草稿转为正式并设置latest。README与Release新群图、赞助图各220宽，三张远端图片HTTP200且PNG/JPEG文件头正确。新群码图示有效期至9月26日。便携包120文件manifest校验通过，12项运行组件保留身份和许可记录，未混入SDK/模型/用户配置/测试媒体。当前可用构建、最终交付包及验收证据均在E:/项目/Veyra/；旧测试中间副本此前清理被自动审批拒绝，本轮未绕过重删。

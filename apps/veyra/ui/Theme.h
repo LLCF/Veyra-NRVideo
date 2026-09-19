@@ -92,7 +92,10 @@ inline LRESULT CALLBACK buttonPaint(HWND h,UINT m,WPARAM w,LPARAM l,UINT_PTR,DWO
         if(ico!=Icon::None){drawIcon(dc,ico,caption?float(dip(h,18)):r.right/2.f,r.bottom/2.f,float(dip(h,ico==Icon::Play||ico==Icon::Pause?22:17)),ink);if(caption){r.left=dip(h,34);glassText(dc,value,-1,&r,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);}}
         else if((GetWindowLongPtrW(h,GWL_STYLE)&BS_TYPEMASK)==BS_AUTOCHECKBOX){RECT toggle{r.right-dip(h,40),r.bottom/2-dip(h,8),r.right-dip(h,10),r.bottom/2+dip(h,8)};roundRect(dc,toggle,check?accent:line,dip(h,8));RECT knob{toggle.left+dip(h,check?16:3),toggle.top+dip(h,3),toggle.left+dip(h,check?26:13),toggle.top+dip(h,13)};roundRect(dc,knob,check?panel:secondary,dip(h,5));r.left=dip(h,12);r.right-=dip(h,46);glassText(dc,value,-1,&r,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);}else glassText(dc,value,-1,&r,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
         if(GetFocus()==h&&!(SendMessageW(h,WM_QUERYUISTATE,0,0)&UISF_HIDEFOCUS)){RECT outline{};GetClientRect(h,&outline);InflateRect(&outline,-3,-3);AlphaGraphics focusDrawing(dc);auto& focus=focusDrawing.get();focus.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);Gdiplus::GraphicsPath path;rounded(path,{float(outline.left),float(outline.top),float(outline.right-outline.left),float(outline.bottom-outline.top)},float(dip(h,6)));Gdiplus::Pen stroke(color(accent,145),1);focus.DrawPath(&stroke,&path);}SelectObject(dc,old);return 0;}
-    if(controlVisualChange(m)||m==BM_SETCHECK||m==BM_SETSTATE||m==BM_SETSTYLE||m==WM_MOUSEMOVE||m==WM_MOUSELEAVE||m==WM_LBUTTONDOWN||m==WM_LBUTTONUP)return updateControlModel(h,m,w,l);
+    // Click dispatch can enter a modal popup through BN_CLICKED. WM_SETREDRAW
+    // removes WS_VISIBLE, so never hold suppression across input dispatch.
+    // Native pressed-state changes still use the buffered BM_SETSTATE path.
+    if(controlVisualChange(m)||m==BM_SETCHECK||m==BM_SETSTATE||m==BM_SETSTYLE||m==WM_MOUSEMOVE||m==WM_MOUSELEAVE)return updateControlModel(h,m,w,l);
     return DefSubclassProc(h,m,w,l);
 }
 }

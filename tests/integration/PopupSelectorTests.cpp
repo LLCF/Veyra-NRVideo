@@ -3,12 +3,21 @@
 #include <stdexcept>
 namespace {
 HWND owner=nullptr,combo=nullptr,next=nullptr,previous=nullptr;int action=0,steps=0;std::vector<int> notifications;
+int buttonChoice=-1;bool anchorVisible=false;ULONGLONG openedAt=0;
 void require(bool condition,const char* reason){if(!condition)throw std::runtime_error(reason);}
 LRESULT CALLBACK proc(HWND h,UINT m,WPARAM w,LPARAM l){
+    if(m==WM_COMMAND&&LOWORD(w)==11&&HIWORD(w)==BN_CLICKED&&action>=15){
+        anchorVisible=IsWindowVisible(next)!=FALSE;openedAt=GetTickCount64();
+        buttonChoice=veyra::ui::popupSelector(next,{{1,L"Subtitles"},{2,L"Audio"}},0);
+        return 0;
+    }
     if(m==WM_COMMAND&&LOWORD(w)==10){notifications.push_back(HIWORD(w));if(action==8&&HIWORD(w)==CBN_DROPDOWN)SendMessageW(combo,CB_SHOWDROPDOWN,FALSE,0);if(action==11&&HIWORD(w)==CBN_SELENDOK)DestroyWindow(combo);if(action==12&&HIWORD(w)==CBN_DROPDOWN)DestroyWindow(owner);return 0;}
     if(m==WM_TIMER){using namespace veyra::ui;if(!activeSelector)return 0;auto list=GetDlgItem(activeSelector,1);++steps;
         if(steps>10){cancelPopupSelector();return 0;}
         switch(action){
+        case 15:case 16:case 17:
+            if(GetTickCount64()-openedAt>=300){SendMessageW(list,WM_KEYDOWN,VK_DOWN,0);SendMessageW(list,WM_KEYDOWN,VK_RETURN,0);}else --steps;
+            break;
         case 0:SendMessageW(list,WM_KEYDOWN,VK_DOWN,0);SendMessageW(list,WM_KEYDOWN,VK_RETURN,0);break;
         case 1:SendMessageW(list,WM_KEYDOWN,VK_DOWN,0);SendMessageW(list,WM_KEYDOWN,VK_ESCAPE,0);break;
         case 2:SendMessageW(combo,CB_SHOWDROPDOWN,FALSE,0);break;
@@ -30,14 +39,22 @@ bool notified(int code){return std::find(notifications.begin(),notifications.end
 int wmain(){ULONG_PTR gdiplus=0;Gdiplus::GdiplusStartupInput input;Gdiplus::GdiplusStartup(&gdiplus,&input,nullptr);int result=0;
 try{
     INITCOMMONCONTROLSEX common{sizeof(common),ICC_STANDARD_CLASSES};InitCommonControlsEx(&common);WNDCLASSW wc{};wc.lpfnWndProc=proc;wc.lpszClassName=L"VeyraSelectorContract";wc.hInstance=GetModuleHandleW(nullptr);RegisterClassW(&wc);
-    for(action=0;action<=14;++action){
+    for(action=0;action<=17;++action){
         owner=CreateWindowExW(WS_EX_CONTROLPARENT,wc.lpszClassName,L"Veyra popup interaction test",WS_OVERLAPPEDWINDOW,20,20,480,320,nullptr,nullptr,wc.hInstance,nullptr);
         previous=CreateWindowExW(0,L"BUTTON",L"previous",WS_CHILD|WS_VISIBLE|WS_TABSTOP,20,5,100,24,owner,HMENU(9),wc.hInstance,nullptr);
         combo=CreateWindowExW(0,L"COMBOBOX",L"choices",WS_CHILD|WS_VISIBLE|WS_TABSTOP|CBS_DROPDOWNLIST,20,40,300,200,owner,HMENU(10),wc.hInstance,nullptr);veyra::ui::themeControl(combo);
         next=CreateWindowExW(0,L"BUTTON",L"next",WS_CHILD|WS_VISIBLE|WS_TABSTOP,20,100,100,32,owner,HMENU(11),wc.hInstance,nullptr);
+        veyra::ui::themeControl(next);
         // First ShowWindow consumes the runner's STARTUPINFO SW_HIDE.
         ShowWindow(owner,SW_HIDE);ShowWindow(owner,SW_SHOW);SetForegroundWindow(owner);SetActiveWindow(owner);
         for(int i=0;i<33;++i){auto label=L"Option "+std::to_wstring(i);SendMessageW(combo,CB_ADDSTRING,0,LPARAM(label.c_str()));}SendMessageW(combo,CB_SETCURSEL,4,0);SetFocus(combo);notifications.clear();steps=0;SetTimer(owner,1,20,nullptr);
+        if(action>=15){
+            buttonChoice=-1;anchorVisible=false;SetFocus(next);
+            if(action==15){SendMessageW(next,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(10,10));SendMessageW(next,WM_LBUTTONUP,0,MAKELPARAM(10,10));}
+            else if(action==16)SendMessageW(next,BM_CLICK,0,0);
+            else{SendMessageW(next,WM_KEYDOWN,VK_SPACE,0);SendMessageW(next,WM_KEYUP,VK_SPACE,0);}
+            KillTimer(owner,1);require(anchorVisible,"button must stay visible during synchronous click notification");require(buttonChoice==1,"button popup survives anchor timer and commits after 300ms");require(!veyra::ui::popupSelectorOpen()&&!veyra::ui::activeSelector,"button popup cleans up");require(IsWindowVisible(next)&&!GetPropW(next,L"SysSetRedraw"),"button redraw restored");DestroyWindow(owner);std::cout<<"PASS popup button case "<<action<<"\n";continue;
+        }
         SendMessageW(combo,CB_SHOWDROPDOWN,TRUE,0);if(IsWindow(owner))KillTimer(owner,1);require(action==8||action==12?steps==0:steps>0&&steps<=10,"bounded popup closed including synchronous cancellation");require(!veyra::ui::popupSelectorOpen()&&!veyra::ui::activeSelector,"popup releases all active state");
         if(action>=9&&action<=12){require(!IsWindow(combo),"destroyed combo stays destroyed");if(action==10||action==12)require(!IsWindow(owner),"destroyed owner stays destroyed");if(IsWindow(owner))DestroyWindow(owner);std::cout<<"PASS popup case "<<action<<"\n";continue;}
         require(!SendMessageW(combo,CB_GETDROPPEDSTATE,0,0),"collapse reports closed");require(notified(CBN_DROPDOWN)&&notified(CBN_CLOSEUP),"native dropdown lifecycle notifications");
