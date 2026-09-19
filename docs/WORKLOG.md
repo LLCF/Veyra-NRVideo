@@ -1,5 +1,11 @@
 # Veyra 工作记录
 
+## 2026-09-20 存档与 DLSS 高读数低流畅度调查
+
+按用户要求先提交已有修复与验收文档为 `b2c3d0e`，标签 `checkpoint/pre-fg-cadence-audit-20260920`，创建 `codex/fg-cadence-audit-20260920`。本轮只改持续测试的停机后内存 trace 导出、新增分析脚本及文档，未改变产品调度。完整命令、设置、统计与下一步修复门槛见 `docs/FG_CADENCE_AUDIT_2026-09-20.md`。
+
+测试程序构建成功，同参数 verbose/memory 各45秒均退出0；内存复核约194提交/s，P95间隔16.704ms，114次拒绝后紧跟预热，确认非逐帧磁盘日志独有现象。PresentMon ETW启动被拒绝（exit1），未获得扫描输出证据。产物 `E:/项目/Veyra/tests/fg-cadence-audit-20260920/`；构建日志 `E:/项目/Veyra/logs/fg-cadence-audit-build-20260920.log`，沿用 E盘 dlss-recovery tmp目录。分析脚本两种模式均已实际运行。未打包、推送或发布，未宣称稳定6X或屏幕流畅度验收。
+
 ## 2026-09-20 用户关闭程序后的同参数实卡对照
 
 用户要求直接测试刚才参数。按原日志 revision18 使用 `capture:0:14:0:0`、1440p60 NV12、NR 实时1080、DLSS SR 到4K、NVOF Performance、DLSS6X、1795x816、帧同步/VSync/HDR关闭；没有误用最终效果全关配置。完整命令、哈希、计数及边界见 `docs/DLSS_RECOVERY_REPAIR_2026-09-20.md` 新增实卡章节。

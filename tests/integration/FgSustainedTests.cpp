@@ -3,6 +3,7 @@
 #include "veyra/Log.h"
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <thread>
 
@@ -87,6 +88,9 @@ int wmain(int argc,wchar_t** argv){
         while(!engine.idle()&&Clock::now()-stopping<std::chrono::seconds(15))std::this_thread::sleep_for(std::chrono::milliseconds(10));
         ok=ok&&engine.idle();
     }
+    // Dump the bounded existing trace after stopping, without per-frame disk I/O.
+    std::ofstream(std::filesystem::path(argv[2])/L"frame-trace.txt")
+        <<veyra::Logger::instance().diagnosticReport();
     DestroyWindow(window);CoUninitialize();
     std::cout<<"Submission rates are not scanout rates. Lifecycle recovery does not assert target throughput or image quality.\n";
     return ok?0:1;
