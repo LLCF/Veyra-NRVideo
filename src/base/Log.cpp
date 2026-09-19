@@ -170,7 +170,9 @@ std::string Logger::diagnosticReport(){std::ostringstream o;o<<"Veyra 本地诊�
     o<<"\nFrame trace: records="<<trace.size()<<" capacity="<<diagnostics::FrameTrace::capacity<<" overwritten="<<overwritten
      <<"\nHost timestamps are monotonic 100ns; Ready is observed GPU completion, Present is submission, not scanout."
      <<"\nDetail: Submitted=skipped FG count, Ready=invalid FG count, Present=subframe, Gpu=stage index, Reset=reason enum."
-     <<" Count: Submitted=FG evaluated, Ready=valid FG, Present=1, Reset=outcome enum, Cancelled=unpresented frames.\n";
+     <<" Count: Submitted=FG evaluated, Ready=valid FG, Present=1, Reset=outcome enum, Cancelled=unpresented frames."
+     <<" FrameReady: detail=subframe, ms=CPU-observed readiness since processing start (upper bound)."
+     <<" Discarded: detail=subframe, count=PreviewFrameReadiness enum, ms=deadline lateness.\n";
     for(const auto& e:trace)o<<"event="<<diagnostics::traceKindName(e.kind)<<" host="<<e.host100ns<<" session="<<e.session
         <<" revision="<<e.identity.settingsRevision<<" epoch="<<e.identity.epoch<<" source="<<e.identity.sourceFrameId
         <<" batch="<<e.batch<<" fence="<<e.fence<<" pts="<<e.pts100ns<<" detail="<<e.detail<<" count="<<e.count<<" ms="<<e.milliseconds<<'\n';

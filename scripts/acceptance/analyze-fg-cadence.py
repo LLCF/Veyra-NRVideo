@@ -100,6 +100,19 @@ def analyze_trace(path):
         key = state(a) + "->" + state(b)
         transitions[key] = transitions.get(key, 0) + 1
     span = (int(presents[-1]["host"]) - int(presents[0]["host"])) / 1e7
+    ready = {(e["batch"], e["detail"]): e for e in events if e["event"] == "FrameReady"}
+    discarded = [e for e in events if e["event"] == "Discarded"]
+    observed_delays = [(int(e["host"]) - int(ready[(e["batch"], e["detail"])]["host"])) / 10000
+                       for e in discarded if (e["batch"], e["detail"]) in ready]
+    discard_summary = {
+        "count": len(discarded),
+        "withRetainedReadyObservation": len(observed_delays),
+        "readyObservedBeforeDiscard": sum(v >= 0 for v in observed_delays),
+        "readyObservedAfterDiscard": sum(v < 0 for v in observed_delays),
+        "observedReadyToDiscardMs": distribution(observed_delays) if observed_delays else None,
+        "latenessMs": distribution([float(e["ms"]) for e in discarded]) if discarded else None,
+        "note": "CPU fence observations are upper bounds on GPU completion time; absent observations are unknown",
+    }
     return {"scope": "Bounded memory trace, final retained window only; software submission, not scanout",
             "seconds": span, "samples": len(presents), "submitFps": (len(presents) - 1) / span,
             "intervalMs": distribution(intervals),
@@ -110,6 +123,7 @@ def analyze_trace(path):
             "batchPresentCounts": counts, "onlyRealBatches": len(only_real),
             "onlyRealRejectedBatches": rejected, "onlyRealWarmupBatches": warmup,
             "batchTransitions": transitions,
+            "discardedSubframes": discard_summary,
             "presentCpuMs": distribution([float(p["ms"]) for p in presents]),
             "mediaStepMs": distribution([(int(b["pts"]) - int(a["pts"])) / 10000 for a, b in zip(presents, presents[1:])])}
 

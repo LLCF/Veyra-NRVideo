@@ -5,9 +5,13 @@
 
 namespace veyra::engine {
 
-// A capture mailbox overwrite breaks temporal processing history, but it does
-// not invalidate already-produced real frames. Keep those real frames eligible
-// for presentation while suppressing generated frames from the prior epoch.
+// A missing future input breaks processing history, not an earlier A/B pair
+// whose generated textures are still leased. Hard boundaries invalidate both.
+constexpr bool presentationGenerationResetRequired(bool explicitReset, pipeline::FrameFlags flags) {
+    return explicitReset || pipeline::breaksHistory(
+        flags & ~static_cast<pipeline::FrameFlags>(pipeline::FrameFlagBits::Drop));
+}
+
 constexpr bool presentationDrainRequired(bool explicitReset, pipeline::FrameFlags flags) {
     return explicitReset
         || pipeline::hasFrameFlag(flags, pipeline::FrameFlagBits::Resize)

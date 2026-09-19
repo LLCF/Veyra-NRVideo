@@ -39,3 +39,30 @@ Input/depth barrier experiment and fixed20ms phase experiment were reverted for 
 Evidence: E:/项目/Veyra/tests/fg-cadence-repair-20260920/{fixed6-slots16,fixed6-nr-off,barrier6,phase20-slots16}, corresponding stdout/stderr/JSON files; build logs slots-build.log, barrier-build.log, phase-build.log in E:/项目/Veyra/logs/fg-cadence-repair-20260920. All bounded harness runs exited0 for lifecycle only: minimumTargetRatio=0 deliberately disables a target-throughput assertion. No scanout measurement or subjective smoothness claim follows from these numbers.
 
 Next investigation must address the overload equilibrium: admitting work by the last generated deadline permits earlier subframes to expire, and repeated reject/warmup transitions remove additional temporal coverage. A fixed phase shift cannot cure a sustained throughput deficit. Any replacement must preserve original media time/audio speed, bounded queue/latency, accurate effective multiplier reporting and reset/resource lifetime correctness. XeSS final regression and lifecycle acceptance remain pending. Goal remains active; no shutdown until final work/report is complete.
+
+## Queue and prefix deadline experiments
+
+All below are 30-second NR-on fixed6X runs. Metrics cover only each final retained trace window. Test-only environment switches isolate changes from normal playback. Exit0 checks lifecycle, not throughput (minimumTargetRatio=0).
+
+| Run | Submission FPS | P95 gap ms | Complete 6-frame batches | Discarded generated frames |
+| --- | ---: | ---: | ---: | ---: |
+| subframe16 | 62.663 | 17.926 | 0 | 1566 |
+| queue16 | 66.883 | 17.854 | 0 | 1538 |
+| first16 | 203.170 | 16.799 | 114 | 663 |
+| reserve16 | 101.126 | 17.046 | 88 | 0 |
+| profile16 | 276.589 | 14.363 | 168 | 244 |
+| carry16 | 246.569 | 16.603 | 227 | 0 |
+| spacing16 | 268.191 | 15.329 | 237 | 0 |
+| spacing6 | 216.506 | 15.377 | 201 | 9 |
+| remaining16 | 274.567 | 15.357 | 240 | 0 |
+| always16 | 58.551 | 17.947 | 0 | 1620 |
+
+Sixteen command slots unless named spacing6 (default6). Per-frame CPU fence observations show most baseline discards precede observed readiness; this is not exact GPU completion timing. A last-subframe-only deadline admits batches whose early frames are already infeasible. Using the first deadline with the whole batch cost over-rejects; measured first-FG stage cost improves admission. Carrying predicted GPU start across retired completion watches prevents underestimating queued work. Applying 90% minimum output spacing removes most catch-up bursts.
+
+These are not accepted fixes: spacing16 still has 52 rejected pairs followed by 52 warmups in 5.709s, and spacing6 has 94 of each in 6.651s. Both retain periodic15-17ms holes. Command slot enlargement alone was previously ineffective. Pending experiment subtracts fence-completed stages from the queued-work prediction to test whether conservative accumulated predictions cause unnecessary rejection.
+
+Hooks: VEYRA_TEST_TRACE_SUBFRAMES, ADMISSION_QUEUE, ADMISSION_FIRST, ADMISSION_RESERVE, ADMISSION_PROFILE, SUBFRAME_SPACING and ADMISSION_REMAINING (all admission/spacing names also prefixed VEYRA_TEST_). Failed alternatives must be removed before production enablement. Artifacts use tests/fg-cadence-repair-20260920/<run> and <run>.json; builds use corresponding logs/fg-cadence-repair-20260920/*-build.log. No physical scanout or subjective smoothness result is claimed.
+
+remaining16 deducts stages whose completion fences passed: 48 rejected/warmup pairs remain in5.612s. always16 bypasses admission entirely (VEYRA_TEST_ADMISSION_ALWAYS), retains fixed6X and minimum spacing, and demonstrates unbounded lateness is not a solution: almost all generated frames expire before observed completion. Each60Hz input requires approximately NR6.8ms + flow1.2ms + FG9.8ms plus other work on this RTX5070. These serial GPU stages exceed16.667ms, independently of CPU completion polling. This is evidence of a compute deficit at the tested quality, not an excuse for the baseline80fps collapse.
+
+A separate code defect was found at soft-drop boundaries: incrementing presentationGeneration invalidated earlier leased A/B output when a later input was dropped. Keep resetting processing history, but increment the presentation generation only on hard boundaries. Add regression checks for drop-only, explicit-reset-plus-drop, and resize-plus-drop. This does not override expiry, resource fences, or comparison suppression; GPU regression is pending.

@@ -41,6 +41,10 @@ int main(){
     constexpr auto drop=static_cast<veyra::pipeline::FrameFlags>(veyra::pipeline::FrameFlagBits::Drop);
     constexpr auto resize=static_cast<veyra::pipeline::FrameFlags>(veyra::pipeline::FrameFlagBits::Resize);
     check(veyra::pipeline::breaksHistory(drop),"mailbox overwrite resets temporal history");
+    check(!veyra::engine::presentationGenerationResetRequired(false,drop),"missing future input retains an earlier complete interpolation pair");
+    check(!veyra::engine::presentationGenerationResetRequired(false,0),"preview skip alone does not invalidate leased earlier output");
+    check(veyra::engine::presentationGenerationResetRequired(true,drop),"explicit reset invalidates old output even when accompanied by a drop");
+    check(veyra::engine::presentationGenerationResetRequired(false,resize|drop),"drop cannot mask a resource boundary");
     check(!veyra::engine::presentationDrainRequired(false,drop),"mailbox overwrite retains queued real presentation");
     check(veyra::engine::presentationDrainRequired(false,resize),"resize drains resource-bound presentation");
     check(!veyra::engine::generatedPresentationCurrent(4,5),"history reset suppresses queued generated frame");

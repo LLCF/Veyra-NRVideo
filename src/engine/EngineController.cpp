@@ -496,6 +496,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 pipeline::EnhanceGraph::FrameOutputs output;
                 std::shared_ptr<FrameFlowWindow> flow;
                 Clock::time_point processStart;
+                int64_t predictedGpuStart100ns=0;
                 std::optional<double> gpuExecutionMs,fgExecutionMs;
                 bool real=false;
                 std::atomic<bool> ready=false;
@@ -560,6 +561,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 for(const auto& sample:graph.takeGpuTimings())record(sample);
                 for(const auto& sample:presenter.takeGpuTimings(ctx.fence()))record(sample);
             };
+            const bool traceSubframes=GetEnvironmentVariableW(L"VEYRA_TEST_TRACE_SUBFRAMES",nullptr,0)>0;
             // Shared with the presenter: resolve each batch on this single
             // object so SDK status and generated counts are consumed once.
             auto pollCompletions=[&]{
@@ -569,7 +571,10 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     auto& watch=**it;auto& batch=watch.output;
                     const auto completedFence=ctx.fence()->GetCompletedValue();
                     for(unsigned i=0;i<batch.batch.count;++i){const auto& item=batch.batch.frames[i];
-                        if(!watch.frameReadyObserved[i]&&item.lease&&completedFence>=item.lease->readyFence)watch.frameReadyObserved[i]=host100ns();
+                        if(!watch.frameReadyObserved[i]&&item.lease&&completedFence>=item.lease->readyFence){
+                            watch.frameReadyObserved[i]=host100ns();
+                            if(traceSubframes)traceFrame(diagnostics::TraceKind::FrameReady,item.identity,batch.batch.batchId,item.lease->readyFence,item.pts100ns,item.subframe,1,elapsedMs(watch.processStart));
+                        }
                     }
                     if(!graph.resolveGeneration(batch)){++it;continue;}
                     // The GPU may finish between the first poll and resolve.
@@ -1044,7 +1049,8 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 const bool previewOnlyReset=!hardFrameReset&&temporalBreak;
                 if(hardFrameReset)++metricsWindowEpoch;
                 const bool historyReset=hardFrameReset||temporalBreak;
-                if(historyReset){++historyResets;++presentationGeneration;}
+                if(historyReset)++historyResets;
+                if(presentationGenerationResetRequired(reset,pkt.flags))++presentationGeneration;
                 // A mailbox Drop must reset SR/NR/flow/FG history, but draining
                 // the two-batch presenter here discarded completed real frames.
                 if(liveScheduler&&presentationDrainRequired(reset,pkt.flags))drainLivePresentation();
@@ -1098,16 +1104,51 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 // deadlines on the audio master clock. A pair whose last
                 // generated timestamp can no longer be reached spends no FG
                 // Evaluate; the real frame keeps its normal cadence (plan §4.1).
+                double queuedGpuMs=0;
                 if(!isCapture&&!isImage&&!rereadCached&&!transaction&&options.fg&&!presentSinkFrameGeneration(options.settings.frameGenerationBackend)){
-                    admitFg=[&,historyReset](const pipeline::FrameBatch& batch,bool warmingHistory){
+                    if(GetEnvironmentVariableW(L"VEYRA_TEST_ADMISSION_QUEUE",nullptr,0)){
+                        const auto start=std::chrono::duration_cast<std::chrono::nanoseconds>(processStart.time_since_epoch()).count()/100;
+                        int64_t finish=0;
+                        for(const auto& previous:pendingCompletions){
+                            if(ctx.fence()->GetCompletedValue()>=std::max(previous->output.videoFenceValue,previous->output.genFenceValue))continue;
+                            const auto began=std::chrono::duration_cast<std::chrono::nanoseconds>(previous->processStart.time_since_epoch()).count()/100;
+                            const auto cost=previous->output.fgEvaluated?fgBudget.predicted(start,previous->output.historyReset||previous->output.fgRecovery):fgBudget.baseCost(start);
+                            finish=std::max({finish,began,previous->predictedGpuStart100ns})+int64_t(cost.value_or(0)*10000);
+                            if(GetEnvironmentVariableW(L"VEYRA_TEST_ADMISSION_REMAINING",nullptr,0)&&ctx.fence()->GetCompletedValue()>=previous->output.videoFenceValue){
+                                const auto timing=frameFlow->snapshot(start).gpuTiming;
+                                double remaining=0;bool known=true;
+                                for(const auto& item:previous->output.batch.frames){
+                                    if(item.kind!=pipeline::FrameKind::Generated||!item.lease||ctx.fence()->GetCompletedValue()>=item.lease->readyFence)continue;
+                                    const auto stage=size_t(diagnostics::GpuStage::Fg1)+item.subframe-1;
+                                    if(stage>=timing.size()||!timing[stage].p95){known=false;break;}
+                                    remaining+=*timing[stage].p95;
+                                }
+                                if(known&&!previous->output.historyReset&&!previous->output.fgRecovery)
+                                    finish=std::min(finish,start+int64_t(remaining*10000));
+                            }
+                        }
+                        queuedGpuMs=double(std::max<int64_t>(0,finish-start))/10000;
+                    }
+                    admitFg=[&,historyReset,queuedGpuMs](const pipeline::FrameBatch& batch,bool warmingHistory){
                         if(fileAwaitingVideo)return true; // Bounded startup lookahead; audio has not started.
+                        if(GetEnvironmentVariableW(L"VEYRA_TEST_ADMISSION_ALWAYS",nullptr,0))return true;
                         const auto interval=liveSourceInterval100ns(pkt.duration,activeSource->info().averageFps);
                         const auto a=(historyReset||batch.b100ns<=batch.a100ns||batch.b100ns-batch.a100ns>10000000)?batch.b100ns-interval:batch.a100ns;
                         const auto lastGenerated=pipeline::FrameBatch::interpolate(a,batch.b100ns,previewFgMultiplier-1,previewFgMultiplier);
                         const auto now=host100ns();
-                        const auto deadline=now+lastGenerated-int64_t(nowMs()*10000.0);
+                        const auto admissionPts=GetEnvironmentVariableW(L"VEYRA_TEST_ADMISSION_FIRST",nullptr,0)?pipeline::FrameBatch::interpolate(a,batch.b100ns,1,previewFgMultiplier):lastGenerated;
+                        const auto reserve=GetEnvironmentVariableW(L"VEYRA_TEST_ADMISSION_RESERVE",nullptr,0)?100000:0;
+                        auto deadline=now+admissionPts-int64_t(nowMs()*10000.0)-reserve;
+                        if(GetEnvironmentVariableW(L"VEYRA_TEST_ADMISSION_PROFILE",nullptr,0)&&!warmingHistory){
+                            const auto first=frameFlow->snapshot(now).gpuTiming[size_t(diagnostics::GpuStage::Fg1)].p95;
+                            const auto whole=fgBudget.predicted(now),base=fgBudget.baseCost(now);
+                            if(first&&whole&&base){
+                                const auto firstPts=pipeline::FrameBatch::interpolate(a,batch.b100ns,1,previewFgMultiplier);
+                                deadline=now+firstPts-int64_t(nowMs()*10000.0)-100000+interval/previewFgMultiplier+int64_t(std::max(0.0,*whole-*base-*first)*10000);
+                            }
+                        }
                         const auto elapsed=elapsedMs(processStart),blit=livePresentGpu.p95();
-                        const auto admitted=fgBudget.admit(now,deadline,elapsed,blit,warmingHistory);
+                        const auto admitted=fgBudget.admit(now,deadline,elapsed,blit,warmingHistory,queuedGpuMs);
                         logAdmission(batch,now,deadline,elapsed,blit,admitted,warmingHistory,"file-audio");
                         return admitted;
                     };
@@ -1238,6 +1279,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     const auto timeline=liveTimeline;
                     const uint64_t jobGeneration=presentationGeneration.load();
                     auto watch=std::make_shared<CompletionWatch>();watch->output=out;watch->flow=frameFlow;watch->processStart=processStart;watch->real=!rereadCached;
+                    watch->predictedGpuStart100ns=std::chrono::duration_cast<std::chrono::nanoseconds>(processStart.time_since_epoch()).count()/100+int64_t(queuedGpuMs*10000);
                     watch->captureArrival=captureArrival;watch->presentationGeneration=jobGeneration;
                     watch->reflexFrame=currentReflexFrame;
                     pendingCompletions.push_back(watch);
@@ -1273,6 +1315,8 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                             const auto decisionTime=host100ns();
                             const bool generationExpired=generated&&(isCapture?timeline.expired(item.pts100ns,decisionTime,100000):!fileAwaitingVideo&&previewGeneratedExpired(nowMs(),itemPtsMs));
                             const auto readiness=previewFrameReadiness(item,comparisonMode_!=0||!generatedPresentationCurrent(jobGeneration,presentationGeneration.load()),generationExpired,[&]{return graph.resolveFrame(batch,s.next);});
+                            if(traceSubframes&&generated&&(readiness==PreviewFrameReadiness::Expired||readiness==PreviewFrameReadiness::Suppressed))
+                                traceFrame(diagnostics::TraceKind::Discarded,item.identity,batch.batch.batchId,item.lease->readyFence,item.pts100ns,item.subframe,unsigned(readiness),isCapture?double(decisionTime-timeline.deadline(item.pts100ns))/10000:nowMs()-itemPtsMs);
                             if(readiness==PreviewFrameReadiness::Pending){
                                 if(elapsedMs(s.readyStart)>2000){veyra::log::error("capture-present","GPU frame ready timeout");return {State::Failed};}
                                 return {State::Pending,host100ns()+2000};
@@ -1293,6 +1337,11 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                                 if(nowMs()+.25<itemPtsMs)return {State::Pending,now+std::min<int64_t>(10000,int64_t((itemPtsMs-nowMs())*10000))};
                             }
                             const auto optionalNow=host100ns();
+                            if(!isCapture&&!fileAwaitingVideo&&options.fg&&!presentSinkFrameGeneration(options.settings.frameGenerationBackend)&&GetEnvironmentVariableW(L"VEYRA_TEST_SUBFRAME_SPACING",nullptr,0)){
+                                const auto interval=std::max<int64_t>(1,int64_t(sourceIntervalMs*10000)/std::max(1u,batch.batch.count));
+                                const auto due=cadence.due(optionalNow+int64_t((itemPtsMs-nowMs())*10000),interval);
+                                if(optionalNow<due)return {State::Pending,due};
+                            }
                             if(presentationEffective.enabled){
                                 const auto interval=std::max<int64_t>(1,int64_t(sourceIntervalMs*10000)/std::max(1u,batch.batch.count));
                                 const auto mediaDeadline=isCapture?timeline.deadline(item.pts100ns):fileAwaitingVideo?optionalNow:optionalNow+int64_t((itemPtsMs-nowMs())*10000);

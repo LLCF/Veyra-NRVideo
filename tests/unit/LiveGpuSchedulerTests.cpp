@@ -73,6 +73,15 @@ int main(){
     veyra::engine::TimingWindow timing;for(unsigned i=0;i<100;++i)timing.add(i);check(timing.p95()==94,"percentile order statistic");timing.clear();timing.add(6);check(timing.p95()==6,"reset removes old timing window");
     veyra::engine::FgRecoveryBudget budget;
     {
+        veyra::engine::FgRecoveryBudget queued;
+        queued.complete(10,true,false,10000000,4);
+        check(queued.admit(10000000,10020000,0,0),"idle GPU can fit the measured batch");
+        check(!queued.admit(10000000,10020000,0,0,false,5),"uncompleted earlier work consumes the new pair deadline");
+        check(queued.admit(10000000,10020000,5,0,false,5),"elapsed queue work is counted only once");
+        check(!queued.admit(10000000,9920000,100,0,false,5),"CPU time cannot erase unsubmitted FG even with queued work");
+        check(queued.admit(10000000,10020000,0,0,false,-5),"negative queue prediction cannot invent extra GPU work");
+    }
+    {
         using Window=veyra::engine::TimingWindow;
         const Window::Clock::time_point start{};
         Window present{std::chrono::seconds(1)};

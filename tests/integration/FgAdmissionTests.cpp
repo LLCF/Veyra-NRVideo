@@ -66,11 +66,22 @@ int wmain(int argc,wchar_t** argv){
             unsigned nonblack=0;for(size_t p=0;p+3<image.pixels.size();p+=4)nonblack+=image.pixels[p]>8||image.pixels[p+1]>8||image.pixels[p+2]>8;
             ok=ok&&nonblack>image.width*image.height/20;
         }
+        sink::RgbaImage previousGenerated;
         if(i==13||i==21||i==29)for(unsigned j=0;j<out.batch.count;++j){
             const auto& f=out.batch.frames[j];if(f.kind!=pipeline::FrameKind::Generated)continue;
             sink::RgbaImage image;ok=ok&&sink::readRgba8(ctx,ring,f.lease->texture.Get(),image);
             unsigned nonblack=0;for(size_t p=0;p+3<image.pixels.size();p+=4)nonblack+=image.pixels[p]>8||image.pixels[p+1]>8||image.pixels[p+2]>8;
             ok=ok&&nonblack>image.width*image.height/20;
+            if(!previousGenerated.pixels.empty()&&previousGenerated.pixels.size()==image.pixels.size()){
+                uint64_t difference=0,changed=0;
+                for(size_t p=0;p<image.pixels.size();++p)if(p%4!=3){
+                    const auto delta=std::abs(int(image.pixels[p])-int(previousGenerated.pixels[p]));
+                    difference+=delta;changed+=delta!=0;
+                }
+                std::cout<<"CONTENT frame="<<i<<" subframe="<<f.subframe<<" adjacentChangedChannels="<<changed
+                    <<" adjacentMeanAbsoluteDifference="<<double(difference)/(image.width*image.height*3ull)<<std::endl;
+            }
+            previousGenerated=std::move(image);
         }
         std::cout<<"frame="<<i<<" skip="<<out.fgSkippedBeforeEval<<" evaluate="<<out.fgEvaluated<<" recovery="<<out.fgRecovery<<" batch="<<out.batch.count<<" pass="<<ok<<std::endl;
     }
