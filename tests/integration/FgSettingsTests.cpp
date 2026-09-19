@@ -16,7 +16,8 @@ int wmain(int argc,wchar_t** argv) {
         return runFgCompatibilityProbe(reinterpret_cast<HANDLE>(_wcstoui64(argv[2],nullptr,10)));
     if(argc!=3&&argc!=4)return 2;
     const bool probeFailure=argc==4&&std::wstring_view(argv[3])==L"probe-failure";
-    if(argc==4&&!probeFailure)return 2;
+    const bool backendSwitch=argc==4&&std::wstring_view(argv[3])==L"backend-switch";
+    if(argc==4&&!probeFailure&&!backendSwitch)return 2;
     const HRESULT com=CoInitializeEx(nullptr,COINIT_MULTITHREADED);
     if(FAILED(com))return 2;
     std::filesystem::create_directories(argv[2]);
@@ -63,8 +64,29 @@ int wmain(int argc,wchar_t** argv) {
             std::cout<<"Probe recovery elapsedMs="<<std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now()-started).count()<<std::endl;
         }
+        if(backendSwitch){
+            struct Request{FrameGenerationBackend backend;unsigned multiplier;};
+            // Leaving unlocked XeSS used to cache a false 2X hardware limit;
+            // native 2X must also allow a later unlocked 4X context.
+            for(const auto request:{Request{FrameGenerationBackend::XeSS,4},
+                Request{FrameGenerationBackend::Dlss,4},Request{FrameGenerationBackend::XeSS,4},
+                Request{FrameGenerationBackend::XeSS,2},Request{FrameGenerationBackend::XeSS,4},
+                Request{FrameGenerationBackend::Dlss,6},Request{FrameGenerationBackend::XeSS,4}}){
+                if(failures)break;
+                const auto before=engine.snapshot();
+                auto settings=before.desired;
+                settings.nr=settings.sr=false;
+                settings.frameGenerationBackend=request.backend;settings.multiplier=request.multiplier;
+                if(!check(engine.requestSettings(settings),"accept backend switch"))break;
+                const auto revision=engine.snapshot().desired.revision;
+                check(wait([&](const auto& s){return !s.applying&&s.applied.revision==revision&&
+                    s.applied.frameGenerationBackend==request.backend&&s.applied.multiplier==request.multiplier&&
+                    s.fgActive&&s.frames>=before.frames+12&&s.generated>=before.generated+10;},20),
+                    "backend switch applies and generates frames");
+            }
+        }
         for(const unsigned multiplier:{2u,6u,1u,6u}){
-            if(probeFailure)break;
+            if(probeFailure||backendSwitch)break;
             if(failures)break;
             const auto beforeSwitch=engine.snapshot();
             auto settings=beforeSwitch.desired;

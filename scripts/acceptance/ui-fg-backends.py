@@ -96,10 +96,12 @@ def text(hwnd):
     return value.value
 
 
-exe = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else 'out/build/x64-release/veyra.exe').resolve()
-media = pathlib.Path('logs/video-sdk-trial-20260909/known-pan15.mp4').resolve()
-out = pathlib.Path('logs/continuation-repair-20260910') / ('ui-fg-' + str(time.time_ns()))
-out.mkdir(parents=True)
+if len(sys.argv) != 4:
+    sys.exit('Usage: ui-fg-backends.py EXE MEDIA OUTPUT_DIRECTORY [--reject-xess] [--portable]')
+exe = pathlib.Path(sys.argv[1]).resolve()
+media = pathlib.Path(sys.argv[2]).resolve()
+out = pathlib.Path(sys.argv[3]).resolve()
+out.mkdir(parents=True, exist_ok=True)
 env = os.environ.copy()
 env['PATH'] = (os.path.join(os.environ['SYSTEMROOT'], 'System32') + ';' + os.environ['SYSTEMROOT']
                if portable else r'C:\veyra-deps\installed\x64-windows\bin;' + env['PATH'])
@@ -173,12 +175,28 @@ with (out / 'stdout.log').open('w') as stdout, (out / 'stderr.log').open('w') as
             previous = text(revision_label)
             choose(backend, index)
             if reject_xess and name == 'XeSS':
-                wait_for(lambda: send(backend, 0x147) == 0 and 'XeSS' in text(u.GetDlgItem(panel, 401)), 18)
+                # Professional mode routes warnings to its status sink, not
+                # the inspector's legacy hidden status label (401).
+                wait_for(lambda: send(backend, 0x147) == 0 and 'DLSS' in text(revision_label)
+                         and re.search(r'\[reset-lifecycle\].*outcome=3', log()), 18)
                 result['switches'].append('XeSS rejected, DLSS retained')
                 continue
             wait_for(applied, 18)
             result['switches'].append(name)
-            assert send(multiplier, 0x146) == (2 if name == 'XeSS' else 4), 'incorrect multiplier choices'
+            assert send(multiplier, 0x146) == (4 if name == 'XeSS' else 5), 'incorrect multiplier choices'
+        if not reject_xess:
+            # Prime the unlocked provider, leave it, then return at 4X. Also
+            # exercise a stock 2X context before requesting unlocked 4X again.
+            for control, index, label in [
+                (multiplier, 3, 'DLSS 4X'), (backend, 1, 'XeSS 4X'),
+                (backend, 0, 'DLSS 4X again'), (backend, 1, 'XeSS 4X again'),
+                (multiplier, 1, 'XeSS 2X'), (multiplier, 3, 'XeSS 4X after 2X'),
+                (backend, 0, 'DLSS return'), (multiplier, 4, 'DLSS 6X'),
+                (backend, 1, 'XeSS clamps 6X to supported 4X')]:
+                previous = text(revision_label)
+                choose(control, index)
+                wait_for(applied, 18)
+                result['switches'].append(label)
         previous = text(revision_label)
         choose(multiplier, 0)
         wait_for(applied, 12)

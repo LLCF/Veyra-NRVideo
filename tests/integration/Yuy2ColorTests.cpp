@@ -38,6 +38,12 @@ int wmain(int argc,wchar_t**argv){
             for(unsigned y=0;y<h;++y)for(unsigned x=0;x<w;++x)f->data[0][ptrdiff_t(y)*f->linesize[0]+x]=uint8_t(x%256);
             for(unsigned y=0;y<h/2;++y)for(unsigned x=0;x<w/2;++x){f->data[1][ptrdiff_t(y)*f->linesize[1]+x]=y%4==0?128:y%4==1?16:y%4==2?240:90;f->data[2][ptrdiff_t(y)*f->linesize[2]+x]=y%4==0?128:y%4==1?240:y%4==2?16:180;}
         }
+        // Alternating luma must survive 4:2:2 unpack and 1:1 presentation.
+        // The lower half retains the matrix/range color coverage above.
+        if(!remoteYuv&&!rgb&&!nr)for(unsigned y=0;y<h/2;++y)for(unsigned x=0;x<w;x+=2){
+            auto* p=f->data[0]+ptrdiff_t(y)*f->linesize[0]+x*2;
+            p[0]=(y&1)?235:16;p[2]=(y&1)?16:235;p[1]=p[3]=128;
+        }
         if(rgb)for(unsigned y=0;y<h;++y)for(unsigned x=0;x<w;++x){auto* p=f->data[0]+ptrdiff_t(y)*f->linesize[0]+x*4;p[0]=uint8_t(x%256);p[1]=uint8_t((x+37)%256);p[2]=uint8_t((x+129)%256);p[3]=255;}
         pipeline::ColorDescription color;color.pixelFormat=pipeline::SourcePixelFormat::Yuy2;color.range=full?pipeline::ColorRange::Full:pipeline::ColorRange::Limited;color.matrix=hd?pipeline::YuvMatrix::BT709:pipeline::YuvMatrix::BT601;color.transfer=pipeline::TransferFunction::SRGB;
         if(remoteYuv){color.pixelFormat=pipeline::SourcePixelFormat::Yuv420P;color.transfer=pipeline::TransferFunction::BT709;color.displayReferred709=true;}

@@ -51,6 +51,7 @@ int64_t monotonic100ns(){return std::chrono::duration_cast<std::chrono::nanoseco
 struct OnExit {std::function<void()> action;~OnExit(){action();}};
 void logFrameFlow(const diagnostics::FrameFlowMetrics& m,const char* state){
     const auto& c=m.counters;const auto& id=m.latest;
+    if(c.xessSdkPresented)veyra::log::info("provider-flow",std::format("state={} session={} revision={} sdkPresented={} sdkGenerated={} sdkSubmitFps={:.2f} measurement=provider-report-not-scanout",state,id.sessionId,id.frame.settingsRevision,c.xessSdkPresented,c.xessSdkGenerated,m.xessSdkSubmitFps));
     const auto& r=m.reset; const auto ms=[&](diagnostics::ResetStage s){return r.stageMs[size_t(s)].value_or(-1.0);};
     veyra::log::info("frame-flow",std::format("state={} session={} revision={} epoch={} source={} batch={} readyFence={} consumerFence={} captureReceived={} mailboxOverwritten={} sourceAccepted={} sourceSkippedBeforeGraph={} realSubmitted={} fgCandidate={} fgSkippedBeforeEval={} fgEvaluated={} fgWarmup={} fgReadyValid={} fgInvalid={} realPresented={} generatedPresented={} generatedExpiredAfterEval={} cancelledBeforePresent={} commandSlots={} commandHighWater={} presentationHighWater={} slotWaitCount={} slotWaitMs={:.3f} generatedFps={:.2f} presentSubmitFps={:.2f} resetRevision={} resetEpoch={} resetReason={} resetOutcome={} resetDrainMs={:.3f} resetDestroyMs={:.3f} resetCreateMs={:.3f} resetWarmupMs={:.3f} resetFirstValidMs={:.3f} resetTotalMs={:.3f}",state,id.sessionId,id.frame.settingsRevision,id.frame.epoch,id.frame.sourceFrameId,id.batchId,id.readyFence,id.consumerFence,c.captureReceived,c.mailboxOverwritten,c.sourceAccepted,c.sourceSkippedBeforeGraph,c.realSubmitted,c.fgCandidate,c.fgSkippedBeforeEval,c.fgEvaluated,c.fgWarmup,c.fgReadyValid,c.fgInvalid,c.realPresented,c.generatedPresented,c.generatedExpiredAfterEval,c.cancelledBeforePresent,c.commandSlotsInFlight,c.commandSlotHighWater,c.presentationBatchHighWater,m.slotReuseWaitCount,m.slotReuseWaitMs.value_or(0),m.validGeneratedFps,m.presentSubmitFps,r.settingsRevision,r.epoch,unsigned(r.reason),unsigned(r.outcome),ms(diagnostics::ResetStage::Drain),ms(diagnostics::ResetStage::Destroy),ms(diagnostics::ResetStage::Create),ms(diagnostics::ResetStage::Warmup),ms(diagnostics::ResetStage::FirstValid),r.totalMs.value_or(-1.0)));
 }
@@ -109,13 +110,9 @@ bool EngineController::requestSettings(EnhancementSettings s){
         veyra::log::info("settings",std::format("multiplier gate: requested={} maxGeneratedFrames={} applied=unchanged",s.multiplier,fgMultiFrameMaxCap_));
         return false;
     }
-    if(s.multiplier>1&&s.frameGenerationBackend==FrameGenerationBackend::XeSS&&xessMaxInterpolatedFramesCap_>0&&
-       int(s.multiplier)-1>xessMaxInterpolatedFramesCap_){
-        snapshot_.status=std::format(L"XeSS 帧生成上限为 {}X；请求未应用",xessMaxInterpolatedFramesCap_+1);
-        snapshot_.failed=false;
-        veyra::log::info("settings",std::format("xess multiplier gate: requested={} maxInterpolatedFrames={} applied=unchanged",s.multiplier,xessMaxInterpolatedFramesCap_));
-        return false;
-    }
+    // XeSS's current ceiling describes this context, not the next one: 2X
+    // intentionally runs without the MFG unlock. Validate a higher request in
+    // XessPresenter after applying the unlock; rebuild failure rolls it back.
     // The AMD 3.1.x frame-generation provider delivers exactly one generated
     // frame per presented frame; the probe (tools/fsr_probe) measured this on
     // every requested count, so anything above 2X is refused instead of
@@ -298,7 +295,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
             gd.runtimeAbsPath=runtime::localRuntimeDirectory().wstring();
             gd.compatibilityPreflight=[this](const auto& desc,const auto& device){return checkFgCompatibility(desc,device,stop_);};
             std::wstring backendRecoveryWarning;
-            auto initializePreview=[&](pipeline::EnhanceGraphDesc& desc,PlayerOptions& selected){
+            auto initializePreview=[&](pipeline::EnhanceGraphDesc& desc,PlayerOptions& selected,bool preserveWorkingFg=false){
                 backendRecoveryWarning.clear();
                 auto supported=selected.snapshot();
                 if(disableUnsupportedNvidiaEffects(supported,nvidiaAdapter)){
@@ -325,6 +322,9 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                         if(opened&&graph.fsrSrRequested()&&!graph.fsrSrEnabled()){opened=false;failure=FailedBackend::Sr;}
                     }
                 if(opened)return true;
+                // A live backend/multiplier switch must not turn a working FG
+                // session into effects-off playback when the new provider fails.
+                if(preserveWorkingFg&&failure==FailedBackend::Fg)return false;
                 auto reduced=selected.snapshot();
                 // Requested multiplier above this GPU's capability: clamp to what
                 // the runtime supports and say so, instead of dropping frame
@@ -382,14 +382,14 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 const auto xessState=gfx::XessMfgUnlock::snapshot();
                 // Unknown until the XeSS provider actually ran: a DLSS-only
                 // session must not restrict the XeSS choices in the UI.
-                xessMaxInterpolatedFramesCap_=xessState.providerLoaded?(xessState.applied&&xessState.maxInterpolations>0?int(xessState.maxInterpolations):1):0;
+                xessMaxInterpolatedFramesCap_=presenter.xessActive()?int(std::max(1u,xessState.maxInterpolations)):0;
                 snapshot_.xessMaxInterpolatedFrames=xessMaxInterpolatedFramesCap_;
                 // AMD FSR ceiling comes from the running presenter; 0 keeps the
                 // settings UI on its static 2X fallback until a session ran.
                 fsrMaxGeneratedFramesCap_=graph.fsrEnabled()&&presenter.fsrActive()?int(presenter.fsrMaxGeneratedFrames()):0;
                 snapshot_.fsrMaxGeneratedFrames=fsrMaxGeneratedFramesCap_;
                 if(fgMultiFrameMaxCap_>0)veyra::log::info("settings",std::format("frame-generation capability: maxGeneratedFrames={} maxMultiplier={}",fgMultiFrameMaxCap_,fgMultiFrameMaxCap_+1));
-                veyra::log::info("settings",std::format("xess capability: maxInterpolatedFrames={} unlockApplied={} => maxMultiplier={}",xessState.maxInterpolations,xessState.applied,xessMaxInterpolatedFramesCap_+1));
+                veyra::log::info("settings",std::format("xess capability: active={} maxInterpolatedFrames={} unlockApplied={} (active context only)",presenter.xessActive(),xessMaxInterpolatedFramesCap_,xessState.applied));
                 if(fsrMaxGeneratedFramesCap_>0)veyra::log::info("settings",std::format("fsr capability: generatedPerPresent={} => maxMultiplier={}",fsrMaxGeneratedFramesCap_,fsrMaxGeneratedFramesCap_+1));
             };
             const auto initialRequested=options.snapshot();
@@ -801,7 +801,9 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     markResetStage(diagnostics::ResetStage::Drain);
                     if(!accepted){finishReset(diagnostics::ResetOutcome::Failed);status(L"设置切换排空失败，已停止",true);break;}
                     backendRecoveryWarning.clear();
-                    if(accepted&&rebuild){presenter.close();graph.shutdown();markResetStage(diagnostics::ResetStage::Destroy);accepted=initializePreview(nextDesc,next);
+                    const bool preserveWorkingFg=previous.multiplier>1&&requested.multiplier>1&&
+                        (previous.frameGenerationBackend!=requested.frameGenerationBackend||previous.multiplier!=requested.multiplier);
+                    if(accepted&&rebuild){presenter.close();graph.shutdown();markResetStage(diagnostics::ResetStage::Destroy);accepted=initializePreview(nextDesc,next,preserveWorkingFg);
                         markResetStage(diagnostics::ResetStage::Create);
                         if(!accepted){presenter.close();graph.shutdown();if(!graph.initialize(gd)||!presenter.open(ctx,window,graph,options.settings.captureCompatible)||!graph.createViews()){status(L"设置失败且旧资源恢复失败，已停止",true);break;}}
                     }else if(accepted)accepted=graph.applySettings(requested);

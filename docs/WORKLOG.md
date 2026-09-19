@@ -1,5 +1,21 @@
 # Veyra 工作记录
 
+## 2026-09-20 切换最终回归、YUY2 50fps 与清晰度排查
+
+本条更新下方 09-19 的中间验收。进一步发现异步准备两帧导致 XeLL 标记失败；改为每次呈现完整周期、每周期仅一次 sleep，提交结束标记覆盖到呈现之前，未暂停拖动补帧。错误 ID 重映射试验失败记录保留，最终实现已重测。
+
+最终构建 `E:/项目/Veyra/logs/fg-backend-switch-build-verified.log`；验收 `E:/项目/Veyra/tests/fg-backend-switch-20260919`、`E:/项目/Veyra/logs/fg-backend-switch-20260919`。engine-verified 七轮切换、ui-verified 下拉操作、ui-reject-cycle 失败回退、XeSS recovery2/4、pan2/4、resize4、YUY2 50fps 2X/4X、YUY2 像素与 repair contracts 全部退出 0。合成 100 源帧生成 96/288 帧，debugErrors=0；单像素条纹转换误差 <=1/255，呈现误差 0。进程 TEMP/TMP 沿用 E 盘专用目录，未占用用户采集卡。
+
+增加独立 provider-flow 日志，避免通用 GPU 计数为 0 被误读成 XeSS 不生成。用户日志 DLSS50->200fps 与 XeSS2 有生成输出，但不能证明物理显示流畅。用户补充清晰度对比 PotPlayer；尚无相同格式、尺寸、效果的图像对照，未定因，未改画质算法。完整证据、命令及最终哈希见 `docs/FG_BACKEND_SWITCH_REPAIR_2026-09-19.md`。未覆盖 E:/App 下便携包、未打包或发布。
+
+## 2026-09-19 XeSS / DLSS 切换弹回修复
+
+用户日志确认 `xess multiplier gate: requested=4 maxInterpolatedFrames=1 applied=unchanged`。从 `43b8a4a` 存档 `checkpoint/pre-fg-backend-switch-20260919`，隔离分支 `codex/fg-backend-switch-20260919`，保留七项审查和此前调度修复。修正当前 XeSS 上限误用为永久限制、UI 忽略提交失败，以及已运行补帧换后端失败时被直接关闭的问题。
+
+修改 EngineController、AppShell、SettingsWindow、FgSettingsTests 与 ui-fg-backends.py。构建复用 `E:/项目/Veyra/build/slider-reset-20260919`，临时文件 `E:/项目/Veyra/tmp/fg-backend-switch-20260919`，测试/日志分别在同名 tests/logs 子目录；构建日志在 `E:/项目/Veyra/logs/fg-backend-switch-build-final.log`。具体命令、结果、失败过程及最终 exe 哈希见 `docs/FG_BACKEND_SWITCH_REPAIR_2026-09-19.md`。
+
+最终构建、真实 UI 反复切换和初始化失败回退通过；引擎测试检查七组后端/倍率切换后的真实生成计数。初次失败注入发现关闭补帧行为并修复；第二次因旧脚本检查隐藏状态标签超时，核对引擎已回退后修正脚本并重测通过。未打包、覆盖用户测试包、推送或发布；RTX30/40及用户机器未实测，运行库未修改。
+
 ## 2026-09-19 七项独立审查修复
 
 用户要求将文档中七项一起修复。存档 `checkpoint/pre-seven-audit-20260919`，基线 `80f7dc4`，隔离分支 `codex/seven-audit-20260919`，保留此前 DLSS/XeSS 调度修复。完成压缩队列参考链恢复、解码输出帧身份、EAGAIN 真正接收重送、重排时间戳、D3D11 Context4 释放、字幕顶部/中部布局和全样式缓存键。

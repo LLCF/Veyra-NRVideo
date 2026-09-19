@@ -856,7 +856,7 @@ bool colourFieldEdited(int index,float value){
     return true;
 }
 void message(const std::wstring& text){if(statusSink)statusSink(text);else putText(401,text.c_str());}
-bool submit(engine::EnhancementSettings s){if(!apply(s)){dirty=true;message(L"总增强正在切换；本次修改未接受，请稍后重试。");return false;}dirty=false;return true;}
+bool submit(engine::EnhancementSettings s){if(!apply(s)){dirty=true;message(L"修改未接受，请查看状态栏或日志；若总增强正在切换，请稍后重试。");return false;}dirty=false;return true;}
 void syncProtection(const engine::ProtectionSettings& protection){
     check(206,protection.enabled?BST_CHECKED:BST_UNCHECKED);unsigned count=0;for(auto q:protection.regions)count+=!q.empty();
     putText(206,(L"NR剔除区 · "+std::to_wstring(count)+L"/4").c_str());
@@ -875,7 +875,8 @@ void selectDiscrete(int group,int value){for(int j=0;j<(group==0?3:2);++j){auto 
 // Multiplier list is capability-driven: the DLSS runtime reports how many
 // generated frames it supports (1 = 2X only on Ada, 5 = 6X on Blackwell), and
 // the XeSS unlock path raises its own ceiling. Unknown capability offers the
-// full list; the engine gate rejects an unsupported request with a message.
+// full list; initialization validates a newly requested XeSS context after
+// applying its unlock, rather than treating the current 2X mode as a limit.
 int multiplierChoiceCount(engine::FrameGenerationBackend backend){
     int cap=6;
     if(backend==engine::FrameGenerationBackend::XeSS){

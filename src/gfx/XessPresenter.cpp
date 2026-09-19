@@ -31,6 +31,7 @@ struct XessPresenter::Impl {
     xefg_swapchain_handle_t fg=nullptr;
     xell_context_handle_t ll=nullptr;
     uint32_t id=0,nextId=0;
+    bool cycleOpen=false,renderSubmitStarted=false,renderSubmitEnded=false;
 #define XESS_PROC(name) decltype(&name) name##Fn=nullptr
     XESS_PROC(xefgSwapChainD3D12CreateContext);
     XESS_PROC(xefgSwapChainD3D12GetProperties);
@@ -56,7 +57,11 @@ struct XessPresenter::Impl {
         if(result!=0||always||log::verboseFrameLogs())log::info("xess-fg",std::format("{} result={} presentId={}",operation,result,id));
         return result>=0;
     }
-    bool marker(xell_latency_marker_type_t m,uint32_t frameId){return check(xellAddMarkerDataFn(ll,frameId,m),"XeLL marker");}
+    bool marker(xell_latency_marker_type_t m,uint32_t frameId){
+        const auto result=xellAddMarkerDataFn(ll,frameId,m);
+        if(result!=0||log::verboseFrameLogs())log::info("xess-fg",std::format("XeLL marker type={} frameId={} result={} presentId={}",int(m),frameId,int(result),id));
+        return result>=0;
+    }
     bool marker(xell_latency_marker_type_t m){return marker(m,id);}
     ~Impl(){
         if(fg&&xefgSwapChainDestroyFn)check(xefgSwapChainDestroyFn(fg),"Destroy",true);
@@ -176,17 +181,38 @@ bool XessPresenter::initialize(ID3D12Device* device,ID3D12CommandQueue* queue,ID
 }
 uint32_t XessPresenter::beginInput(){
 #ifdef VEYRA_HAS_XESS
-    auto& p=*p_;const auto frameId=++p.nextId;
+    auto& p=*p_;
+    // XeLL tracks presentation cycles, not every queued source. Complete each
+    // cycle before allocating another ID; the source queue stays asynchronous.
+    if(p.cycleOpen)return p.nextId;
+    const auto frameId=++p.nextId;
     diagnostics::CpuStallTrace trace("xess-begin-stall",frameId);
     const bool slept=p.check(p.xellSleepFn(p.ll,frameId),"XeLL sleep");trace.mark("sleep");
-    return slept&&p.marker(XELL_SIMULATION_START,frameId)?frameId:0;
+    p.cycleOpen=slept&&p.marker(XELL_SIMULATION_START,frameId);
+    p.renderSubmitStarted=p.renderSubmitEnded=false;
+    return p.cycleOpen?frameId:0;
 #else
     return 0;
 #endif
 }
 bool XessPresenter::beginProcessing(uint32_t frameId){
 #ifdef VEYRA_HAS_XESS
-    auto& p=*p_;return frameId&&p.marker(XELL_SIMULATION_END,frameId)&&p.marker(XELL_RENDERSUBMIT_START,frameId);
+    auto& p=*p_;
+    if(!frameId)return false;
+    if(!p.cycleOpen||frameId!=p.nextId||p.renderSubmitStarted)return true;
+    p.renderSubmitStarted=p.marker(XELL_SIMULATION_END,frameId)&&p.marker(XELL_RENDERSUBMIT_START,frameId);
+    return p.renderSubmitStarted;
+#else
+    (void)frameId;return false;
+#endif
+}
+bool XessPresenter::endProcessing(uint32_t frameId){
+#ifdef VEYRA_HAS_XESS
+    auto& p=*p_;
+    if(!frameId)return false;
+    if(!p.cycleOpen||frameId!=p.nextId||p.renderSubmitEnded)return true;
+    p.renderSubmitEnded=beginProcessing(frameId)&&p.marker(XELL_RENDERSUBMIT_END,frameId);
+    return p.renderSubmitEnded;
 #else
     (void)frameId;return false;
 #endif
@@ -194,13 +220,10 @@ bool XessPresenter::beginProcessing(uint32_t frameId){
 bool XessPresenter::beginFrame(uint32_t preparedFrameId){
 #ifdef VEYRA_HAS_XESS
     auto& p=*p_;
-    // Prepared frames keep the ID assigned before source sampling, even while
-    // another source frame is in flight. Repaints have no enhancement phase.
-    if(preparedFrameId>p.id){p.id=preparedFrameId;return true;}
-    // A repaint can overtake queued work. Never submit an older present ID;
-    // the fallback measures this presentation only, not the earlier graph work.
-    if(preparedFrameId)log::info("xess-fg",std::format("retire overtaken preparation id={} lastPresentId={}; new presentation markers",preparedFrameId,p.id));
-    p.id=beginInput();return p.id&&beginProcessing(p.id);
+    p.id=beginInput();
+    if(log::verboseFrameLogs()&&preparedFrameId!=p.id)
+        log::info("xess-fg",std::format("presentation cycle id={} preparationCycle={}; cycle timing is not source-frame latency",p.id,preparedFrameId));
+    return p.id&&beginProcessing(p.id);
 #else
     (void)preparedFrameId;
     return false;
@@ -234,7 +257,7 @@ bool XessPresenter::tag(ID3D12GraphicsCommandList* list,ID3D12Resource* color,ID
 }
 bool XessPresenter::beforePresent(){
 #ifdef VEYRA_HAS_XESS
-    auto& p=*p_;return p.marker(XELL_RENDERSUBMIT_END)&&p.check(p.xefgSwapChainSetPresentIdFn(p.fg,p.id),"SetPresentId")&&p.marker(XELL_PRESENT_START);
+    auto& p=*p_;return endProcessing(p.id)&&p.check(p.xefgSwapChainSetPresentIdFn(p.fg,p.id),"SetPresentId")&&p.marker(XELL_PRESENT_START);
 #else
     return false;
 #endif
@@ -242,6 +265,7 @@ bool XessPresenter::beforePresent(){
 bool XessPresenter::afterPresent(){
 #ifdef VEYRA_HAS_XESS
     auto& p=*p_;if(!p.marker(XELL_PRESENT_END))return false;
+    p.cycleOpen=false;
     xefg_swapchain_present_status_t status{};
     if(!p.check(p.xefgSwapChainGetLastPresentStatusFn(p.fg,&status),"PresentStatus"))return false;
     if(status.isFrameGenEnabled&&status.frameGenResult==XEFG_SWAPCHAIN_RESULT_SUCCESS&&status.framesPresented>1)p.generated+=status.framesPresented-1;

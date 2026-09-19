@@ -182,12 +182,13 @@ int wmain(int argc,wchar_t** argv){
     const bool recovery=wcscmp(argv[1],L"xess-recovery2")==0||wcscmp(argv[1],L"xess-recovery3")==0||wcscmp(argv[1],L"xess-recovery4")==0||wcscmp(argv[1],L"xess-resize4")==0;
     const bool resizeRecovery=wcscmp(argv[1],L"xess-resize4")==0;
     const bool soak=wcscmp(argv[1],L"xess-soak4")==0;
-    const bool xess=soak||recovery||pan||wcscmp(argv[1],L"xess")==0||wcscmp(argv[1],L"dis-xess")==0;
+    const bool yuy50=wcscmp(argv[1],L"xess-yuy50-2")==0||wcscmp(argv[1],L"xess-yuy50-4")==0;
+    const bool xess=yuy50||soak||recovery||pan||wcscmp(argv[1],L"xess")==0||wcscmp(argv[1],L"dis-xess")==0;
     const bool amd=wcscmp(argv[1],L"amd")==0;
     const bool sr=std::wstring(argv[1]).find(L"sr")==0;
     if(!xess&&!amd&&!sr&&!dis&&wcscmp(argv[1],L"nvof1080")!=0)return 2;
     const bool full=std::wstring(argv[1]).find(L"1080")!=std::wstring::npos;
-    const unsigned width=(sr||full)?1920:640,height=(sr||full)?1080:360,frames=soak?3600:sr?3:48;
+    const unsigned width=(sr||full)?1920:640,height=(sr||full)?1080:360,frames=soak?3600:yuy50?100:sr?3:48;
     CoInitializeEx(nullptr,COINIT_MULTITHREADED);
     std::filesystem::create_directories(argv[2]);
     Logger::instance().openFile((std::filesystem::path(argv[2])/"engine.log").wstring());
@@ -202,10 +203,10 @@ int wmain(int argc,wchar_t** argv){
     pipeline::EnhanceGraph graph(ctx,ring);engine::VideoPresenter presenter;
     pipeline::EnhanceGraphDesc desc;
     desc.sourceWidth=desc.workWidth=width;desc.sourceHeight=desc.workHeight=height;
-    desc.rgbInput=true;desc.enableNr=false;desc.enableFg=xess;desc.noNgx=true;
+    desc.rgbInput=!yuy50;desc.yuy2Input=yuy50;desc.enableNr=false;desc.enableFg=xess;desc.noNgx=true;
     desc.enableNvofStandalone=true;
     desc.frameGenerationBackend=engine::FrameGenerationBackend::XeSS;
-    if(soak||wcscmp(argv[1],L"xess-pan4")==0)desc.fgMultiplier=4;
+    if(soak||wcscmp(argv[1],L"xess-pan4")==0||wcscmp(argv[1],L"xess-yuy50-4")==0)desc.fgMultiplier=4;
     if(recovery)desc.fgMultiplier=(resizeRecovery||wcscmp(argv[1],L"xess-recovery4")==0)?4:wcscmp(argv[1],L"xess-recovery3")==0?3:2;
     desc.opticalFlowBackend=dis?engine::OpticalFlowBackend::GpuDis:amd?engine::OpticalFlowBackend::AmdFidelityFx:engine::OpticalFlowBackend::Nvidia;
     if(sr){
@@ -224,7 +225,7 @@ int wmain(int argc,wchar_t** argv){
         const auto again=gfx::XessPacing::install(GetModuleHandleW(L"libxess_fg.dll"),desc.fgMultiplier-1);
         ok=again.installed;
     }
-    AVFrame* frame=av_frame_alloc();frame->format=AV_PIX_FMT_RGBA;frame->width=int(width);frame->height=int(height);frame->color_trc=AVCOL_TRC_IEC61966_2_1;
+    AVFrame* frame=av_frame_alloc();frame->format=yuy50?AV_PIX_FMT_YUYV422:AV_PIX_FMT_RGBA;frame->width=int(width);frame->height=int(height);frame->color_trc=AVCOL_TRC_IEC61966_2_1;
     ok=ok&&av_frame_get_buffer(frame,32)>=0;
     pipeline::EnhanceGraph::FrameOutputs out;
     FlowSample rightward{}, leftward{};
@@ -235,21 +236,22 @@ int wmain(int argc,wchar_t** argv){
     if(pan)view.zoom=1.5f;
     const auto cadenceStart=std::chrono::steady_clock::now();
     for(unsigned i=0;ok&&i<frames;++i){
-        if(soak)std::this_thread::sleep_until(cadenceStart+std::chrono::microseconds(uint64_t(i)*1000000/30));
+        if(soak||yuy50)std::this_thread::sleep_until(cadenceStart+std::chrono::microseconds(uint64_t(i)*1000000/(yuy50?50:30)));
         ok=presenter.beginSourceInput()&&ok;
         MSG msg;while(PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)){TranslateMessage(&msg);DispatchMessageW(&msg);}
         const int phase = i < 24 ? int(i) : int(i - 24);
         const int velocity = i < 24 ? 2 : -2;
         for(int y=0;y<int(height);++y)for(int x=0;x<int(width);++x){
-            const int px=(x-phase*velocity+int(width))%int(width);auto* p=frame->data[0]+y*frame->linesize[0]+x*4;
+            const int px=(x-phase*velocity+int(width))%int(width);auto* p=frame->data[0]+y*frame->linesize[0]+x*(yuy50?2:4);
             // A spatially non-periodic pattern makes a two-pixel translation
             // identifiable. The previous striped pattern had repeating aliases.
             uint32_t hash=uint32_t(px)*0x9E3779B9u^uint32_t(y)*0x85EBCA6Bu;
             hash^=hash>>16;hash*=0x7FEB352Du;hash^=hash>>15;hash*=0x846CA68Bu;hash^=hash>>16;
-            p[0]=uint8_t(hash);p[1]=uint8_t(hash>>8);p[2]=uint8_t(hash>>16);p[3]=255;
+            if(yuy50){p[0]=uint8_t(16+hash%220);p[1]=128;}
+            else{p[0]=uint8_t(hash);p[1]=uint8_t(hash>>8);p[2]=uint8_t(hash>>16);p[3]=255;}
         }
         const bool forcedReset=i==0||i==24||(recovery&&(i==8||i==32||i==40));
-        out={};ok=ok&&presenter.beginSourceProcessing()&&graph.process(frame,i*1000.0/30,forcedReset,out,i+1);
+        out={};ok=ok&&presenter.beginSourceProcessing()&&graph.process(frame,i*1000.0/(yuy50?50:30),forcedReset,out,i+1);
         if(ok)presenter.sourceProcessed(out.batch.identity);
         if(ok&&recovery&&i==18){
             // Repaint an older identity while the next source is prepared.
@@ -281,7 +283,7 @@ int wmain(int argc,wchar_t** argv){
             FlowSample& sample=i==23?rightward:leftward;
             ok=ok&&readCanonicalFlow(ctx,ring,graph.flowResource(),sample);
         }
-        if(!soak)Sleep(34);
+        if(!soak&&!yuy50)Sleep(34);
         if(recovery&&info){
             const auto messages=info->GetNumStoredMessagesAllowedByRetrievalFilter();
             if(messages!=previousMessages)std::cout<<"DEBUG frame="<<i<<" messages="<<messages<<std::endl;
@@ -299,6 +301,11 @@ int wmain(int argc,wchar_t** argv){
         std::cout<<"SR extent="<<image.width<<"x"<<image.height<<" evaluate="<<graph.metrics().srEvaluateCount<<" nonblack="<<nonblack<<" pass="<<ok<<std::endl;
     }
     if(xess)ok=ok&&generated>10;
+    if(yuy50){
+        const auto expectedMinimum=(frames-8)*(desc.fgMultiplier-1);
+        ok=ok&&generated>=expectedMinimum;
+        std::cout<<"YUY50 multiplier="<<desc.fgMultiplier<<" generated="<<generated<<" minimum="<<expectedMinimum<<" pass="<<ok<<std::endl;
+    }
     if(recovery)ok=ok&&recovered==3;
     if(pan){
         ok=ok&&panGenerated>10;

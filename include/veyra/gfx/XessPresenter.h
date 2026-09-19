@@ -14,6 +14,7 @@ public:
     bool initialize(ID3D12Device*,ID3D12CommandQueue*,IDXGIFactory2*,HWND,const DXGI_SWAP_CHAIN_DESC1&,IDXGISwapChain3**,uint32_t fgMultiplier=1);
     uint32_t beginInput();
     bool beginProcessing(uint32_t frameId);
+    bool endProcessing(uint32_t frameId);
     bool beginFrame(uint32_t preparedFrameId=0);
     bool tag(ID3D12GraphicsCommandList*,ID3D12Resource* color,ID3D12Resource* motion,ID3D12Resource* depth,
              RECT region,bool enabled,bool reset,float elapsedMs);

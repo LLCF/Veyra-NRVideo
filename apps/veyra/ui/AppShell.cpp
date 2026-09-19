@@ -78,7 +78,21 @@ bool openColourPageOnStart=false;
 uint64_t colourLiveRevision=0;
 uint64_t colourPausedBase=0;
 void switchMode();void selectInspector(int);
-bool applySettings(veyra::engine::EnhancementSettings s){if(masterPendingRevision)return false;uiState.configured=s;if(uiState.enhanced)engine.requestSettings(s);else {auto effective=engine.snapshot().desired;if(effective.captureCompatible!=s.captureCompatible||effective.forceSdrPreview!=s.forceSdrPreview||effective.captureFlipVertical!=s.captureFlipVertical||effective.captureBuffer!=s.captureBuffer||!(effective.color==s.color)){effective.captureCompatible=s.captureCompatible;effective.forceSdrPreview=s.forceSdrPreview;effective.captureFlipVertical=s.captureFlipVertical;effective.captureBuffer=s.captureBuffer;effective.color=s.color;engine.requestSettings(effective);}veyra::log::info("ui-settings","enhancement off: draft saved; presentation setting applied independently");}veyra::ui::settingsEnabled(uiState.enhanced,uiState.configured);return true;}
+bool applySettings(veyra::engine::EnhancementSettings s){
+    if(masterPendingRevision)return false;
+    if(uiState.enhanced){if(!engine.requestSettings(s))return false;}
+    else {
+        auto effective=engine.snapshot().desired;
+        if(effective.captureCompatible!=s.captureCompatible||effective.forceSdrPreview!=s.forceSdrPreview||effective.captureFlipVertical!=s.captureFlipVertical||effective.captureBuffer!=s.captureBuffer||!(effective.color==s.color)){
+            effective.captureCompatible=s.captureCompatible;effective.forceSdrPreview=s.forceSdrPreview;
+            effective.captureFlipVertical=s.captureFlipVertical;effective.captureBuffer=s.captureBuffer;effective.color=s.color;
+            if(!engine.requestSettings(effective))return false;
+        }
+        veyra::log::info("ui-settings","enhancement off: draft saved; presentation setting applied independently");
+    }
+    uiState.configured=s;
+    veyra::ui::settingsEnabled(uiState.enhanced,uiState.configured);return true;
+}
 
 struct ToolbarItem{HWND hwnd;int width;};std::vector<ToolbarItem> toolbar;
 bool full=false,holdOriginal=false,referenceBase=false;int compareMode=0;float compareSplit=.5f;WINDOWPLACEMENT windowPlacement{sizeof(windowPlacement)};
@@ -598,7 +612,9 @@ case WM_APP+45:{if(masterPendingRevision)return 0;auto settings=uiState.enhanced
     if(wp==214){cancelProtection();settings.protection={};}else if(wp==206)settings.protection.enabled=lp==BST_CHECKED;else if(wp==222)settings.protection.featherPixels=float(std::clamp(int(lp),0,64));else return 0;
     return applySettings(settings)?1:0;}
 case WM_APP+44:{if(masterPendingRevision)return 0;auto setting=uiState.enhanced?engine.snapshot().desired:uiState.configured;const bool enabled=wp==202?lp>1:lp==BST_CHECKED;if(wp==200)setting.nr=enabled;else if(wp==201)setting.sr=enabled;else if(wp==230)setting.videoHdr.enabled=enabled;else if(wp==202){bool allowed=false;for(auto m:veyra::engine::kFgMultiplierChoices)if(uint32_t(lp)==m)allowed=true;if(!allowed)return 0;setting.multiplier=uint32_t(lp);if(!setting.validate().empty())return 0;}else return 0;
-    const bool enablesMaster=enabled&&!uiState.enhanced;if(enablesMaster){masterPreviousEnabled=false;uiState.enhanced=true;}applySettings(setting);if(auto pending=engine.snapshot();enablesMaster&&pending.running){masterPendingRevision=pending.desired.revision;masterPendingSession=pending.sessionId;}veyra::log::info("ui-feature",std::format("click={} enabled={} requestedRevision={} draft-independent=true",wp==200?"NR":wp==201?"SR":wp==230?"VideoHDR":"FG",enabled,engine.snapshot().desired.revision));return 1;}
+    const bool enablesMaster=enabled&&!uiState.enhanced;if(enablesMaster){masterPreviousEnabled=false;uiState.enhanced=true;}
+    if(!applySettings(setting)){if(enablesMaster)uiState.enhanced=false;veyra::ui::settingsEnabled(uiState.enhanced,uiState.configured);return 0;}
+    if(auto pending=engine.snapshot();enablesMaster&&pending.running){masterPendingRevision=pending.desired.revision;masterPendingSession=pending.sessionId;}veyra::log::info("ui-feature",std::format("click={} enabled={} requestedRevision={} draft-independent=true",wp==200?"NR":wp==201?"SR":wp==230?"VideoHDR":"FG",enabled,engine.snapshot().desired.revision));return 1;}
 case WM_APP+43:showDiagnostics=false;layout();return 0;
 case WM_APP+41:switch(wp){case 501:startVideoExport(lp!=0);break;case 502:{auto path=fileDialog(true);if(!path.empty())engine.saveFrame(path);break;}case 503:jobPaused=!jobPaused;exportJob.pause(jobPaused);break;case 504:exportJob.cancel();break;case 505:preferWatching=lp==BST_CHECKED;break;}return 0;
 case WM_ENTERSIZEMOVE:
