@@ -90,3 +90,9 @@ veyra_presentation_pacing_tests.exe capture <capture4-retry证据目录> -1 0 4 
 - 构建/CPU/UI结果：`E:/项目/Veyra/logs/5060-presets-subtitles-20260918`。
 - GPU日志/CSV、位图样本、界面截图及 `ui/result.json`：`E:/项目/Veyra/tests/5060-presets-subtitles-20260918`。
 - 仅清理本任务无效转码中间文件；保留可用构建、有效样本、失败与成功证据。未修改用户源日志/电影文件，没有新包、合并main、推送或发布。
+
+## 关机与次日复核
+
+2026-09-19 次日恢复任务时核对 Windows System 日志：00:08:18 的 User32/1074 记录本任务 `shutdown.exe` 发起关机，00:08:25 的 EventLog/6006 记录服务停止；08:41:56 的6005记录再次启动。关机脚本日志 exit=0，授权的关机动作已履行，不在自动续接时重复关机。
+
+源码修复提交 `4c41ffa`，交付存档 `checkpoint/5060-presets-subtitles-local-20260919`；次日工作区干净、EXE SHA256与上述记录一致。5060原日志仍为4419693字节、最后修改2026-09-18 20:35:12，未收到新构建复现证据，不能关闭其根因待办或将整个目标标成完成。
