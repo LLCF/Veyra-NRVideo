@@ -2,6 +2,7 @@
 #include "veyra/source/CaptureMediaType.h"
 #include "veyra/Log.h"
 #include "veyra/sink/AudioFormat.h"
+#include "veyra/sink/BitstreamAudio.h"
 #include <format>
 #include <mmreg.h>
 #include <atomic>
@@ -67,9 +68,9 @@ class NativeSink final:public IBaseFilter,public IPin,public IMemInputPin {
     bool compressed_=false;
 public:
     NativeSink(const AM_MEDIA_TYPE& type,std::function<HRESULT(IMediaSample*)> cb,bool compressed=false):callback_(std::move(cb)){
-        compressed_=compressed;audio_=audioType(type);
+        compressed_=compressed;audio_=!compressed&&audioType(type);
         if(compressed_){
-            if(type.majortype!=MEDIATYPE_Video||FAILED(copyType(desired_,type)))throw std::bad_alloc();
+            if(FAILED(copyType(desired_,type)))throw std::bad_alloc();
         }else{
             if((!audio_&&!captureMediaLayout(type,layout_))||FAILED(copyType(desired_,type)))throw std::bad_alloc();
             if(audio_)layout_.sampleBytes=reinterpret_cast<const WAVEFORMATEX*>(type.pbFormat)->nBlockAlign;
@@ -204,5 +205,12 @@ HRESULT createNativeCaptureSink(const AM_MEDIA_TYPE& type,std::function<HRESULT(
 HRESULT createNativeAudioSink(const AM_MEDIA_TYPE& type,std::function<HRESULT(IMediaSample*)> callback,ComPtr<IBaseFilter>& filter,ComPtr<IPin>& pin){
     filter.Reset();pin.Reset();if(!audioType(type))return VFW_E_INVALIDMEDIATYPE;
     try{filter.Attach(new NativeSink(type,std::move(callback)));return filter.As(&pin);}catch(...){return E_OUTOFMEMORY;}
+}
+HRESULT createBitstreamAudioSink(const AM_MEDIA_TYPE& type,std::function<HRESULT(IMediaSample*)> callback,ComPtr<IBaseFilter>& filter,ComPtr<IPin>& pin){
+    filter.Reset();pin.Reset();
+    if(type.majortype!=MEDIATYPE_Audio||sink::classifyBitstreamSubtype(type.subtype.Data1)==sink::BitstreamKind::None||
+       (type.cbFormat&&!type.pbFormat))return VFW_E_INVALIDMEDIATYPE;
+    // Compressed packets have no PCM sample stride or byte-rate contract.
+    try{filter.Attach(new NativeSink(type,std::move(callback),true));return filter.As(&pin);}catch(...){return E_OUTOFMEMORY;}
 }
 }

@@ -1601,9 +1601,9 @@ case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.
         }
     }
     setText(item(1103),L"光流与补帧");
-    add(L"BUTTON",L"帧同步",240,BS_AUTOCHECKBOX|WS_TABSTOP,1,12,550,-1,32);
+    add(L"BUTTON",L"帧节奏 / 显示同步",240,BS_AUTOCHECKBOX|WS_TABSTOP,1,12,550,-1,32);
     combo(241,1,590,{L"低排队",L"均匀呈现 · 前端同步",L"NVIDIA Reflex · 实验"});
-    combo(242,1,634,{L"允许撕裂",L"垂直同步",L"自动"});
+    combo(242,1,634,{L"显示：允许撕裂",L"显示：垂直同步",L"显示：自动"});
     add(L"STATIC",L"",1150,SS_NOPREFIX,1,12,678,-1,70);
     {const auto p=controller->snapshot().presentation;check(240,p.enabled?BST_CHECKED:BST_UNCHECKED);send(241,CB_SETCURSEL,unsigned(p.mode));send(242,CB_SETCURSEL,unsigned(p.display));EnableWindow(item(241),p.enabled);EnableWindow(item(242),p.enabled);}
     button(L"Smooth Motion · 开启方法 ▾",221,1,12,358);

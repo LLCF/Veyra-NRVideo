@@ -256,7 +256,15 @@ PresentationSettings VideoPresenter::configurePresentation(gfx::D3D12DeviceConte
     auto effective=requested;
     if(!reflexDisabled){effective.enabled=false;sink_.configurePacing(false,false);status=L"Reflex 驱动状态撤销失败；应用等待已停用，请关闭视频后重试";return effective;}
     if(!requested.enabled){const bool restored=sink_.configurePacing(false,false);status=restored?L"帧同步已关闭":L"应用等待已关闭，但显示队列恢复失败；请关闭视频后重试";return effective;}
-    if(xessActive()||fsrActive()){effective.enabled=false;sink_.configurePacing(false,false);status=L"当前由补帧提供方调度，帧同步选项暂不生效";return effective;}
+    if(xessActive()||fsrActive()){
+        effective.enabled=false;
+        const bool vsync=xessActive()&&requested.display!=DisplaySync::Tearing;
+        sink_.configurePacing(false,vsync);
+        if(fsrActive()){effective.display=DisplaySync::Tearing;status=L"FSR 提供方调度；显示同步暂不支持";}
+        else status=vsync?L"XeSS 提供方调度 · 垂直同步":L"XeSS 提供方调度 · 允许撕裂";
+        if(xessActive()&&requested.display==DisplaySync::Automatic)status+=L"（自动；VRR 状态未知）";
+        return effective;
+    }
     if(!sink_.configurePacing(true,requested.display!=DisplaySync::Tearing)){effective.enabled=false;status=L"显示队列控制不可用，已回退原呈现方式";return effective;}
     if(requested.mode==PacingMode::Reflex){
         // Generated outputs need separately validated out-of-band markers.

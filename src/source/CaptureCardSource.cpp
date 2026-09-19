@@ -35,6 +35,7 @@ extern "C" {
 #include <atomic>
 #include <format>
 #include <chrono>
+#include "veyra/source/CaptureAudioClock.h"
 #include <cmath>
 #include <string_view>
 extern "C" {
@@ -143,6 +144,12 @@ std::wstring monikerPath(IMoniker* moniker){
 }
 bool audioOutputPin(IPin* pin){
     if(!pin)return false;PIN_DIRECTION direction{};if(FAILED(pin->QueryDirection(&direction))||direction!=PINDIR_OUTPUT)return false;
+    ComPtr<IAMStreamConfig> config;
+    if(SUCCEEDED(pin->QueryInterface(IID_PPV_ARGS(&config)))){
+        AM_MEDIA_TYPE* type=nullptr;const auto hr=config->GetFormat(&type);
+        const bool audio=SUCCEEDED(hr)&&type&&type->majortype==MEDIATYPE_Audio;
+        if(type)freeType(type);if(audio)return true;
+    }
     ComPtr<IEnumMediaTypes> types;if(FAILED(pin->EnumMediaTypes(&types)))return false;
     for(;;){AM_MEDIA_TYPE* type=nullptr;const HRESULT hr=types->Next(1,&type,nullptr);if(hr!=S_OK||!type)break;const bool audio=type->majortype==MEDIATYPE_Audio;freeType(type);if(audio)return true;}
     return false;
@@ -224,6 +231,7 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
     uint64_t received=0,dropped=0,lastDrop=0,sequence=0;
     uint64_t discontinuitySamples=0;
     Clock::time_point pendingArrival{},readArrival{},firstArrival{},latestArrival{};
+    std::deque<Clock::time_point> recentArrivals;
     ComPtr<IGraphBuilder> graph;ComPtr<ICaptureGraphBuilder2> builder;ComPtr<IBaseFilter> device,grabFilter,nullFilter,audioFilter;ComPtr<IAMStreamConfig> config;ComPtr<ISampleGrabber> grab;ComPtr<IMediaControl> control;ComPtr<IMediaEvent> events;
     float lastAudioGain=-1;bool audioGainSupported=false;
     ComPtr<IBaseFilter> audioSink;ComPtr<IReferenceClock> referenceClock;
@@ -353,9 +361,10 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
         const bool sampleTime=sample&&sample->GetTime(&sampleStart,&sampleEnd)==S_OK;
         const bool valid=sample&&std::isfinite(time)&&SUCCEEDED(sample->GetPointer(&data))&&data&&
             (compressedPath?sample->GetActualDataLength()>0:sample->GetActualDataLength()>=LONG(layout.sampleBytes));
-        bool enqueued=false;uint64_t timingSequence=0;int64_t copied100ns=0;
+        bool enqueued=false;uint64_t timingSequence=0;int64_t copied100ns=0;double lockWaitMs=0;
         {
             std::lock_guard lock(mutex);
+            lockWaitMs=std::chrono::duration<double,std::milli>(Clock::now()-arrival).count();
             // The compressed path decodes in its own worker and keeps its own
             // frame pool, so the preallocated NV12 mailbox is legitimately
             // empty between reads; only the native path requires it here.
@@ -396,10 +405,13 @@ struct CaptureCardSource::Impl:ISampleGrabberCB {
                 }
                 if(!received)firstArrival=arrival;
                 ++received;latestArrival=arrival;
+                recentArrivals.push_back(arrival);
+                while(recentArrivals.size()>1&&(recentArrivals.size()>1024||arrival-recentArrivals.front()>std::chrono::seconds(2)))recentArrivals.pop_front();
                 timingSequence=received;copied100ns=std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count()/100;
             }
         }
         if(enqueued)decodeWake.notify_one();
+        if(timingSequence&&(timingSequence%120==0||lockWaitMs>5))log::info("capture-callback",std::format("source={} entryToLockMs={:.3f} entryToCopiedMs={:.3f} bytes={} compressed={} (callback cost, not display latency)",timingSequence,lockWaitMs,(copied100ns-std::chrono::duration_cast<std::chrono::nanoseconds>(arrival.time_since_epoch()).count()/100)/10000.0,sample->GetActualDataLength(),compressedPath));
         if(log::verboseFrameLogs()&&timingSequence)log::info("capture-ingress-sample",std::format("source={} arrival={} copied={} compressed={}",timingSequence,std::chrono::duration_cast<std::chrono::nanoseconds>(arrival.time_since_epoch()).count()/100,copied100ns,compressedPath));
         wake.notify_one();return S_OK;
     }
@@ -814,11 +826,20 @@ bool CaptureCardSource::connectDirectShowAudio(const SourceOpenDesc& desc){
             embedded?" (this video filter exposes no audio pin; select the separate audio device)":""));
         return false;
     }
-    ComPtr<IEnumMediaTypes> types;hr=audioPin->EnumMediaTypes(&types);if(FAILED(hr)){log::warn("capture-audio",std::format("EnumMediaTypes hr=0x{:08X}",uint32_t(hr)));return false;}
+    ComPtr<IEnumMediaTypes> types;hr=audioPin->EnumMediaTypes(&types);if(FAILED(hr)){types.Reset();log::warn("capture-audio",std::format("EnumMediaTypes hr=0x{:08X}; trying current driver format",uint32_t(hr)));}
     // Preserve the device's actual speaker layout. Enumeration order is
     // commonly stereo first even when native 5.1 is available.
     auto releaseType=[](AM_MEDIA_TYPE* type){freeType(type);};
     using AudioType=std::unique_ptr<AM_MEDIA_TYPE,decltype(releaseType)>;
+    std::vector<AudioType> candidates;
+    ComPtr<IAMStreamConfig> audioConfig;
+    if(SUCCEEDED(audioPin.As(&audioConfig))){
+        AM_MEDIA_TYPE* current=nullptr;const auto currentHr=audioConfig->GetFormat(&current);
+        log::info("capture-audio",std::format("current driver format hr=0x{:08X}",uint32_t(currentHr)));
+        if(SUCCEEDED(currentHr)&&current)candidates.emplace_back(current,releaseType);else if(current)freeType(current);
+    }
+    while(types){AM_MEDIA_TYPE* type=nullptr;const auto next=types->Next(1,&type,nullptr);
+        if(next!=S_OK||!type){if(type)freeType(type);break;}candidates.emplace_back(type,releaseType);}
 std::vector<AudioType> audioTypes;std::vector<AudioType> bitstreamTypes;unsigned typeIndex=0;
 // Dolby/DTS bitstream capability probe: the capture card may expose AC-3 /
 // E-AC-3 (Dolby Digital Plus, includes Atmos over DD+) / TrueHD / DTS instead
@@ -840,8 +861,8 @@ auto bitstreamName=[](const GUID& subtype)->const char*{
     default:return nullptr;
     }
 };
-for(;;){AM_MEDIA_TYPE* type=nullptr;if(types->Next(1,&type,nullptr)!=S_OK||!type)break;
-AudioType owned(type,releaseType);sink::WavePcmFormat pcm;bool supported=false;
+for(auto& owned:candidates){AM_MEDIA_TYPE* type=owned.get();if(type->majortype!=MEDIATYPE_Audio)continue;
+sink::WavePcmFormat pcm;bool supported=false;
 if(type->formattype==FORMAT_WaveFormatEx&&type->pbFormat)supported=sink::parseWavePcm(type->pbFormat,type->cbFormat,pcm);
 if(!supported){
     const char* name=bitstreamName(type->subtype);
@@ -878,11 +899,15 @@ if(audioTypes.empty()&&(!allowBitstream||bitstreamTypes.empty())){log::warn("cap
         if(type->formattype==FORMAT_WaveFormatEx&&type->pbFormat&&type->cbFormat>=sizeof(WAVEFORMATEX)&&sink::parseWavePcm(type->pbFormat,type->cbFormat,parsed)&&session->configure(parsed)){
             auto* target=session.get();
             auto probe=std::make_shared<sink::Iec61937Probe>();
-            hr=createNativeAudioSink(*type,[target,probe](IMediaSample* sample){
+            hr=createNativeAudioSink(*type,[target,probe,clock=CaptureAudioClock{},rate=parsed.wave.nAvgBytesPerSec,warned=false](IMediaSample* sample) mutable {
                 BYTE* bytes=nullptr;REFERENCE_TIME begin=0,end=0;
-                if(FAILED(sample->GetPointer(&bytes))||FAILED(sample->GetTime(&begin,&end)))return VFW_E_SAMPLE_TIME_NOT_SET;
+                const auto pointerHr=sample->GetPointer(&bytes);if(FAILED(pointerHr))return pointerHr;
+                const auto timeHr=sample->GetTime(&begin,&end);const bool timed=SUCCEEDED(timeHr);
+                if(!timed&&!warned){log::warn("capture-audio",std::format("PCM timestamp missing hr=0x{:X}; using sample-count clock",unsigned(timeHr)));warned=true;}
+                const double arrival=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+                const double pts=clock.observe(timed?std::optional<double>(double(begin)/10000):std::nullopt,arrival,1000.0*sample->GetActualDataLength()/rate,sample->IsDiscontinuity()==S_OK);
                 probe->feed(bytes,size_t(sample->GetActualDataLength()));
-                return target->push(bytes,size_t(sample->GetActualDataLength()),double(begin)/10000,sample->IsDiscontinuity()==S_OK)?S_OK:E_FAIL;
+                return target->push(bytes,size_t(sample->GetActualDataLength()),pts,sample->IsDiscontinuity()==S_OK)?S_OK:E_FAIL;
             },candidate,terminal);
             if(SUCCEEDED(hr))hr=p.graph->AddFilter(candidate.Get(),L"Veyra audio PCM");
             // Request small input blocks before connection; downstream
@@ -938,7 +963,7 @@ if(audioTypes.empty()&&(!allowBitstream||bitstreamTypes.empty())){log::warn("cap
                     if(passthrough->open(*carrier,rate)){
                         ComPtr<IBaseFilter> candidate;ComPtr<IPin> terminal;
                         auto sink=passthrough;
-                        hr=createNativeAudioSink(*type,[sink](IMediaSample* sample){
+                        hr=createBitstreamAudioSink(*type,[sink](IMediaSample* sample){
                             BYTE* bytes=nullptr;
                             if(FAILED(sample->GetPointer(&bytes)))return VFW_E_SAMPLE_TIME_NOT_SET;
                             return sink->write(bytes,size_t(sample->GetActualDataLength()))?S_OK:E_FAIL;
@@ -972,9 +997,11 @@ if(audioTypes.empty()&&(!allowBitstream||bitstreamTypes.empty())){log::warn("cap
             auto started=std::make_shared<bool>(false);
             const std::string kindName=sink::bitstreamKindName(kind);
             const std::wstring kindWide(kindName.begin(),kindName.end());
-            hr=createNativeAudioSink(*type,[target,decoder,pcmBuffer,started,kindWide](IMediaSample* sample){
+            hr=createBitstreamAudioSink(*type,[target,decoder,pcmBuffer,started,kindWide,clock=CaptureAudioClock{},warned=false](IMediaSample* sample) mutable {
                 BYTE* bytes=nullptr;REFERENCE_TIME begin=0,end=0;
-                if(FAILED(sample->GetPointer(&bytes))||FAILED(sample->GetTime(&begin,&end)))return VFW_E_SAMPLE_TIME_NOT_SET;
+                const auto pointerHr=sample->GetPointer(&bytes);if(FAILED(pointerHr))return pointerHr;
+                const auto timeHr=sample->GetTime(&begin,&end);const bool timed=SUCCEEDED(timeHr);
+                if(!timed&&!warned){log::warn("capture-audio",std::format("bitstream timestamp missing hr=0x{:X}; using decoded sample-count clock",unsigned(timeHr)));warned=true;}
                 pcmBuffer->clear();
                 if(!decoder->push(bytes,size_t(sample->GetActualDataLength()),*pcmBuffer))return S_OK;
                 if(pcmBuffer->empty())return S_OK;
@@ -998,7 +1025,9 @@ if(audioTypes.empty()&&(!allowBitstream||bitstreamTypes.empty())){log::warn("cap
                     target->setInputBitstream(kindWide);
                     *started=true;
                 }
-                return target->push(pcmBuffer->data(),pcmBuffer->size()*sizeof(float),double(begin)/10000,sample->IsDiscontinuity()==S_OK)?S_OK:E_FAIL;
+                const double arrival=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+                const double pts=clock.observe(timed?std::optional<double>(double(begin)/10000):std::nullopt,arrival,1000.0*pcmBuffer->size()/channels/rate,sample->IsDiscontinuity()==S_OK);
+                return target->push(pcmBuffer->data(),pcmBuffer->size()*sizeof(float),pts,sample->IsDiscontinuity()==S_OK)?S_OK:E_FAIL;
             },candidate,terminal);
             if(SUCCEEDED(hr))hr=p.graph->AddFilter(candidate.Get(),L"Veyra audio bitstream");
             if(SUCCEEDED(hr))hr=p.graph->ConnectDirect(audioPin.Get(),terminal.Get(),type);
@@ -1087,7 +1116,7 @@ bool CaptureCardSource::reconnect(float gain,unsigned syncMode,int offsetMs){
 CaptureMetrics CaptureCardSource::metrics()const{
     auto& p=*p_;std::lock_guard lock(p.mutex);CaptureMetrics m;
     m.received=receivedOffset_+p.received;m.delivered=deliveredOffset_+p.sequence;m.dropped=droppedOffset_+p.dropped;m.readAgeMs=p.readAgeMs;
-    if(p.received>1){const double elapsed=std::chrono::duration<double>(p.latestArrival-p.firstArrival).count();if(elapsed>0)m.callbackFps=(p.received-1)/elapsed;}
+    if(p.recentArrivals.size()>1&&Impl::Clock::now()-p.latestArrival<std::chrono::seconds(1)){const double elapsed=std::chrono::duration<double>(p.recentArrivals.back()-p.recentArrivals.front()).count();if(elapsed>0)m.callbackFps=(p.recentArrivals.size()-1)/elapsed;}
     if(p.sequence)m.frameAgeMs=std::chrono::duration<double,std::milli>(Impl::Clock::now()-p.readArrival).count();return m;
 }
 SourceReadStatus CaptureCardSource::read(pipeline::FramePacket& packet,const AVFrame** frame){return readWithWait(packet,frame,30);}
@@ -1160,5 +1189,6 @@ void CaptureCardSource::close()noexcept{
     p.pendingIsHardware=false;p.compressedPath=false;p.codec=CaptureCodec::None;p.compressedDecoded=p.compressedErrors=0;
     p.info={};
     p.sequence=p.received=p.dropped=p.lastDrop=0;p.pending=p.callbackError=p.configured=p.forceDiscontinuity=false;p.lastPts=p.readAgeMs=0;
+    p.recentArrivals.clear();
 }
 }

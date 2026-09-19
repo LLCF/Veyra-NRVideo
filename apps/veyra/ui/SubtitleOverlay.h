@@ -28,6 +28,7 @@ struct SubtitleView {
     bool background=false;
     int bottomMargin=0;                // extra logical pixels above the bar
     int blockGap=6;                    // gap between the two languages
+    int targetLines=2;                 // ordinary text only; 0 keeps automatic wrapping
     engine::PreviewView preview;
     double videoWidth=0,videoHeight=0;
 };

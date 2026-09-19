@@ -321,6 +321,8 @@ bool PresentSink::present(Status& status)
     if(!beforeOk){xessFailed_=true;status=Status::WindowFailure;return false;}
     const HRESULT hr = swapChain_->Present(syncInterval, flags);
     presentTiming_.callMs=split();presentTiming_.result=hr;
+    if(attemptedPresentCount_<=3||attemptedPresentCount_%120==0)
+        log::info("present-contract",std::format("backend={} sync={} flags=0x{:X} hr=0x{:X}",xess_?"XeSS":fsr_?"FSR":"DXGI",syncInterval,flags,unsigned(hr)));
     if (SUCCEEDED(hr)) {
         ++presentCount_;
         backBufferIndex_ = swapChain_->GetCurrentBackBufferIndex();
@@ -374,10 +376,12 @@ bool PresentSink::present(Status& status)
 }
 
 bool PresentSink::configurePacing(bool enabled,bool vsync){
-    if(xess_||fsr_){pacing_=false;desc_.vsync=false;return !enabled;}
+    // XeSS owns pacing, but its proxy accepts DXGI VSync independently.
+    // Do not install another latency waiter on the provider swap chain.
+    if(xess_||fsr_){pacing_=false;capacityAcquired_=false;desc_.vsync=xess_&&vsync;log::info("pacing",std::format("provider={} applicationWait=0 vsync={}",xess_?"XeSS":"FSR",desc_.vsync));return !enabled;}
     const HRESULT hr=latencyHandle_?swapChain_->SetMaximumFrameLatency(enabled?1:3):enabled?E_NOTIMPL:S_OK;
-    log::info("pacing",std::format("DXGI enabled={} maximumLatency={} vsync={} hr=0x{:X}",enabled,enabled?1:3,enabled&&vsync,unsigned(hr)));
-    pacing_=enabled&&SUCCEEDED(hr);desc_.vsync=pacing_&&vsync;capacityAcquired_=false;
+    log::info("pacing",std::format("DXGI enabled={} maximumLatency={} vsync={} hr=0x{:X}",enabled,enabled?1:3,vsync,unsigned(hr)));
+    pacing_=enabled&&SUCCEEDED(hr);desc_.vsync=vsync;capacityAcquired_=false;
     return SUCCEEDED(hr);
 }
 bool PresentSink::presentationReady(){

@@ -18,6 +18,7 @@ struct UiPreferences {
     // and the dual-language switch.
     bool subtitleOutline=true,subtitleBackground=false,subtitleSecondLanguage=false;
     int subtitleMargin=0,subtitleFont=0;
+    int subtitleLines=2;
     // v4: colour-page accordion fold mask (one bit per section).
     uint32_t colourFoldMask=0;
     // -1 migrates v1-v4 by deriving the master switch from the saved effects.
@@ -33,7 +34,7 @@ public:
         // inspector index 4 is the audio page (selectInspector(4)), so the valid
         // range is 0..4. A narrower bound here silently discarded every saved
         // window size, volume and subtitle style for users who last sat on it.
-        if(!(file>>magic>>version>>read.volume>>mute>>sub>>read.width>>read.height>>read.x>>read.y>>pos>>read.inspector>>read.subtitleSize)||magic!="VEYRA_UI"||(version<1||version>6)||!std::isfinite(read.volume)||read.volume<0||read.volume>1||mute<0||mute>1||sub<0||sub>1||pos<0||pos>1||read.width<720||read.width>10000||read.height<540||read.height>10000||abs(int64_t(read.x))>100000||abs(int64_t(read.y))>100000||read.inspector<0||read.inspector>4||read.subtitleSize<16||read.subtitleSize>56){corrupt_=true;return result;}
+        if(!(file>>magic>>version>>read.volume>>mute>>sub>>read.width>>read.height>>read.x>>read.y>>pos>>read.inspector>>read.subtitleSize)||magic!="VEYRA_UI"||(version<1||version>7)||!std::isfinite(read.volume)||read.volume<0||read.volume>1||mute<0||mute>1||sub<0||sub>1||pos<0||pos>1||read.width<720||read.width>10000||read.height<540||read.height>10000||abs(int64_t(read.x))>100000||abs(int64_t(read.y))>100000||read.inspector<0||read.inspector>4||read.subtitleSize<16||read.subtitleSize>56){corrupt_=true;return result;}
         if(version==2&&(!(file>>read.inspectorWidth)||read.inspectorWidth<296||read.inspectorWidth>420)){corrupt_=true;return result;}
         if(version>=3){
             int outline=0,background=0,second=0;
@@ -48,12 +49,13 @@ public:
         if(version>=4&&!(file>>read.colourFoldMask)){corrupt_=true;return result;}
         if(version>=5&&(!(file>>read.enhancementEnabled)||read.enhancementEnabled< -1||read.enhancementEnabled>1)){corrupt_=true;return result;}
         if(version>=6){int enabled=0,mode=0,display=0;if(!(file>>enabled>>mode>>display)||enabled<0||enabled>1||mode<0||mode>2||display<0||display>2){corrupt_=true;return result;}read.presentation={enabled!=0,engine::PacingMode(mode),engine::DisplaySync(display)};}
+        if(version>=7&&(!(file>>read.subtitleLines)||read.subtitleLines<0||read.subtitleLines>8)){corrupt_=true;return result;}
         file>>std::ws;if(!file.eof()){corrupt_=true;return result;}read.muted=mute;read.subtitles=sub;read.positioned=pos;return read;
     }
     engine::EnhancementSettings startup(engine::EnhancementSettings fallback){engine::PresetStore last(folder_/"last-applied.v1");if(!last.load()||last.entries().empty())return fallback;return last.entries().front().settings;}
     bool save(const UiPreferences& p,const engine::EnhancementSettings* applied){
         bool ok=true;std::filesystem::create_directories(folder_);if(applied){engine::PresetStore last(folder_/"last-applied.v1");ok=last.load()&&last.put(L"Last applied",*applied,true);}
-        if(corrupt_)return false;std::ostringstream out;out<<"VEYRA_UI 6\n"<<p.volume<<' '<<p.muted<<' '<<p.subtitles<<' '<<p.width<<' '<<p.height<<' '<<p.x<<' '<<p.y<<' '<<p.positioned<<' '<<p.inspector<<' '<<p.subtitleSize<<' '<<p.inspectorWidth<<' '<<p.subtitleOutline<<' '<<p.subtitleBackground<<' '<<p.subtitleSecondLanguage<<' '<<p.subtitleMargin<<' '<<p.subtitleFont<<' '<<p.colourFoldMask<<' '<<p.enhancementEnabled<<' '<<p.presentation.enabled<<' '<<unsigned(p.presentation.mode)<<' '<<unsigned(p.presentation.display)<<'\n';
+        if(corrupt_)return false;std::ostringstream out;out<<"VEYRA_UI 7\n"<<p.volume<<' '<<p.muted<<' '<<p.subtitles<<' '<<p.width<<' '<<p.height<<' '<<p.x<<' '<<p.y<<' '<<p.positioned<<' '<<p.inspector<<' '<<p.subtitleSize<<' '<<p.inspectorWidth<<' '<<p.subtitleOutline<<' '<<p.subtitleBackground<<' '<<p.subtitleSecondLanguage<<' '<<p.subtitleMargin<<' '<<p.subtitleFont<<' '<<p.colourFoldMask<<' '<<p.enhancementEnabled<<' '<<p.presentation.enabled<<' '<<unsigned(p.presentation.mode)<<' '<<unsigned(p.presentation.display)<<' '<<p.subtitleLines<<'\n';
         auto target=folder_/"ui-preferences.v1",tmp=folder_/(L"ui-preferences.tmp-"+std::to_wstring(GetCurrentProcessId()));auto data=out.str();HANDLE file=CreateFileW(tmp.c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);if(file==INVALID_HANDLE_VALUE)return false;DWORD written=0;bool saved=WriteFile(file,data.data(),DWORD(data.size()),&written,nullptr)&&written==data.size()&&FlushFileBuffers(file);CloseHandle(file);if(saved)saved=MoveFileExW(tmp.c_str(),target.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE;return ok&&saved;
     }
 };

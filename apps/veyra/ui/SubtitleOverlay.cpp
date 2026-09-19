@@ -37,7 +37,7 @@ std::wstring signatureOf(const std::vector<SubtitleLine>& lines,const SubtitleVi
         signature+=std::format(L"{}:{:.4f}:{:.4f}|",reinterpret_cast<uintptr_t>(line.bitmap.get()),line.posX,line.posY);
     }
     signature+=std::format(L"#{:.2f}|{}|{}|{}|{}|{}",view.scale,view.fontOverride,view.outline?1:0,view.background?1:0,view.bottomMargin,view.blockGap);
-    signature+=std::format(L"/{}x{}",rect.right,rect.bottom);
+    signature+=std::format(L"/{}x{}/{}",rect.right,rect.bottom,view.targetLines);
     signature+=std::format(L"/{}/{}/{}/{}/{}",view.preview.zoom,view.preview.centerX,view.preview.centerY,view.videoWidth,view.videoHeight);
     return signature;
 }
@@ -114,7 +114,23 @@ void updateSubtitleOverlay(HWND h,const std::vector<SubtitleLine>& lines,const S
             format.SetLineAlignment(StringAlignmentNear);
             format.SetFormatFlags(StringFormatFlagsNoClip|StringFormatFlagsMeasureTrailingSpaces);
             const auto& text=line.text;
-            entry.path->AddString(text.c_str(),int(text.size()),use,toFontStyle(line.style.bold,line.style.italic),float(dip(h,logicalSize)),RectF(0,0,layoutWidth,float(height)*2),&format);
+            const bool positioned=line.posX>=0&&line.posY>=0;
+            const float availableWidth=positioned?layoutWidth:std::max(1.0f,layoutWidth-float(dip(h,std::max(0.0,line.style.marginL)+std::max(0.0,line.style.marginR))));
+            float fontPixels=float(dip(h,logicalSize));
+            // Measure the complete cue without a height cap. A two-screen
+            // rectangle can silently omit the end of a long cue before fitting.
+            auto measure=[&](float size){Font font(use,size,toFontStyle(line.style.bold,line.style.italic),UnitPixel);RectF bounds;
+                graphics.MeasureString(text.c_str(),int(text.size()),&font,RectF(0,0,availableWidth,1e7f),&format,&bounds);return bounds;};
+            if(!positioned&&view.targetLines>0){
+                const float minimum=float(dip(h,12));
+                for(int attempt=0;attempt<24&&fontPixels>minimum;++attempt){
+                    Font font(use,fontPixels,toFontStyle(line.style.bold,line.style.italic),UnitPixel);
+                    if(measure(fontPixels).Height<=font.GetHeight(&graphics)*view.targetLines+1)break;
+                    fontPixels=std::max(minimum,fontPixels*.9f);
+                }
+            }
+            const auto measured=measure(fontPixels);
+            entry.path->AddString(text.c_str(),int(text.size()),use,toFontStyle(line.style.bold,line.style.italic),fontPixels,RectF(0,0,availableWidth,std::max(measured.Height+fontPixels*2,1.0f)),&format);
             entry.path->GetBounds(&entry.bounds);
             if(line.posX>=0&&line.posY>=0){
                 entry.positioned=true;
@@ -125,7 +141,13 @@ void updateSubtitleOverlay(HWND h,const std::vector<SubtitleLine>& lines,const S
         }
         // The caller passes secondary lines first, primary last: the loop below
         // lays them out bottom-up, so the primary cue ends up on the bottom.
-        float cursor=float(height)-padding-float(dip(h,view.bottomMargin));
+        float cursor=std::max(padding+1,float(height)-padding-float(dip(h,view.bottomMargin)));
+        float totalHeight=0;size_t stacked=0;
+        for(const auto& entry:laid)if(!entry.positioned){totalHeight+=entry.bounds.Height;++stacked;}
+        const float gap=stacked>1?std::min(float(dip(h,view.blockGap)),std::max(0.0f,(cursor-padding)/float(stacked*2))):0;
+        const float space=std::max(1.0f,cursor-padding-gap*float(stacked?stacked-1:0));
+        const float scale=totalHeight>space?space/totalHeight:1;
+        if(scale<1)for(auto& entry:laid)if(!entry.positioned){Matrix shrink;shrink.Scale(scale,scale);entry.path->Transform(&shrink);entry.path->GetBounds(&entry.bounds);}
         for(size_t index=laid.size();index-->0;){
             auto& entry=laid[index];
             const int alignment=(entry.style.alignment>=1&&entry.style.alignment<=9)?entry.style.alignment:2;
@@ -146,7 +168,7 @@ void updateSubtitleOverlay(HWND h,const std::vector<SubtitleLine>& lines,const S
                 const float left=padding+marginL,right=float(width)-padding-marginR;
                 const auto horizontal=horizontalOf(alignment);
                 x=horizontal==StringAlignmentNear?left:horizontal==StringAlignmentFar?right-blockWidth:left+(right-left-blockWidth)/2;
-                if(vertical!=StringAlignmentNear)cursor=y-float(dip(h,view.blockGap));
+                if(vertical!=StringAlignmentNear)cursor=y-gap;
             }
             Matrix translation;
             translation.Translate(x-entry.bounds.X,y-entry.bounds.Y);

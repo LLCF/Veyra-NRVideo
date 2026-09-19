@@ -4603,3 +4603,46 @@ Blackwell 上会改变一条已经正常工作的路径，无法区分"补丁生
 4. `veyra_popup_selector_tests.exe` 退出 0，包含此前字幕弹窗鼠标/键盘案例；`scripts/run-short-test.ps1 ... --smoke-empty --smoke-seconds 5` 主程序退出 0。
 
 日志及截图：`E:/项目/Veyra/logs/slider-reset-20260919/`（final-build.log、reset-test.log、popup-test.log、app-smoke.log、reset-after-click.png）。临时文件：`E:/项目/Veyra/tmp/slider-reset-20260919/`。未打包。此次为设置 UI 修改，未执行 NVIDIA Create/Evaluate、视频画质或实卡补帧测试，不据此宣称处理链验收。
+
+## 2026-09-19 采集音频、HDR 截图、字幕和显示同步
+
+开工已有修改存档 `7761f34`，隔离分支 `codex/capture-ui-sync-20260919`。完整变更、执行命令、过程失败和未验收范围见 `docs/CAPTURE_UI_SYNC_ACCEPTANCE_2026-09-19.md`，施工方案状态已更新。
+
+- CaptureCardSource/NativeCaptureSink：缺时间戳音频连续计时、驱动当前格式兜底、专用压缩音频接收端、近两秒输入 FPS、回调锁等待/复制耗时日志。已确认压缩音频错误连接 PCM 接收端；不能推断就是 GC551 用户的根因。
+- ImageExportSink：各阶段错误诊断，撤掉生产截图逐位相同比较门禁，保留 FP16 无损编码和文件完整性；独立像素回归通过。NR+HDR 真实视频直接图截图通过，SDR 显示器引擎四组合八张截图通过；原用户故障未复现。
+- SubtitleSettingsPanel/SubtitleOverlay/UiPreferenceStore/AppShell：常驻连续编辑、完整文本测量和目标行数、v7 偏好迁移、DPI/工作区处理、音量键/滚轮与滑杆反馈。
+- VideoPresenter/PresentSink/SettingsWindow：XeSS VSync 交给提供方，完整关闭测试确认 `sync=0 flags=0x200`；XeSS 4X VSync 确认 `sync=1 flags=0`，DLSS 4X 生命周期回归通过。自动 VRR 未知、FSR 未支持如实提示。
+
+构建复用 `E:/项目/Veyra/build/slider-reset-20260919`，依赖缓存 `E:/项目/Veyra/build/frame-pacing-20260918/CMakeCache.txt`；`scripts/build-isolated.ps1` 通过，日志 build-final.log/build-reviewed.log，最终增量构建 build-delivery.log。测试用 `scripts/run-short-test.ps1` 单次 60–240 秒：capture-color-final、audio-jitter、ui-contract-final、subtitle-panel-final、hdr-real、hdr-integrity、screenshots-final、xess4-vsync、xess2-off、dlss4-vsync-lifecycle 均退出 0。
+
+日志目录 `E:/项目/Veyra/logs/capture-ui-sync-20260919/`，测试证据 `E:/项目/Veyra/tests/capture-ui-sync-20260919/`，进程 TEMP/TMP `E:/项目/Veyra/tmp/capture-ui-sync-20260919/`。OBS 只读参考源码 `E:/项目/Veyra/deps/libdshowcapture-audit-20260919`，固定提交记在验收报告，未复制上游实现。早期编译类型错误、错误构建目标、截图测试错误预期及修正均保留记录。
+
+最终 build-delivery.log 构建退出 0；主程序 `--smoke-empty --smoke-seconds 5` 退出 0（app-final），工作目录设为本轮 E 盘测试目录。最终面板回归 subtitle-panel-delivery 退出 0。`git diff --check` 通过。未使用其他 Agent，审查为本人代码复查及上述回归，不冒充独立 Reviewer 验收。
+
+用户确认圆刚且无日志，继续按代码证据修复；本机未连接 GC551/GC573，真实 57fps、实卡无声、HDR 显示器、物理撕裂和完整字幕视觉矩阵均未宣称通过。未打包、未推送、未发布，未加入 SDK/运行库/模型。
+
+## 2026-09-19 三份用户日志联合诊断与修复方案
+
+用户补充 GC573 RGB53fps、5080 采集 XeSS 卡顿和 5070 Ti PS5 串流 XeSS 卡顿日志，要求联合排查并写方案。本轮保留全部已有工作区改动，仅新增 `docs/XESS_GC573_LOG_REPAIR_PLAN_2026-09-19.md` 及本记录。
+
+- 使用 `Get-FileHash`、`Select-String`、`rg`、`Get-Content` 和 `git diff` 核对日志、代码和本地 XeSS 3.0.2 返回码。原始文件路径、SHA256、时间及关键行号见方案；没有复制用户日志或新建运行产物。
+- GC573 效果关闭区间 59.560 秒收到/处理 3186 帧，约 53.49fps，丢弃计数不变。确认不是仅 FPS 显示误差；驱动回调内 RGB 扩展和锁为待测风险，尚未证明唯一根因。
+- PS5 接收/解码基本 60fps、队列为零，同期后级处理掉帧和历史重置增长，呈现调用 P95 约 17–18ms。方案优先追踪呈现反压和历史恢复，未将其归因于采集卡或整段网络无丢包。
+- 旧 XeSS 路径强制清掉 VSync，已有工作区修复仍需提供方最终呈现及实屏验证。5080 日志主动 60->30 限帧与异常丢弃分开；SDK result=3 按头文件解释，不猜作性能不足。
+- 本轮未新增产品修复、未构建或运行硬件测试、未打包发布。此前全软件审查问题保留为独立修复项。方案规定后续输出到 `E:/项目/Veyra/{build,tests,logs,tmp}/xess-gc573-20260919/`。
+
+### 5080 功耗波动追加排查
+
+用户指出主要症状是工作量不均与功耗起伏。重新按设置不变窗口计算 received/processed/generated/drop/reset 增量，并对照 engine-stall、present-cost、capture-age-stall、XeSS scheduler 及 EngineController/XessPresenter 代码，扩展方案第2.4节和XeSS施工优先级。
+
+- 原生4K30、capture60To30=false 的11:27稳定段反复约69ms主循环长帧，其中调度/呈现约63ms，CPU图提交约3–4ms。11:22另有单次Present 60.573/55.485ms，图GPU span约14/13ms（不覆盖完整提供方）。主动限帧不能解释这些长帧。
+- 12:58:11.738至12:58:12.743，固定revision下生成增量降为54、掉帧和重置各+6，NR P95仍14.346ms；随后恢复。说明存在超出主动限帧的工作连续性问题，但无功率曲线，不能宣称瓦数因果已测实。
+- 检查输入、NR、预算、XeLL、媒体期限、提供方节奏、重置、日志/重建和显存等方向；方案要求区分GPU执行与CPU等待引起的供给空洞，不通过取消reset、忙等或无限排队取巧。
+- 命令为PowerShell `Select-String`/正则键值解析和`rg`/`Get-Content`只读代码。初次时间排序使用DateTime发生本地时区转换，后改DateTimeOffset复核，文档统一使用原日志Z时间。未运行新构建或硬件测试，本轮仅更新方案与本记录。
+
+### DLSS 4X/6X 受限追加排查
+
+- 核对 EngineController、FgRecoveryBudget、LivePairLatency、FrameMetrics、EnhanceGraph 与现有 LiveGpuSchedulerTests。确认计算前整组拒绝、下一次完整暖机不输出的放大机制；Present成本只扣allocator等待，显示阻塞仍参与预算。未将这些机制直接宣布为所有用户唯一根因。
+- PowerShell `Select-String`、正则字段摘取核对5080日志：87条admission采样均true，11:35:30至34累计拒绝固定9，但暖机/过期增长且中间有120fps提交。避免将累计拒绝误算为每秒新增，也避免把XeSS套用DLSS门禁。
+- 方案新增2.5节：分离计算成本与显示反压、逐子帧期限、连续恢复、供给阻塞及对应测试矩阵。预算数值例子仅为算式推演，没有冒充实机结果。
+- 本轮仅修改方案与WORKLOG，未改产品代码、未构建、未运行新单测或实卡测试、未生成包或发布；没有新增仓库外产物。

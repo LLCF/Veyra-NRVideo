@@ -9,12 +9,14 @@
 #include "../../apps/veyra/ui/LiveStatusHistory.h"
 #include "veyra/sink/AudioGain.h"
 #include "veyra/engine/PreviewView.h"
+#include "veyra/source/CaptureAudioClock.h"
 #include <iostream>
 #include <vector>
 #include <stdexcept>
 void require(bool value,const char* why){if(!value)throw std::runtime_error(why);}
 int wmain(int argc,wchar_t** argv){try{
     using namespace veyra;
+    {source::CaptureAudioClock c;require(c.observe({},100,10,false)==100,"untimed audio anchors to arrival");require(c.observe({},170,10,false)==110,"driver arrival jitter cannot stretch untimed PCM");require(c.observe(120,180,10,false)==120,"valid driver timestamp takes precedence");require(c.observe({},190,10,false)==130,"missing timestamps continue from valid samples");require(c.observe({},500,10,true)==500,"discontinuity reanchors untimed audio");require(c.observe(0,510,10,true)==0,"timestamp zero remains valid");}
     {
         ui::live_status::DashboardHistory history;engine::PlayerSnapshot s;
         s.running=s.capture=true;s.transport=engine::TransportState::Playing;s.sessionId=1;s.applied.revision=1;
@@ -111,6 +113,8 @@ int wmain(int argc,wchar_t** argv){try{
     for(int enabled:{0,1}){p.enhancementEnabled=enabled;before.nr=true;before.nrRuntime=engine::NrRuntime::Community;require(prefs.save(p,&before),"master and runtime save");ui::UiPreferenceStore restart(dir);require(restart.load().enhancementEnabled==enabled,"master state survives restart");auto restoredSettings=restart.startup({});require(restoredSettings.nr&&restoredSettings.nrRuntime==before.nrRuntime,"bypassed effects and runtime survive restart");}
     for(bool enabled:{false,true})for(unsigned mode=0;mode<3;++mode)for(unsigned sync=0;sync<3;++sync){p.presentation={enabled,engine::PacingMode(mode),engine::DisplaySync(sync)};require(prefs.save(p,nullptr),"presentation atomic save");ui::UiPreferenceStore restart(dir);require(restart.load().presentation==p.presentation,"all presentation combinations survive restart");}
     auto path=dir/"ui-preferences.v1";
+    for(int lines:{0,1,2,8}){p.subtitleLines=lines;require(prefs.save(p,nullptr),"subtitle lines save");ui::UiPreferenceStore restart(dir);require(restart.load().subtitleLines==lines,"subtitle lines survive restart");}
+    {std::ofstream legacy(path);legacy<<"VEYRA_UI 6\n0.45 1 1 1280 800 0 0 0 4 22 392 1 0 1 16 3 0 1 1 2 1\n";legacy.close();ui::UiPreferenceStore migration(dir);auto old=migration.load();require(old.subtitleLines==2&&old.presentation.enabled&&old.presentation.mode==engine::PacingMode::Reflex&&old.subtitleMargin==16&&old.inspector==4,"v6 migrates subtitle layout without losing settings");require(migration.save(old,nullptr),"v6 remains writable");}
     for(int version=1;version<=5;++version){std::ofstream legacy(path);legacy<<"VEYRA_UI "<<version<<"\n1 0 1 1280 800 0 0 0 1 22";if(version>=2)legacy<<" 392";if(version>=3)legacy<<" 1 0 0 0 0";if(version>=4)legacy<<" 0";if(version>=5)legacy<<" 1";legacy.close();ui::UiPreferenceStore migration(dir);require(!migration.load().presentation.enabled,"old preferences default pacing off");require(migration.save({},nullptr),"old preferences migrate without corrupt lock");}
     {std::ofstream bad(path);bad<<"UNKNOWN 9 invalid";}ui::UiPreferenceStore damaged(dir);damaged.load();require(!damaged.save(p,nullptr),"corrupt preference cannot be overwritten");std::ifstream f(path);std::string data((std::istreambuf_iterator<char>(f)),{});require(data=="UNKNOWN 9 invalid","corrupt original preserved");}
     std::cout<<"PASS: mode/bypass, 384 layout cases at four DPI scales, actual PCM gain/mute, confirmed settings persistence/corruption\n";return 0;

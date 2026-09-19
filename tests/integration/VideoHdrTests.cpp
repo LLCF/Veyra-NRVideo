@@ -49,17 +49,24 @@ int wmain(int argc,wchar_t** argv){
     gd.videoHdr.enabled=true;gd.hdrOutput=true;gd.runtimeAbsPath=runtime::localRuntimeDirectory().wstring();
     if(argc>1){const auto multiplier=unsigned(_wtoi(argv[1]));gd.fgMultiplier=std::max(2u,multiplier);gd.enableFg=multiplier>1;}
     if(argc>2){gd.enableNr=_wtoi(argv[2])!=0;gd.enableNvofStandalone=gd.enableNr;}
-    if(argc>3){gd.enableSr=true;gd.workWidth=1920;gd.workHeight=1080;gd.videoSrQuality=unsigned(_wtoi(argv[3]));}
+    if(argc>3&&_wtoi(argv[3])>0){gd.enableSr=true;gd.workWidth=1920;gd.workHeight=1080;gd.videoSrQuality=unsigned(_wtoi(argv[3]));}
+    source::MediaFileSource media;const AVFrame* decodedFrame=nullptr;FramePacket packet;
+    if(argc>5){source::SourceOpenDesc input;input.path=argv[5];input.preferHardwareDecode=false;
+        if(!media.open(input)||media.read(packet,&decodedFrame)!=source::SourceReadStatus::Frame)return 6;
+        gd.sourceWidth=gd.workWidth=gd.nrWidth=decodedFrame->width;gd.sourceHeight=gd.workHeight=gd.nrHeight=decodedFrame->height;gd.rgbInput=false;
+    }
     if(!graph.initialize(gd)||!graph.createViews()||!graph.videoHdrActive())return 3;
     AVFrame* frame=av_frame_alloc();frame->format=AV_PIX_FMT_BGRA;frame->width=1280;frame->height=720;
     frame->color_range=AVCOL_RANGE_JPEG;frame->color_primaries=AVCOL_PRI_BT709;frame->color_trc=AVCOL_TRC_IEC61966_2_1;
     if(av_frame_get_buffer(frame,32)<0)return 4;
     for(int y=0;y<720;++y)for(int x=0;x<1280;++x){auto* p=frame->data[0]+y*frame->linesize[0]+x*4;const uint8_t v=uint8_t(x*255/1279);p[0]=p[1]=p[2]=v;p[3]=255;}
+    if(argc>4)for(int y=0;y<720;++y)for(int x=0;x<1280;++x){auto* p=frame->data[0]+y*frame->linesize[0]+x*4;p[0]=uint8_t(x*17+y*13);p[1]=uint8_t(x/5+y/3);p[2]=uint8_t((x^y)&255);p[3]=255;}
     bool ok=true;double peak=0,changed=0;std::vector<float> baseline;
     unsigned generated=0;
     for(unsigned n=0;n<12&&ok;++n){
         if(n==6){engine::EnhancementSettings s;s.nr=gd.enableNr;s.sr=gd.enableSr;s.multiplier=gd.enableFg?gd.fgMultiplier:1;s.videoSrQuality=gd.videoSrQuality;s.videoHdr=gd.videoHdr;s.videoHdr.peakNits=400;ok=graph.applySettings(s);}
-        EnhanceGraph::FrameOutputs out;ok=ok&&graph.process(frame,n*1000.0/30,n==0||n==8,out,n+1);
+        if(argc>5&&n&&media.read(packet,&decodedFrame)!=source::SourceReadStatus::Frame){ok=false;break;}
+        EnhanceGraph::FrameOutputs out;ok=ok&&graph.process(decodedFrame?decodedFrame:frame,n*1000.0/30,n==0||n==8,out,n+1);
         if(!ok)break;
         std::vector<float> data;ok=pixels(ctx,ring,graph.videoFrameResource(out.videoSlot),data);
         if(!ok)break;

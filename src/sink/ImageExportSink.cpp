@@ -9,6 +9,7 @@
 #include <limits>
 #include <DirectXPackedVector.h>
 #include <cmath>
+#include <format>
 namespace veyra::sink {
 using Microsoft::WRL::ComPtr;
 static bool readPixels(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& ring,ID3D12Resource* tex,RgbaImage& img,unsigned bytesPerPixel) {
@@ -40,10 +41,13 @@ bool readRgba8(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& ring,ID3D12Res
     return tex&&tex->GetDesc().Format==DXGI_FORMAT_R8G8B8A8_UNORM&&readPixels(ctx,ring,tex,img,4);
 }
 bool saveHdrScreenshot(const std::wstring& path,gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& ring,ID3D12Resource* texture){
-    if(!texture||std::filesystem::exists(path))return false;
+    const auto check=[](HRESULT hr,const char* stage){if(SUCCEEDED(hr))return true;log::error("hdr-screenshot",std::format("stage={} hr=0x{:08X}",stage,unsigned(hr)));return false;};
+    if(!texture)return check(E_POINTER,"source-texture");
+    if(std::filesystem::exists(path))return check(HRESULT_FROM_WIN32(ERROR_FILE_EXISTS),"destination");
     const auto format=texture->GetDesc().Format;const bool pq=format==DXGI_FORMAT_R10G10B10A2_UNORM;
-    if(!pq&&format!=DXGI_FORMAT_R16G16B16A16_FLOAT)return false;
-    RgbaImage raw;if(!readPixels(ctx,ring,texture,raw,pq?4:8))return false;
+    log::info("hdr-screenshot",std::format("source format={} extent={}x{}",unsigned(format),texture->GetDesc().Width,texture->GetDesc().Height));
+    if(!pq&&format!=DXGI_FORMAT_R16G16B16A16_FLOAT)return check(E_INVALIDARG,"source-format");
+    RgbaImage raw;if(!readPixels(ctx,ring,texture,raw,pq?4:8))return check(E_FAIL,"gpu-readback");
     const size_t count=size_t(raw.width)*raw.height;std::vector<uint16_t> pixels(count*4);
     if(!pq)memcpy(pixels.data(),raw.pixels.data(),count*8);
     else for(size_t i=0;i<count;++i){
@@ -53,26 +57,29 @@ bool saveHdrScreenshot(const std::wstring& path,gfx::D3D12DeviceContext& ctx,gfx
         for(unsigned c=0;c<3;++c)pixels[i*4+c]=DirectX::PackedVector::XMConvertFloatToHalf(float(matrix[c][0]*linear[0]+matrix[c][1]*linear[1]+matrix[c][2]*linear[2]));
         pixels[i*4+3]=DirectX::PackedVector::XMConvertFloatToHalf(1);
     }
-    const auto partial=path+L".partial";HANDLE file=CreateFileW(partial.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);if(file==INVALID_HANDLE_VALUE)return false;CloseHandle(file);
+    const auto partial=path+L".partial";HANDLE file=CreateFileW(partial.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);if(file==INVALID_HANDLE_VALUE)return check(HRESULT_FROM_WIN32(GetLastError()),"create-partial");CloseHandle(file);
     struct Guard{std::wstring path;bool active=true;~Guard(){if(active)DeleteFileW(path.c_str());}} guard{partial};
     ComPtr<IWICImagingFactory> factory;ComPtr<IWICStream> stream;ComPtr<IWICBitmapEncoder> encoder;ComPtr<IWICBitmapFrameEncode> frame;ComPtr<IPropertyBag2> options;
-    if(FAILED(CoCreateInstance(CLSID_WICImagingFactory,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&factory)))||FAILED(factory->CreateStream(&stream))||FAILED(stream->InitializeFromFilename(partial.c_str(),GENERIC_WRITE))||FAILED(factory->CreateEncoder(GUID_ContainerFormatWmp,nullptr,&encoder))||FAILED(encoder->Initialize(stream.Get(),WICBitmapEncoderNoCache))||FAILED(encoder->CreateNewFrame(&frame,&options)))return false;
+    if(!check(CoCreateInstance(CLSID_WICImagingFactory,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&factory)),"wic-factory")||!check(factory->CreateStream(&stream),"wic-stream")||!check(stream->InitializeFromFilename(partial.c_str(),GENERIC_WRITE),"open-stream")||!check(factory->CreateEncoder(GUID_ContainerFormatWmp,nullptr,&encoder),"create-jxr")||!check(encoder->Initialize(stream.Get(),WICBitmapEncoderNoCache),"init-encoder")||!check(encoder->CreateNewFrame(&frame,&options),"create-frame"))return false;
     PROPBAG2 property{};property.pstrName=const_cast<wchar_t*>(L"Lossless");VARIANT lossless{};lossless.vt=VT_BOOL;lossless.boolVal=VARIANT_TRUE;
-    if(FAILED(options->Write(1,&property,&lossless))||FAILED(frame->Initialize(options.Get()))||FAILED(frame->SetSize(raw.width,raw.height)))return false;
+    if(!check(options->Write(1,&property,&lossless),"lossless-option")||!check(frame->Initialize(options.Get()),"init-frame")||!check(frame->SetSize(raw.width,raw.height),"frame-size"))return false;
     auto pixelFormat=GUID_WICPixelFormat64bppRGBAHalf;
-    if(FAILED(frame->SetPixelFormat(&pixelFormat))||pixelFormat!=GUID_WICPixelFormat64bppRGBAHalf||count>UINT_MAX/8)return false;
-    if(FAILED(frame->WritePixels(raw.height,raw.width*8,UINT(count*8),reinterpret_cast<BYTE*>(pixels.data())))||FAILED(frame->Commit())||FAILED(encoder->Commit()))return false;
+    if(!check(frame->SetPixelFormat(&pixelFormat),"set-format"))return false;
+    if(pixelFormat!=GUID_WICPixelFormat64bppRGBAHalf||count>UINT_MAX/8)return check(E_INVALIDARG,"negotiated-format-or-size");
+    if(!check(frame->WritePixels(raw.height,raw.width*8,UINT(count*8),reinterpret_cast<BYTE*>(pixels.data())),"write-pixels")||!check(frame->Commit(),"frame-commit")||!check(encoder->Commit(),"encoder-commit"))return false;
     frame.Reset();encoder.Reset();stream.Reset();
-    // Verify lossless floating-point storage, not an 8-bit thumbnail decode.
+    // Check file integrity and floating-point format. Pixel fidelity is tested
+    // independently; representational differences must not discard a saved image.
     ComPtr<IWICBitmapDecoder> decoder;ComPtr<IWICBitmapFrameDecode> decoded;
-    if(FAILED(factory->CreateDecoderFromFilename(partial.c_str(),nullptr,GENERIC_READ,WICDecodeMetadataCacheOnLoad,&decoder))||FAILED(decoder->GetFrame(0,&decoded)))return false;
+    if(!check(factory->CreateDecoderFromFilename(partial.c_str(),nullptr,GENERIC_READ,WICDecodeMetadataCacheOnLoad,&decoder),"reopen")||!check(decoder->GetFrame(0,&decoded),"decode-frame"))return false;
     WICPixelFormatGUID decodedFormat;UINT width=0,height=0;
-    if(FAILED(decoded->GetPixelFormat(&decodedFormat))||decodedFormat!=pixelFormat||FAILED(decoded->GetSize(&width,&height))||width!=raw.width||height!=raw.height)return false;
+    if(!check(decoded->GetPixelFormat(&decodedFormat),"decoded-format")||!check(decoded->GetSize(&width,&height),"decoded-size"))return false;
+    if(decodedFormat!=pixelFormat||width!=raw.width||height!=raw.height)return check(E_FAIL,"decoded-contract");
     std::vector<uint16_t> verify(count*4);
-    if(FAILED(decoded->CopyPixels(nullptr,width*8,UINT(count*8),reinterpret_cast<BYTE*>(verify.data())))||verify!=pixels)return false;
+    if(!check(decoded->CopyPixels(nullptr,width*8,UINT(count*8),reinterpret_cast<BYTE*>(verify.data())),"decode-pixels"))return false;
     decoded.Reset();decoder.Reset();
-    if(!MoveFileExW(partial.c_str(),path.c_str(),MOVEFILE_WRITE_THROUGH))return false;guard.active=false;
-    log::info("hdr-screenshot","saved and lossless-verified scRGB FP16 JPEG XR; 1=80 nits, includes software processing only");return true;
+    if(!MoveFileExW(partial.c_str(),path.c_str(),MOVEFILE_WRITE_THROUGH))return check(HRESULT_FROM_WIN32(GetLastError()),"publish-file");guard.active=false;
+    log::info("hdr-screenshot","saved scRGB FP16 JPEG XR with lossless encoding and decode integrity check; 1=80 nits, includes software processing only");return true;
 }
 bool loadImage(const std::wstring& path,RgbaImage& img) {
     ComPtr<IWICImagingFactory> fac;ComPtr<IWICBitmapDecoder> dec;ComPtr<IWICBitmapFrameDecode> frame;ComPtr<IWICFormatConverter> conv;

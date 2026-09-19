@@ -137,5 +137,30 @@ int main(){
         check(input->QueryAccept(&alternative)==S_FALSE,"side-to-back layout change requires reconnect even at identical byte stride");
         input->Disconnect();input.Reset();filter.Reset();output.Reset();
     }
+    {
+        AM_MEDIA_TYPE compressed{};compressed.majortype=MEDIATYPE_Audio;
+        compressed.subtype={0x2000,0,0x10,{0x80,0,0,0xaa,0,0x38,0x9b,0x71}};
+        compressed.formattype=FORMAT_None;
+        unsigned packets=0;output.Attach(new OutputPin);
+        check(source::createNativeAudioSink(compressed,[](IMediaSample*){return S_OK;},filter,input)==VFW_E_INVALIDMEDIATYPE,"PCM terminal rejects compressed packets");
+        check(SUCCEEDED(source::createBitstreamAudioSink(compressed,[&](IMediaSample*){++packets;return S_OK;},filter,input)),"compressed audio terminal accepts AC3 without PCM WAVEFORMAT");
+        if(filter&&input){
+            check(input->ReceiveConnection(output.Get(),&compressed)==S_OK&&SUCCEEDED(filter.As(&memory)),"compressed audio connects directly");
+            ALLOCATOR_PROPERTIES wanted{},actual{};memory->GetAllocatorRequirements(&wanted);
+            const bool ready=memory->GetAllocator(&allocator)==S_OK&&allocator->SetProperties(&wanted,&actual)==S_OK&&allocator->Commit()==S_OK;
+            check(ready,"compressed allocator initializes without PCM byte rate");
+            if(ready){
+                ComPtr<IMediaSample> sample;allocator->GetBuffer(&sample,nullptr,nullptr,0);filter->Run(0);
+                sample->SetActualDataLength(101);check(memory->Receive(sample.Get())==S_OK&&packets==1,"odd-sized untimed compressed packet delivered");
+                sample->SetActualDataLength(0);check(FAILED(memory->Receive(sample.Get()))&&packets==1,"empty compressed packet rejected");
+                auto changed=compressed;changed.subtype.Data1=8;check(input->QueryAccept(&changed)==S_FALSE,"codec change requires reconnect");
+                filter->Stop();sample.Reset();allocator->Decommit();
+            }
+            input->Disconnect();
+        }
+        memory.Reset();input.Reset();filter.Reset();output.Reset();allocator.Reset();
+        compressed.subtype.Data1=0xdeadbeef;
+        check(source::createBitstreamAudioSink(compressed,[](IMediaSample*){return S_OK;},filter,input)==VFW_E_INVALIDMEDIATYPE,"unknown codec rejected");
+    }
     CoUninitialize();std::cout<<"failures="<<failures<<'\n';return failures?1:0;
 }
