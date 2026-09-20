@@ -51,6 +51,23 @@ int wmain(int argc,wchar_t**){try{
     ui::settingsColorSectionForTest(0,false);
     require(!(GetWindowLongW(ui::settingsControlForTest(3400),GWL_STYLE)&WS_VISIBLE),"collapsed row must hide reset");
     ui::settingsColorSectionForTest(0,true);
+    auto text=[&](int id){wchar_t value[128]{};GetWindowTextW(ui::settingsControlForTest(id),value,128);return std::wstring(value);};
+    actual=defaults;++actual.revision;sync();
+    SetWindowTextW(ui::settingsControlForTest(100),L"NaN");
+    SetWindowTextW(ui::settingsControlForTest(222),L"");
+    SetWindowTextW(ui::settingsControlForTest(1300),L"-");
+    for(int i=0;i<4;++i)sync();
+    require(text(100)==L"NaN"&&text(222).empty()&&text(1300)==L"-","timer must preserve incomplete drafts across fields");
+    require(IsWindowEnabled(ui::settingsControlForTest(2600))&&IsWindowEnabled(ui::settingsControlForTest(2622))&&IsWindowEnabled(ui::settingsControlForTest(3400)),"drafts at defaults must enable row reset");
+    reject=true;SendMessageW(ui::settingsControlForTest(2600),BM_CLICK,0,0);reject=false;
+    require(text(100)==L"NaN","rejected reset must retain draft");
+    SendMessageW(ui::settingsControlForTest(2600),BM_CLICK,0,0);
+    require(text(100)!=L"NaN"&&text(222).empty()&&text(1300)==L"-","row reset must clear only its own draft");
+    SendMessageW(ui::settingsControlForTest(2622),BM_CLICK,0,0);
+    SendMessageW(ui::settingsControlForTest(3400),BM_CLICK,0,0);
+    require(!text(222).empty()&&text(1300)!=L"-","feather and colour reset must restore displayed defaults");
+    SetWindowTextW(ui::settingsControlForTest(222),L"12");sync();
+    require(actual.protection.featherPixels==12&&text(222)==L"12","valid feather edit must still apply");
     SetWindowPos(panel,nullptr,0,0,360,800,SWP_NOZORDER);
     std::cout<<"PASS: individual defaults, unrelated settings, undo, rejection, enabled state, narrow layout and folding\n";
     if(argc>1){const auto end=GetTickCount64()+60000;MSG msg{};while(GetTickCount64()<end&&IsWindow(parent)){while(PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)){TranslateMessage(&msg);DispatchMessageW(&msg);}Sleep(10);}}

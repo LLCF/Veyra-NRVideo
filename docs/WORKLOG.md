@@ -1,5 +1,26 @@
 # Veyra 工作记录
 
+## 2026-09-20 Settings and display transition follow-up
+
+Implemented numeric draft preservation and transactional per-row reset in
+SettingsWindow, plus coalesced DPI font/layout refresh in AppShell. No FG
+scheduler, multiplier, runtime or latency changes. New UI integration checks
+and scripts/acceptance/ui-display-transition.py exercise actual HWNDs.
+Build, slider-reset, UI contract, stack budget, repair-ui and DLSS6/XeSS4 DPI
+checks pass. Physical dual-screen remains untested (one monitor detected).
+Commands, initial test-reader failure and coverage are recorded in
+docs/WINDOW_RESIZE_REPAIR_2026-09-20.md. Build remains under
+E:/项目/Veyra/build/slider-reset-20260919; evidence under
+E:/项目/Veyra/tests/resize-hang-20260920; process temp under
+E:/项目/Veyra/tmp/fg-cadence-repair-20260920. New package target:
+E:/项目/Veyra/test-packages/1.4.3-20260920-display-fix. Local delivery only.
+
+Completed: XeSS4 native modal sizing four cycles passed. New portable ZIP
+472352589 bytes, SHA256 C3A40A6A1A6C076243E5DAE38380AC81C13372C7A261EBC40E1DDD9989EAE3BE.
+Seven portable smoke cases passed; all 120 archived payload hashes/sizes match,
+forbiddenFiles=0 and packaged EXE equals the tested build. Previous package
+retained for rollback; no new SDK/runtime or test media enters Git.
+
 ## 2026-09-20 Window corner resize crash
 
 Reproduced real mouse resize crash with capture and effects disabled. Dump and
@@ -5168,3 +5189,19 @@ GPU full-group 观测约 NR 6.715ms、Flow 1.056ms、FG batch 10.042ms，slot CP
 4.519/16.692/17.102ms，18 个间隔超过 16.667ms，36 次 rejected→warmup；GPU
 P95 约 NR5.664ms、Flow1.265ms、FG10.659ms，slot CPU wait 仍为 0。降低 NR 分辨率
 接近但没有达到均匀固定 6X，因此仍只作为性能对照，不改变原画质验收目标。
+# Resize regression attribution follow-up (2026-09-20)
+
+Reviewed 2b99e89 and prior UI commits using git show/blame and source reads.
+Extended the current PE/map stack inspection through Python runpy and the
+existing scripts/acceptance/ui-stack-budget.py parser. Main/inspector stacks
+remain 280/2536 bytes; largest other inspected callback is screen capture at
+27240 bytes. No historical binary bisection completed, so the first offending
+commit is not established. Added findings and evidence limits to
+docs/WINDOW_RESIZE_REPAIR_2026-09-20.md: feather draft refresh from c6f94433,
+row-reset draft omission from 412a19f, and the existing combined NR/draft
+assertion failure on both package versions. These findings are not reported
+as repaired. This follow-up changes documentation only, requires no rebuild,
+and leaves the previously verified resize-fix package untouched. Existing
+evidence/build paths are E:/项目/Veyra/tests/resize-hang-20260920 and
+E:/项目/Veyra/build/slider-reset-20260919; no new binary artifacts, runtime
+changes, publication or shutdown.

@@ -16,6 +16,7 @@
 #include <array>
 #include <cmath>
 #include <map>
+#include <set>
 namespace veyra::ui {
 namespace {
 HWND window=nullptr,body=nullptr;engine::EngineController* controller=nullptr;HFONT font=nullptr;
@@ -46,6 +47,7 @@ struct RowReset {
     std::wstring tip;
 };
 std::map<int,RowReset> rowResets;
+std::set<int> editDrafts;
 void syncRowResets();
 HWND item(int id){for(auto& entry:items)if(GetDlgCtrlID(entry.h)==id)return entry.h;return nullptr;}
 LRESULT send(int id,UINT message,WPARAM w=0,LPARAM l=0){return SendMessageW(item(id),message,w,l);}
@@ -350,7 +352,8 @@ void syncColorControls(){
     for(size_t i=0;i<colorParams.size();++i){
         const float value=colorParams[i].value(colour);
         const auto text=std::format(L"{:.2f}",value);
-        if(auto edit=item(colorEditId(int(i))))if(windowText(edit)!=text)putText(colorEditId(int(i)),text.c_str());
+        const int editId=colorEditId(int(i));
+        if(auto edit=item(editId))if(!editDrafts.contains(editId)&&GetFocus()!=edit&&windowText(edit)!=text)putText(editId,text.c_str());
         if(auto slider=item(colorSliderId(int(i)))){
             const int scaled=int(std::lround(value*100.0f));
             if(SendMessageW(slider,TBM_GETPOS,0,0)!=scaled)SendMessageW(slider,TBM_SETPOS,TRUE,LPARAM(scaled));
@@ -858,18 +861,20 @@ bool colourFieldEdited(int index,float value){
 void message(const std::wstring& text){if(statusSink)statusSink(text);else putText(401,text.c_str());}
 bool submit(engine::EnhancementSettings s){if(!apply(s)){dirty=true;message(L"修改未接受，请查看状态栏或日志；若总增强正在切换，请稍后重试。");return false;}dirty=false;return true;}
 void syncProtection(const engine::ProtectionSettings& protection){
+    const bool wasPopulating=populating;populating=true;
     check(206,protection.enabled?BST_CHECKED:BST_UNCHECKED);unsigned count=0;for(auto q:protection.regions)count+=!q.empty();
     putText(206,(L"NR剔除区 · "+std::to_wstring(count)+L"/4").c_str());
     // The feather value is stored in working-extent pixels (see
     // NrResidualComposite.hlsl); the panel only converts it for display.
     const float feather=std::clamp(protection.featherPixels,0.0f,64.0f);
     if(auto slider=item(622))SendMessageW(slider,TBM_SETPOS,TRUE,LPARAM(std::lround(feather)));
-    if(item(222))putText(222,std::to_wstring(int(std::lround(feather))).c_str());
+    if(item(222)&&!editDrafts.contains(222)&&GetFocus()!=item(222))putText(222,std::to_wstring(int(std::lround(feather))).c_str());
     if(auto label=item(1123)){
         const unsigned extent=controller?controller->snapshot().metrics.resolution.base.height:0u;
         if(extent>0)putText(1123,std::format(L"羽化 {} px · ≈{:.1f}% 画面高度",int(std::lround(feather)),feather*100.0f/float(extent)).c_str());
         else putText(1123,std::format(L"羽化 {} px（工作分辨率像素）",int(std::lround(feather))).c_str());
     }
+    populating=wasPopulating;
 }
 void selectDiscrete(int group,int value){for(int j=0;j<(group==0?3:2);++j){auto h=item(700+group*10+j);if(j==value)SetPropW(h,L"veyra.selected",HANDLE(1));else RemovePropW(h,L"veyra.selected");InvalidateRect(h,nullptr,FALSE);}}
 // Multiplier list is capability-driven: the DLSS runtime reports how many
@@ -905,7 +910,7 @@ int multiplierChoiceIndex(uint32_t multiplier){for(size_t i=0;i<engine::kFgMulti
 void populate(engine::EnhancementSettings s){
     populating=true;
     float v[]={s.model.intensity,s.model.tone,s.model.structure,s.model.skin,float(s.model.style),float(s.model.autoMask),float(s.model.uiCorrection),s.residual.total,s.residual.darken,s.residual.brighten,s.residual.color,s.residual.luminance};
-    for(int i=0;i<12;++i){std::wostringstream o;o<<std::setprecision(7)<<v[i];if(i>=4&&i<=6){selectDiscrete(i-4,int(v[i]));continue;}if(GetFocus()!=item(100+i))putText(100+i,o.str().c_str());send(600+i,TBM_SETPOS,TRUE,LPARAM(v[i]*100));}
+    for(int i=0;i<12;++i){std::wostringstream o;o<<std::setprecision(7)<<v[i];if(i>=4&&i<=6){selectDiscrete(i-4,int(v[i]));continue;}if(!editDrafts.contains(100+i)&&GetFocus()!=item(100+i))putText(100+i,o.str().c_str());send(600+i,TBM_SETPOS,TRUE,LPARAM(v[i]*100));}
     syncProtection(s.protection);
     check(200,enhancementEnabled&&s.nr?BST_CHECKED:BST_UNCHECKED);
     check(201,enhancementEnabled&&s.sr?BST_CHECKED:BST_UNCHECKED);
@@ -935,7 +940,7 @@ void populate(engine::EnhancementSettings s){
     send(209,CB_SETCURSEL,int(s.opticalFlowBackend),0);
     check(215,s.amdFlowHalfResolution?BST_CHECKED:BST_UNCHECKED);
     send(216,CB_SETCURSEL,int(s.audioSync));
-    if(GetFocus()!=item(217))putText(217,std::to_wstring(s.audioOffsetMs).c_str());
+    if(!editDrafts.contains(217)&&GetFocus()!=item(217))putText(217,std::to_wstring(s.audioOffsetMs).c_str());
     EnableWindow(item(217),s.audioSync==engine::AudioSyncMode::Manual);
     EnableWindow(item(204),s.opticalFlowBackend==engine::OpticalFlowBackend::Nvidia);
     EnableWindow(item(215),s.opticalFlowBackend==engine::OpticalFlowBackend::AmdFidelityFx);
@@ -965,6 +970,8 @@ bool read(engine::EnhancementSettings& s,bool allPages=false){s=enhancementEnabl
 // Each notification changes one field on the latest desired settings. Hidden
 // controls and incomplete numeric text can never overwrite another field.
 bool liveField(int id){
+    const bool numeric=(id>=100&&id<=111)||id==217||id==222;
+    if(numeric){editDrafts.insert(id);syncRowResets();}
     if(id==202){
         const auto index=send(id,CB_GETCURSEL);if(index==CB_ERR)return false;
         const uint32_t requested=(index>=0&&index<int(engine::kFgMultiplierChoiceCount))?engine::kFgMultiplierChoices[index]:1;
@@ -1005,6 +1012,7 @@ bool liveField(int id){
     }
     if(!s.validate().empty()){message(L"数值超出范围；仍使用上次有效值");return false;}
     if(!submit(s)){populate(enhancementEnabled?controller->snapshot().desired:configuredSettings);return false;}
+    if(numeric)editDrafts.erase(id);
     populate(enhancementEnabled?controller->snapshot().desired:configuredSettings);
     message(enhancementEnabled?L"实时生效 · 以已应用版本为准":L"增强关闭中 · 已保存待启用设置");return true;
 }
@@ -1138,7 +1146,7 @@ void syncRowResets(){
     const auto settings=enhancementEnabled?controller->snapshot().desired:configuredSettings;
     const engine::EnhancementSettings defaults{};
     for(const auto& [id,row]:rowResets){
-        const bool changed=std::abs(row.get(settings)-row.get(defaults))>0.00001;
+        const bool changed=editDrafts.contains(row.value)||std::abs(row.get(settings)-row.get(defaults))>0.00001;
         if(bool(IsWindowEnabled(item(id)))!=changed)EnableWindow(item(id),changed);
     }
 }
@@ -1455,8 +1463,10 @@ __declspec(noinline) LRESULT settingsCommand(HWND h,UINT msg,WPARAM wp,LPARAM lp
         if(const auto found=rowResets.find(LOWORD(wp));found!=rowResets.end()){
             auto settings=enhancementEnabled?controller->snapshot().desired:configuredSettings;
             found->second.reset(settings);
-            if(found->second.slider>=colorSliderId(0))applyColour(settings.color,false);
-            else submit(settings);
+            const bool accepted=found->second.slider>=colorSliderId(0)?applyColour(settings.color,false):submit(settings);
+            if(!accepted)return 0;
+            editDrafts.erase(found->second.value);
+            if(GetFocus()==item(found->second.value))SetFocus(body);
             populate(enhancementEnabled?controller->snapshot().desired:configuredSettings);
             return 0;
         }
@@ -1646,10 +1656,12 @@ __declspec(noinline) LRESULT settingsCommand(HWND h,UINT msg,WPARAM wp,LPARAM lp
     if(msg==WM_COMMAND&&!populating&&!syncingColour&&LOWORD(wp)>=colorEditId(0)&&LOWORD(wp)<colorEditId(0)+kColorMaxParams&&HIWORD(wp)==EN_CHANGE){
         const int index=LOWORD(wp)-colorEditId(0);
         if(index<int(colorParams.size())){
+            editDrafts.insert(LOWORD(wp));
             wchar_t buffer[64]{};GetWindowTextW(item(LOWORD(wp)),buffer,64);
             wchar_t* end=nullptr;const float value=wcstof(buffer,&end);
             if(end==buffer||*end||!std::isfinite(value))message(L"数值未完整；仍使用上次有效值");
-            else colourFieldEdited(index,value);
+            else if(colourFieldEdited(index,value))editDrafts.erase(LOWORD(wp));
+            syncRowResets();
         }
         return 0;
     }
@@ -1658,7 +1670,7 @@ switch(msg){
 case WM_COMMAND:{const int id=LOWORD(wp);if(!populating&&((id>=202&&id<=205||id==207||id==208)&&HIWORD(wp)==CBN_SELCHANGE||(id>=700&&id<=732)&&HIWORD(wp)==BN_CLICKED)){liveField(id);return 0;}if((id==206||id==213||id==214)&&HIWORD(wp)==BN_CLICKED){const auto accepted=SendMessageW(GetParent(h),WM_APP+45,id,checked(206));message(accepted?(id==213?L"请在画面中左键拖动框选；Esc取消。":L"已请求更新NR剔除区。"):L"未能操作：请先打开画面，或清除已满的4个区域。");return 0;}if((id==200||id==201)&&HIWORD(wp)==BN_CLICKED){const bool accepted=SendMessageW(GetParent(h),WM_APP+44,id,checked(id))!=0;message(accepted?L"已请求开关；确认帧边界结果后生效。":L"总增强正在切换，请待当前事务完成。");return 0;}if(HIWORD(wp)==EN_SETFOCUS){for(auto& item:items)if(GetDlgCtrlID(item.h)==id&&item.page==page){RECT r{};GetClientRect(h,&r);int height=MulDiv(r.bottom,96,veyra::ui::layoutDpi(h))-128;if(item.y<scroll)scroll=item.y;if(item.y+item.height>scroll+height)scroll=item.y+item.height-height;arrange();break;}}if(!populating&&id>=100&&id<=111&&HIWORD(wp)==EN_CHANGE){liveField(id);return 0;}
     if(!populating&&id>=100&&id<=111&&HIWORD(wp)==EN_KILLFOCUS){populate(enhancementEnabled?controller->snapshot().desired:configuredSettings);return 0;}
     engine::EnhancementSettings s;
-    if(id==211){SetFocus(body);s={};if(submit(s))populate(s);message(L"已还原内建默认。");}
+    if(id==211){SetFocus(body);s={};if(submit(s)){editDrafts.clear();populate(s);}message(L"已还原内建默认。");}
     else if(id>=501&&id<=505)SendMessageW(GetParent(h),WM_APP+41,id,id==501?send(500,CB_GETCURSEL,0,0):id==505?checked(505):0);
     return 0;}
 }return DefWindowProcW(h,msg,wp,lp);
@@ -1710,14 +1722,14 @@ int id=GetDlgCtrlID(reinterpret_cast<HWND>(lp));if(id>=600&&id<612){int index=id
                 const float current=colorParams[size_t(index)].value(colourTarget());
                 value=current+(value-current)*0.1f;
             }
-            colourFieldEdited(index,value);
+            if(colourFieldEdited(index,value)){editDrafts.erase(colorEditId(index));syncColorControls();}
         }
     }
     else if(id==622){// Feather slider: the edit box owns the value, its EN_CHANGE applies it.
         const int value=std::clamp(int(SendMessageW(reinterpret_cast<HWND>(lp),TBM_GETPOS,0,0)),0,64);putText(222,std::to_wstring(value).c_str());}
     return 0;}
 case WM_TIMER:return settingsTimer(h,msg,wp,lp);
-case WM_DESTROY:KillTimer(h,1);DeleteObject(font);window=nullptr;body=nullptr;items.clear();rowResets.clear();return 0;
+case WM_DESTROY:KillTimer(h,1);DeleteObject(font);window=nullptr;body=nullptr;items.clear();rowResets.clear();editDrafts.clear();return 0;
 }return DefWindowProcW(h,msg,wp,lp);}
 }
 engine::EnhancementSettings defaultSettings(){loadStore();return store.defaultSettings();}

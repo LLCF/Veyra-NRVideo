@@ -1135,7 +1135,20 @@ case WM_CLOSE:endTransition();if(!closing&&smokeSeconds<=0&&exportJob.poll().act
 }return DefWindowProcW(hwnd,msg,wp,lp);
 }
 
+bool dpiRefreshPending=false;
+__declspec(noinline) LRESULT refreshWindowDpi(HWND hwnd){
+    if(!dpiRefreshPending)return 0;
+    auto oldFont=font;font=veyra::ui::makeFont(hwnd);
+    EnumChildWindows(hwnd,[](HWND c,LPARAM f)->BOOL{SendMessageW(c,WM_SETFONT,WPARAM(f),FALSE);return TRUE;},LPARAM(font));
+    DeleteObject(oldFont);DeleteObject(emptyFont);emptyFont=veyra::ui::makeFont(hwnd,26);
+    SendDlgItemMessageW(hwnd,EmptyTitle,WM_SETFONT,WPARAM(emptyFont),FALSE);
+    veyra::ui::settingsDpi();veyra::ui::telemetryDpi();layout();
+    dpiRefreshPending=false;
+    RemovePropW(video,L"Veyra.DpiTransition");
+    veyra::log::info("ui-display","DPI transition complete");return 0;
+}
 LRESULT CALLBACK proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){switch(msg){
+case WM_APP+91:return refreshWindowDpi(hwnd);
 case WM_SYSCOMMAND:return systemCommand(hwnd,msg,wp,lp);
 case WM_CREATE:return createWindow(hwnd,msg,wp,lp);
 case WM_NCCALCSIZE:if(wp)return 0;break;
@@ -1166,7 +1179,7 @@ case WM_EXITSIZEMOVE:
     layout();
     veyra::log::info("ui-display","interactive move end; presentation resize released");
     return 0;
-case WM_SIZE:cancelProtection();if(wp!=SIZE_MINIMIZED){endTransition();layout();}return 0;
+case WM_SIZE:cancelProtection();if(wp!=SIZE_MINIMIZED&&!dpiRefreshPending){endTransition();layout();}return 0;
 case WM_DROPFILES:{std::vector<wchar_t> file(32768);DragQueryFileW(reinterpret_cast<HDROP>(wp),0,file.data(),32768);DragFinish(reinterpret_cast<HDROP>(wp));openFile(file.data());layout();return 0;}
 case WM_COMMAND:return windowCommand(hwnd,msg,wp,lp);
 case WM_HSCROLL:return scrollCommand(hwnd,msg,wp,lp);
@@ -1185,14 +1198,12 @@ case WM_DPICHANGED:{
     endTransition();veyra::ui::cancelPopupSelector();
     veyra::log::info("ui-display",std::format("DPI transition begin dpi={} synthetic={} moving={}",veyra::ui::layoutDpi(hwnd),msg!=WM_DPICHANGED,GetPropW(video,L"Veyra.InteractiveMove")!=nullptr));
     SetPropW(video,L"Veyra.DpiTransition",HANDLE(1));
+    // SetWindowPos synchronously reenters WM_SIZE and child layout. Coalesce
+    // the font/layout refresh after the native DPI transition has returned.
+    const bool queueRefresh=!dpiRefreshPending;dpiRefreshPending=true;
     if(msg==WM_DPICHANGED&&!full){auto rect=reinterpret_cast<RECT*>(lp);SetWindowPos(hwnd,nullptr,rect->left,rect->top,rect->right-rect->left,rect->bottom-rect->top,SWP_NOZORDER|SWP_NOACTIVATE);}
-    auto oldFont=font;font=veyra::ui::makeFont(hwnd);
-    EnumChildWindows(hwnd,[](HWND c,LPARAM f)->BOOL{SendMessageW(c,WM_SETFONT,WPARAM(f),FALSE);return TRUE;},LPARAM(font));
-    DeleteObject(oldFont);DeleteObject(emptyFont);emptyFont=veyra::ui::makeFont(hwnd,26);
-    SendDlgItemMessageW(hwnd,EmptyTitle,WM_SETFONT,WPARAM(emptyFont),FALSE);
-    veyra::ui::settingsDpi();veyra::ui::telemetryDpi();layout();
-    RemovePropW(video,L"Veyra.DpiTransition");
-    veyra::log::info("ui-display","DPI transition complete");return 0;}
+    if(queueRefresh&&!PostMessageW(hwnd,WM_APP+91,0,0))return refreshWindowDpi(hwnd);
+    return 0;}
 
 case WM_TIMER:return windowTimer(hwnd,msg,wp,lp);
 case WM_CLOSE:return closeWindow(hwnd,msg,wp,lp);
