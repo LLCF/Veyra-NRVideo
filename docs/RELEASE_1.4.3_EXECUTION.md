@@ -38,3 +38,13 @@
 - `portable-smoke.ps1 -CaseSeconds 7` 七项通过：空窗口、无效果播放、社区 NR + SR + FG、原版 NR + DLSS SR + FG、Video SR + NR + FG、首次效果全关、Ampere NR。收窄 PATH 并临时移走 manifest 后仍从包内加载依赖并生成截图；单项最长 35 秒。结果 `tests/release-1.4.3-20260920/portable-smoke/result.json`。
 - 临时审计脚本 `tmp/release-1.4.3-20260920/audit-package.py` 对 ZIP 120 个载荷逐个校验大小/SHA256、数量和 README；所有 21 个 DLL 与 1.4.2 逐文件相同，EXE 匹配验收版。结果 `tests/release-1.4.3-20260920/package-integrity.json`。以上相对路径均位于 `E:/项目/Veyra/`。
 - 依赖源码 ZIP SHA256 复核通过；`git diff v1.4.2 HEAD -- scripts/remoteplay scripts/ffmpeg licenses/remoteplay` 无变化。本次未重新跑完整 GPU/实卡矩阵，复用相同 EXE 的既有专项验收，新增正式打包回归。
+
+## 正式发布完成
+
+- 发布源码提交 `3b4570e1f3f7301fcce21b829003bb8ef7854e24`；main 快进整合修复分支。签注标签 `v1.4.3` 指向该提交，使用 `git push --atomic nrvideo main refs/tags/v1.4.3` 成功，不推送其他历史分支/标签。
+- 对应源码命令：`python scripts/package-release-source.py --root . --version 1.4.3 --output E:/项目/Veyra/releases/1.4.3/final --temp E:/项目/Veyra/tmp/release-1.4.3-20260920 --dependency-directory C:/veyra-releases/1.4.1`。干净 HEAD 归档，856 个文件逐个回读验证。ZIP 215035743 bytes，SHA256 `3639136B41BA0AD558C5C6605BDC0A36DDFBBF4512377A9D0691DC6F7A0552BC`。
+- `gh release create v1.4.3 --verify-tag --draft --notes-file docs/RELEASE_NOTES_1.4.3.md` 上传便携/源码 ZIP 及各自 SHA256 文件。4 个远端资产 state=uploaded、size/digest 与本地完全一致；正文与本地 notes 完全一致。
+- `gh release edit v1.4.3 --draft=false --prerelease=false --latest` 已完成。`releases/latest` 返回 v1.4.3、draft=false、prerelease=false；4 个公开下载地址 HTTP 200。
+- 发布地址：https://github.com/Likely7/Veyra-NRVideo/releases/tag/v1.4.3 。发布 ID `392380461`。
+- 远端中文和英文 README 均仅有一个更新标题，均为 1.4.3；用户的中文精简保留。两份 README 和 Release 的赞助/交流群二维码各 width=220，Release 两个固定图片 URL 均 HTTP 200。
+- 远端核验 JSON：`E:/项目/Veyra/tests/release-1.4.3-20260920/github-draft-verified.json` 与 `github-published.json`。发布后仅追加此证据及 WORKLOG/CURRENT_STATUS，不移动发布标签，不改变已上传的包。

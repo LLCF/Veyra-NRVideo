@@ -1,5 +1,20 @@
 # Veyra 工作记录
 
+## 2026-09-20 1.4.3 publication verified
+
+Released https://github.com/Likely7/Veyra-NRVideo/releases/tag/v1.4.3 as Latest,
+not draft/prerelease. main fast-forwarded to release source 3b4570e; annotated
+v1.4.3 points to that exact commit. Pushed only main and v1.4.3 to nrvideo.
+Corresponding-source packer verified 856 payloads; source ZIP 215035743 bytes,
+SHA256 3639136B41BA0AD558C5C6605BDC0A36DDFBBF4512377A9D0691DC6F7A0552BC.
+Both ZIPs and both SHA256 files have matching GitHub asset sizes/digests and
+public HTTP 200 downloads. Remote bilingual README headings are latest-only;
+Release body equals local notes and both width=220 support images return 200.
+Evidence is in E:/项目/Veyra/tests/release-1.4.3-20260920/github-published.json
+and github-draft-verified.json. Final assets under E:/项目/Veyra/releases/1.4.3/final.
+This follow-up records publication only; no tag movement or binary changes.
+Fixed 6X cadence and unverified device-specific issues remain documented limits.
+
 ## 2026-09-20 1.4.3 official release preparation
 
 User accepted the latest package and authorized GitHub publication. Created
