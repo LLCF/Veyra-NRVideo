@@ -1,5 +1,20 @@
 # Veyra 工作记录
 
+## 2026-09-20 Graph queue HIGH priority experiment: reverted
+
+Temporary one-factor hook in src/gfx/D3D12DeviceContext.cpp selected HIGH
+instead of NORMAL. Built sustained harness with scripts/build-isolated.ps1,
+existing E:/项目/Veyra/build/slider-reset-20260919 cache, DisplayVersion1.4.3,
+TEMP/TMP E:/项目/Veyra/tmp/fg-cadence-repair-20260920.
+Sequential scripts/run-short-test.ps1 runs priority-high6 / priority-normal6
+used p001.mp4,6,on,30,on,0,file-4k with trace enabled and watchdog95s.
+Both exit0, lifecycle-only. Retained submit rates299.550/298.664 and63/64
+gaps over10ms show no meaningful improvement. NR and multiplier unchanged.
+Removed hook; rebuilt sustained harness to restored production source.
+Artifact root E:/项目/Veyra/tests/fg-cadence-repair-20260920; build logs under
+E:/项目/Veyra/logs/fg-cadence-repair-20260920/queue-priority{-restored}-build.log.
+Details: docs/FG_NON_NR_EXPERIMENTS_2026-09-20.md. No package/push/release.
+
 ## 2026-09-20 Non-NR serial service-budget audit
 
 No product changes or new GPU runs. Extended

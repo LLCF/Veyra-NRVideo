@@ -63,6 +63,30 @@ No product change retained. This does not rule out other optical-flow work.
 
 ## Current conclusion
 
+### Graph queue priority: reverted
+
+Tested D3D12_COMMAND_QUEUE_PRIORITY_HIGH on the graph direct queue only,
+with a temporary VEYRA_TEST_GRAPH_HIGH_PRIORITY hook. The independent
+presentation queue stayed unchanged. No NR, resource lifetime, admission,
+multiplier, output quality or waiting policy changed. The high-run log
+confirms the requested priority and successful queue creation.
+
+Sequential30s same-config runs, watchdog95s, lifecycle threshold0:
+
+| Run | Retained seconds | Submit/s | P95/P99/max ms | Gaps >10ms | Discards |
+| --- | ---: | ---: | --- | ---: | ---: |
+| priority-high6 | 5.211 | 299.550 | 4.489/16.837/17.319 | 63 | 0 |
+| priority-normal6 | 5.223 | 298.664 | 4.453/16.880/17.362 | 64 | 0 |
+
+Paired stage sum averages17.5890/17.6117ms. No meaningful throughput or
+cadence improvement. Removed the hook and restored NORMAL. This rejects
+priority elevation as a fix in this workload, not all possible contention
+under other applications. Both tests exit0 proves lifecycle only; fixed6
+cadence remains unaccepted. Evidence: tests/fg-cadence-repair-20260920/
+priority-{high6,normal6}/{engine.log,frame-trace.txt}, adjacent JSON and
+stdout/stderr files. Build logs queue-priority-build.log and
+queue-priority-restored-build.log use the existing isolated build path.
+
 ### Same-input serial work audit
 
 Reanalyzed existing retained traces; no new GPU run or product change.
