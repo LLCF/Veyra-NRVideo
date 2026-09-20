@@ -4994,3 +4994,13 @@ Present 关联，再分别验证计算服务时间、门禁误拒绝、恢复 wa
 fence/allocator 反压。只对有证据的单因素优化施工；不以 4X fallback、关闭 NR 或降低
 NR 分辨率宣称固定 6X 已解决。当前仍在 `codex/fg-cadence-audit-20260920`，无打包、
 推送、发布或关机授权动作。构建和测试产物继续写入 `E:/项目/Veyra/` 对应任务目录。
+
+计划提交后的回归：`veyra_ui_contract_tests.exe` 通过。使用当前构建
+`E:/项目/Veyra/build/slider-reset-20260919/veyra_fg_sustained_tests.exe`，同一
+`p001.mp4`、4K 输出、NR1080、进程内 pacing 关闭，固定倍率 6X 的新短测在最终保留窗口
+提交约 276.545/s，P95/P99/max 间隔 16.129/16.881/17.409ms，31 个间隔超过
+16.667ms；92 个仅真实帧 batch 与 91 次 rejected→warmup 转换对应，仍未通过固定 6X。
+GPU full-group 观测约 NR 6.715ms、Flow 1.056ms、FG batch 10.042ms，slot CPU wait
+为 0，支持“当前串行服务时间和恢复门禁同时需要排查”的判断。相同构建 2X 回归为
+119.9998/s，P95/max 8.729/9.804ms，无超过源帧周期的间隔。产物位于
+`E:/项目/Veyra/tests/fg-cadence-repair-20260920/post-plan-fixed6*`，未打包或发布。
