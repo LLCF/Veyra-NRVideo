@@ -34,6 +34,7 @@ int wmain(int argc,wchar_t** argv){try{
         s.applied.revision=2;history.sample(s);require(!history.overloaded&&!history.inputLimited&&!history.resetSamples,"revision invalidates stale warnings");
     }
     {engine::PresentationCadence c;require(c.due(100,10)==100,"no startup pacing reserve");c.submitted(108);require(c.due(110,10)==117,"front edge spaces late outputs with bounded catch-up");c.submitted(999);require(c.due(120,10)==1008,"stale subframe cannot burst after stall");c.reset();require(c.due(120,10)==120,"reset revokes optional deadline");}
+    {engine::PresentationCadence c;c.submitted(100000);require(c.due(100001,27777,20)==122222,"file MFG catch-up retains 80 percent spacing");require(c.due(100001,27777,100)==122222,"catch-up cannot request an unbounded burst");require(c.due(150000,27777,20)==150000,"catch-up never presents before media deadline");require(c.due(100001,27777)==125000,"default pacing retains 90 percent spacing");c.reset();require(c.due(90000,27777,20)==90000,"file catch-up resets on timeline change");}
     {engine::PreviewView v;v.wheel(3,800,300,1000,600,1920,1080);require(std::abs(v.zoom-1.728f)<.0001f,"wheel scale");
     const float anchored=(800-500)/(1920.0f*(1000.0f/1920)*v.zoom)+v.centerX;require(std::abs(anchored-.8f)<.0001f,"pointer anchor fixed");
     v.wheel(-3,800,300,1000,600,1920,1080);require(std::abs(v.zoom-1)<.0001f&&std::abs(v.centerX-.5f)<.0001f,"inverse wheel returns same view");

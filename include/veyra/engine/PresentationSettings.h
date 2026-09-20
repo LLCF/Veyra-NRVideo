@@ -17,11 +17,14 @@ class PresentationCadence {
     int64_t last_=0;
 public:
     void reset(){last_=0;}
-    int64_t due(int64_t mediaDeadline,int64_t outputInterval)const{
+    int64_t due(int64_t mediaDeadline,int64_t outputInterval,unsigned catchUpPercent=10)const{
         if(!last_)return mediaDeadline;
         // Bounded catch-up absorbs wakeup/Present jitter without moving the
-        // media grid forward every frame. Never burst closer than 90% period.
-        return std::max(mediaDeadline,last_+outputInterval-outputInterval/10);
+        // media grid forward every frame. File MFG allows 20% recovery;
+        // other callers retain 10%. No caller can remove the spacing bound.
+        const auto recovery=(outputInterval/100)*std::min(catchUpPercent,20u)
+            +(outputInterval%100)*std::min(catchUpPercent,20u)/100;
+        return std::max(mediaDeadline,last_+outputInterval-recovery);
     }
     void submitted(int64_t now){last_=now;}
 };

@@ -1322,13 +1322,14 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                             const auto optionalNow=host100ns();
                             if(!isCapture&&!fileAwaitingVideo&&options.fg&&!presentSinkFrameGeneration(options.settings.frameGenerationBackend)){
                                 const auto interval=std::max<int64_t>(1,int64_t(sourceIntervalMs*10000)/std::max(1u,batch.batch.count));
-                                const auto due=cadence.due(optionalNow+int64_t((itemPtsMs-nowMs())*10000),interval);
+                                const auto due=cadence.due(optionalNow+int64_t((itemPtsMs-nowMs())*10000),interval,20);
                                 if(optionalNow<due)return {State::Pending,due};
                             }
                             if(presentationEffective.enabled){
                                 const auto interval=std::max<int64_t>(1,int64_t(sourceIntervalMs*10000)/std::max(1u,batch.batch.count));
                                 const auto mediaDeadline=isCapture?timeline.deadline(item.pts100ns):fileAwaitingVideo?optionalNow:optionalNow+int64_t((itemPtsMs-nowMs())*10000);
-                                const auto due=presentationEffective.mode==PacingMode::Even?cadence.due(mediaDeadline,interval):mediaDeadline;
+                                const unsigned catchUpPercent=!isCapture&&options.fg&&!presentSinkFrameGeneration(options.settings.frameGenerationBackend)?20:10;
+                                const auto due=presentationEffective.mode==PacingMode::Even?cadence.due(mediaDeadline,interval,catchUpPercent):mediaDeadline;
                                 if(generated&&presentationEffective.mode==PacingMode::Even&&due>mediaDeadline+interval){++s.dropped;++s.handled;++s.next;s.deadlineStart.reset();continue;}
                                 if(optionalNow<due)return {State::Pending,due};
                                 if(!presenter.presentationReady())return {State::Pending,optionalNow+2000};
