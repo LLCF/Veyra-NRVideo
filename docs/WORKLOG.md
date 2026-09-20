@@ -5004,3 +5004,8 @@ GPU full-group 观测约 NR 6.715ms、Flow 1.056ms、FG batch 10.042ms，slot CP
 为 0，支持“当前串行服务时间和恢复门禁同时需要排查”的判断。相同构建 2X 回归为
 119.9998/s，P95/max 8.729/9.804ms，无超过源帧周期的间隔。产物位于
 `E:/项目/Veyra/tests/fg-cadence-repair-20260920/post-plan-fixed6*`，未打包或发布。
+
+补充诊断 `post-plan-nr900-fixed6`：NR900 约 323.477/s，P95/P99/max
+4.519/16.692/17.102ms，18 个间隔超过 16.667ms，36 次 rejected→warmup；GPU
+P95 约 NR5.664ms、Flow1.265ms、FG10.659ms，slot CPU wait 仍为 0。降低 NR 分辨率
+接近但没有达到均匀固定 6X，因此仍只作为性能对照，不改变原画质验收目标。
