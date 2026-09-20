@@ -1915,7 +1915,6 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
 
     // FG reads enhanced SDR color, not the pre-NR guidance input.
     if (runFg && fgBackend_ && fgBackend_->created()) {
-      const uint32_t statusReadbackSlot=parity+(fgCalls-1)*2;
       for(uint32_t sub=1;sub<=fgCalls;++sub){
         const uint32_t generatedSlot=parity+(sub-1)*2;
         auto* flist=ring_.acquireNext(slot,st); if(!flist)return false;
@@ -1949,14 +1948,8 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
         gpuTimer_.mark(flist,timingStage,true);if(sub==fgCalls)gpuTimer_.mark(flist,GpuStage::FgBatch,true);
         tracker_.uavBarrier(flist,genFrame_[generatedSlot].Get());
         tracker_.uavBarrier(flist,fgDisable_[parity].Get());
-        // The disable flag describes the whole MFG input pair. Copy it once,
-        // after the final Evaluate, instead of issuing one readback per
-        // generated subframe. The last generated slot remains unique to this
-        // batch, so queued batches never alias their status readback.
-        if(sub==fgCalls){
-            tracker_.transition(flist,fgDisable_[parity].Get(),D3D12_RESOURCE_STATE_COPY_SOURCE);
-            flist->CopyBufferRegion(fgDisableReadback_[statusReadbackSlot].Get(),0,fgDisable_[parity].Get(),0,4);
-        }
+        tracker_.transition(flist,fgDisable_[parity].Get(),D3D12_RESOURCE_STATE_COPY_SOURCE);
+        flist->CopyBufferRegion(fgDisableReadback_[generatedSlot].Get(),0,fgDisable_[parity].Get(),0,4);
         tracker_.transition(flist,videoFrame_[parity].Get(),D3D12_RESOURCE_STATE_COMMON);
         tracker_.transition(flist,genFrame_[generatedSlot].Get(),D3D12_RESOURCE_STATE_COMMON);
         tracker_.transition(flist,depthTex_.Get(),D3D12_RESOURCE_STATE_COMMON);
@@ -1971,7 +1964,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
             ++metrics_.fgSubmittedCandidates;
             BatchFrame f;f.identity=out.batch.identity;f.kind=FrameKind::Generated;f.validity=GenerationValidity::Pending;f.subframe=sub;
             f.pts100ns=FrameBatch::interpolate(out.batch.a100ns,out.batch.b100ns,sub,fgMultiplier);
-            f.lease=std::make_shared<FrameLease>();f.lease->texture=genFrame_[generatedSlot];f.lease->slot=generatedSlot;f.lease->statusSlot=statusReadbackSlot;f.lease->readyFence=out.genFenceValue;f.lease->readyFenceObject=out.genFenceObject;generatedLeases_[generatedSlot]=f.lease;out.batch.append(std::move(f));
+            f.lease=std::make_shared<FrameLease>();f.lease->texture=genFrame_[generatedSlot];f.lease->slot=generatedSlot;f.lease->readyFence=out.genFenceValue;f.lease->readyFenceObject=out.genFenceObject;generatedLeases_[generatedSlot]=f.lease;out.batch.append(std::move(f));
         }
       }
     }
@@ -2002,8 +1995,7 @@ bool EnhanceGraph::resolveFrame(FrameOutputs& out,uint32_t index)
     if(!frame.lease||!frame.lease->ready())return false;
     if(frame.kind!=FrameKind::Generated||frame.validity!=GenerationValidity::Pending)return true;
     void* data=nullptr;D3D12_RANGE range{0,4};
-    const auto statusSlot=frame.lease->statusSlot==UINT32_MAX?frame.lease->slot:frame.lease->statusSlot;
-    HRESULT hr=fgDisableReadback_[statusSlot]->Map(0,&range,&data);
+    HRESULT hr=fgDisableReadback_[frame.lease->slot]->Map(0,&range,&data);
     if(FAILED(hr)){frame.validity=GenerationValidity::Failed;veyra::log::error("fg-status",std::format("Map hr=0x{:X}",unsigned(hr)));return true;}
     const bool disabled=*static_cast<uint8_t*>(data)!=0;
     const bool rejected=disabled||out.contentDuplicate;
