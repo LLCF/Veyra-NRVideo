@@ -1,5 +1,23 @@
 # Veyra 工作记录
 
+## 2026-09-20 Non-NR serial service-budget audit
+
+No product changes or new GPU runs. Extended
+scripts/acceptance/analyze-fg-cadence.py to pair measured stage costs by
+session/revision/epoch/source, count FgBatch once, and exclude incomplete
+NR-on base samples. Reanalyzed restored-normal6 and paired-control6b with
+`python scripts/acceptance/analyze-fg-cadence.py <trace> --trace --output <json>`.
+Outputs: E:/项目/Veyra/tests/fg-cadence-repair-20260920/
+{restored-normal6,paired-control6b}-cost-audit.json.
+Mean paired stage sums17.7113/17.5221ms exceed60Hz budget;237/248 and226/251
+groups exceed16.667ms. Existing serial throughput pressure is measured,
+not merely inferred from rejected groups. Not hardware saturation proof.
+Synthetic `python -B -c` analyzer checks passed for nested-FG double-count
+prevention and missing-NR exclusion. Full details and next-direction
+constraints: docs/FG_NON_NR_EXPERIMENTS_2026-09-20.md.
+No build needed for offline Python/doc changes; no NR edits, delay,
+downshift, runtime changes, package or release. Goal remains active.
+
 ## 2026-09-20 Fixed6 existing NR-policy diagnostic controls
 
 Corrected the preceding proposal: NrSizePolicy and the settings UI already

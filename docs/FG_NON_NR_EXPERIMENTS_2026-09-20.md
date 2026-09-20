@@ -63,6 +63,33 @@ No product change retained. This does not rule out other optical-flow work.
 
 ## Current conclusion
 
+### Same-input serial work audit
+
+Reanalyzed existing retained traces; no new GPU run or product change.
+The analyzer now sums Color + Flow + NR + Residual + FgBatch for the SAME
+input, including measured SR/HDR if present, never adding nested Fg1..5
+again. This configuration has SR bypassed and HDR off. Missing base stages
+exclude a sample. These sums omit uninstrumented gaps and presentation;
+they are not end-to-end latency or a limit on a future concurrent design.
+
+| Baseline | Full groups | Mean / P95 stage sum ms | Groups over 16.667ms |
+| --- | ---: | --- | ---: |
+| restored-normal6 | 248 | 17.7113 / 18.5745 | 237 |
+| paired-control6b | 251 | 17.5221 / 18.3311 | 226 |
+
+In restored-normal6, FG evaluations average9.7288ms and their inter-call
+gaps total0.0830ms. Eliminating those gaps alone cannot cover the measured
+1.04ms average stage-budget deficit, even before omitted costs. The current
+serial path has measured throughput pressure; admission overestimation alone
+is not an adequate explanation. This does NOT prove hardware saturation or
+exclude better dependencies/provider execution. Prior naive queue splits
+remain failed experiments, not a solution. NR stays unchanged.
+
+Evidence: adjacent restored-normal6-cost-audit.json and
+paired-control6b-cost-audit.json in tests/fg-cadence-repair-20260920.
+Synthetic analyzer checks passed: nested FG timing is counted once, and
+missing NR samples are excluded. Fixed6 acceptance remains open.
+
 These three experiments did not establish a cadence fix. Product code is
 restored to7a3dfae. Its explicit multiplier selection and safe per-subframe
 status readback remain. Fixed6 still fails the342/s and no-source-period-hole

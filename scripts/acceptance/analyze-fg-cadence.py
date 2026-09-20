@@ -81,12 +81,20 @@ def gpu_group_costs(events):
         key = tuple(event[field] for field in ("session", "revision", "epoch", "source"))
         frames.setdefault(key, {})[int(event["detail"])] = float(event["ms"])
     full = [stages for stages in frames.values() if all(i in stages for i in range(5, 11))]
+    # Require every active base stage of the NR-on diagnostic configuration.
+    # Add FgBatch once: Fg1..5 are nested inside it, not additional work.
+    paired = [s for s in full if all(i in s for i in (0, 2, 3, 4))]
+    stage_totals = [sum(s[i] for i in (0, 2, 3, 4, 10)) +
+                    s.get(1, 0) + s.get(12, 0) for s in paired]
     return {
         "scope": "Same-input full five-evaluation groups only; batch includes inter-call gaps, excludes final status copy; not GPU utilization",
         "full6Groups": len(full),
         "evaluateSumMs": distribution([sum(s[i] for i in range(5, 10)) for s in full]),
         "batchMs": distribution([s[10] for s in full]),
         "betweenEvaluationsMs": distribution([s[10] - sum(s[i] for i in range(5, 10)) for s in full]),
+        "pairedNrOnStageTotalMs": distribution(stage_totals),
+        "pairedNrOnGroupsOver60HzBudget": sum(ms > 1000 / 60 for ms in stage_totals),
+        "stageTotalScope": "Same-input measured stage sum on the current serial graph; excludes uninstrumented gaps and presentation. Missing SR/HDR assumed inactive only for this diagnostic configuration. Not end-to-end latency or a general concurrency limit.",
         "stagesMs": {str(i): distribution([s[i] for s in full if i in s])
                      for i in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 12)},
     }
