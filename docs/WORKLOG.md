@@ -1,5 +1,30 @@
 # Veyra 工作记录
 
+## 2026-09-20 Window corner resize crash
+
+Reproduced real mouse resize crash with capture and effects disabled. Dump and
+PE unwind metadata identify UI stack exhaustion, not a GPU deadlock. Extracted
+heavy AppShell/SettingsWindow message handlers into noinline helpers. Callback
+stack allocations fall from 162360/98216 bytes to 280/2536 bytes. No FG timing
+or rendering changes. Added native modal resizing and PE stack-budget checks.
+Release build, UI contract and presentation worker tests pass; real mouse
+capture resizing, native capture/DLSS6/XeSS4 resizing and synthetic DPI pass.
+The initial DLSS test reader hit invalid UTF8 after successful process exit;
+reader fixed and rerun passed. Full evidence, commands and limits are in
+docs/WINDOW_RESIZE_REPAIR_2026-09-20.md. Artifacts stay under
+E:/项目/Veyra/tests/resize-hang-20260920, existing build/slider-reset-20260919,
+tmp/fg-cadence-repair-20260920 and test-packages/1.4.3-20260920-resize-fix.
+No proprietary files enter Git, no push/release/shutdown.
+
+Package completed: resize-fix/Veyra-1.4.3-test-win64-portable.zip,
+472349977 bytes, SHA256 ABA2DA87D1A308629BE1CD347401DF266212D98BC9A5E904E078512AE6FADD19.
+All 120 ZIP payload hashes/sizes match manifest; forbiddenFiles=0; portable
+smoke seven cases passed. Additional smoke-repair-ui invalid-draft assertion
+fails on both this build and old final package under identical inputs; recorded
+as existing unresolved behavior, not a passing regression. See repair report.
+Packaged EXE NR+SR+DLSS6 native resize passed four grow/shrink cycles, exit0;
+packaged 12-second --smoke-ui passed fullscreen/restore/UI checks, exit0.
+
 ## 2026-09-20 Retained repairs: 1.4.3 local test package
 
 User stopped further optimization and requested a new local 1.4.3 package.

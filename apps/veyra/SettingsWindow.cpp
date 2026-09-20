@@ -1182,212 +1182,10 @@ void createRowResets(){
         addReset(colorSliderId(int(i)),colorLabelId(int(i)),colorEditId(int(i)),[](auto& s)->auto&{return s.color.exposure;},&colorParams[i]);
     }
 }
-LRESULT CALLBACK proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
-    if(msg==WM_COMMAND&&!populating&&HIWORD(wp)==BN_CLICKED){
-        if(const auto found=rowResets.find(LOWORD(wp));found!=rowResets.end()){
-            auto settings=enhancementEnabled?controller->snapshot().desired:configuredSettings;
-            found->second.reset(settings);
-            if(found->second.slider>=colorSliderId(0))applyColour(settings.color,false);
-            else submit(settings);
-            populate(enhancementEnabled?controller->snapshot().desired:configuredSettings);
-            return 0;
-        }
-    }
-    if(msg==WM_COMMAND&&!populating&&((LOWORD(wp)==240&&HIWORD(wp)==BN_CLICKED)||((LOWORD(wp)==241||LOWORD(wp)==242)&&HIWORD(wp)==CBN_SELCHANGE))){
-        auto setting=controller->snapshot().presentation;setting.enabled=checked(240)==BST_CHECKED;
-        setting.mode=engine::PacingMode(send(241,CB_GETCURSEL));setting.display=engine::DisplaySync(send(242,CB_GETCURSEL));
-        if(setting.valid()){controller->requestPresentation(setting);EnableWindow(item(241),setting.enabled);EnableWindow(item(242),setting.enabled);SendMessageW(GetParent(window),WM_APP+46,0,0);}return 0;
-    }
-    if(msg==WM_COMMAND&&LOWORD(wp)==221&&HIWORD(wp)==BN_CLICKED){smoothMotionHelpExpanded=!smoothMotionHelpExpanded;putText(221,smoothMotionHelpExpanded?L"Smooth Motion · 收起说明 ▴":L"Smooth Motion · 开启方法 ▾");arrange();return 0;}
-    if(msg==WM_COMMAND&&!populating&&LOWORD(wp)==220&&HIWORD(wp)==BN_CLICKED){liveField(220);return 0;}
-    if(msg==WM_COMMAND&&!populating&&LOWORD(wp)==230&&HIWORD(wp)==BN_CLICKED){SendMessageW(GetParent(window),WM_APP+44,230,checked(230));return 0;}
-    if(msg==WM_HSCROLL&&!populating&&lp){const auto id=GetDlgCtrlID(reinterpret_cast<HWND>(lp));if(id>=631&&id<=634){liveField(id);return 0;}}
-    if(msg==WM_COMMAND&&!populating&&LOWORD(wp)==219&&HIWORD(wp)==BN_CLICKED){liveField(219);return 0;}
-    if(msg==WM_COMMAND&&!populating&&LOWORD(wp)==218&&HIWORD(wp)==CBN_SELCHANGE){liveField(218);return 0;}
-    if(msg==WM_COMMAND&&!populating&&((LOWORD(wp)==216&&HIWORD(wp)==CBN_SELCHANGE)||(LOWORD(wp)==217&&HIWORD(wp)==EN_CHANGE))){liveField(LOWORD(wp));return 0;}
-    if(msg==WM_COMMAND&&!populating&&LOWORD(wp)==222&&HIWORD(wp)==EN_CHANGE){liveField(222);return 0;}
-    if(msg==WM_COMMAND&&!populating&&LOWORD(wp)==222&&HIWORD(wp)==EN_KILLFOCUS){populate(enhancementEnabled?controller->snapshot().desired:configuredSettings);return 0;}
-    // --- colour page (plan v4) ---------------------------------------------
-    if(msg==WM_COMMAND&&LOWORD(wp)==800&&HIWORD(wp)==BN_CLICKED){
-        auto settings=enhancementEnabled?controller->snapshot().desired:configuredSettings;
-        settings.color.enabled=SendMessageW(item(800),BM_GETCHECK,0,0)==BST_CHECKED;
-        if(!submit(settings)){syncColorControls();return 0;}
-        message(settings.color.enabled?L"调色已开启：链路在所有效果器之前，会有一点额外开销。":L"调色已关闭：这条链完全不存在，零开销。");
-        return 0;
-    }
-    // Reset / undo / redo / copy / paste / hold-to-compare (plan T3 + section 9).
-    // Explicit ids: 820 sits inside this range but is the black & white switch,
-    // which has its own handler below (a range test silently swallowed it and the
-    // following sync reset the checkbox).
-    if(msg==WM_COMMAND&&HIWORD(wp)==BN_CLICKED&&(LOWORD(wp)==801||LOWORD(wp)==802||LOWORD(wp)==822||LOWORD(wp)==823||LOWORD(wp)==824)){
-        const int id=LOWORD(wp);
-        if(id==801){
-            auto neutral=engine::ColorSettings{};neutral.enabled=true;
-            if(applyColour(neutral,false))message(L"已还原为中性；可以点“撤销”逐步找回。");
-        }else if(id==802){
-            if(colourHistoryIndex>0){
-                --colourHistoryIndex;
-                if(applyColour(colourHistory[size_t(colourHistoryIndex)],false,false))message(L"已撤销上一步。");
-            }else message(L"没有可撤销的步骤。");
-        }else if(id==824){
-            if(colourHistoryIndex>=0&&colourHistoryIndex+1<int(colourHistory.size())){
-                ++colourHistoryIndex;
-                if(applyColour(colourHistory[size_t(colourHistoryIndex)],false,false))message(L"已重做。");
-            }else message(L"没有可重做的步骤。");
-        }else if(id==822){
-            colourClipboard=colourTarget();colourClipboardValid=true;
-            message(L"已复制当前色彩设置；可以粘贴到别的预设或下一段素材。");
-        }else if(id==823){
-            if(colourClipboardValid&&applyColour(colourClipboard,true))message(L"已粘贴色彩设置。");
-            else if(!colourClipboardValid)message(L"剪贴板里还没有色彩设置，先点“复制”。");
-            else message(L"设置正在切换，请稍后再试。");
-        }
-        syncColorControls();arrange();return 0;
-    }
-    if(msg==WM_COMMAND&&LOWORD(wp)==colorMixerModeId&&HIWORD(wp)==BN_CLICKED){
-        colourBlackWhite=SendMessageW(item(colorMixerModeId),BM_GETCHECK,0,0)==BST_CHECKED;
-        auto colour=colourTarget();
-        if(colour.blackWhite!=colourBlackWhite){
-            colour.blackWhite=colourBlackWhite;
-            if(!applyColour(colour,true)){
-                veyra::log::warn("color-ui","mixer correction switch rejected");
-                syncColorControls();
-                return 0;
-            }
-        }
-        veyra::log::info("color-ui",std::format("mixer blackWhite={}",colourBlackWhite?1:0));
-        message(colourBlackWhite?L"黑白混色器已打开：画面转单色，下面出现“黑白”滑块。":L"已回到 HSL 混色（色相/饱和度/明亮度）。");
-        syncColorControls();
-        arrange();
-        return 0;
-    }
-    if(msg==WM_COMMAND&&LOWORD(wp)>=colorCurveChannelId&&LOWORD(wp)<=colorCurveChannelId+3&&HIWORD(wp)==BN_CLICKED){
-        colourCurveChannel=LOWORD(wp)-colorCurveChannelId;
-        veyra::log::info("color-ui",std::format("curve channel selected={}",colourCurveChannel));
-        if(auto canvas=item(colorCurveCanvasId))InvalidateRect(canvas,nullptr,FALSE);
-        return 0;
-    }
-    if(msg==WM_COMMAND&&LOWORD(wp)==colorCurveResetId&&HIWORD(wp)==BN_CLICKED){
-        auto colour=colourTarget();
-        curveForChannel(colour,colourCurveChannel).reset();
-        if(applyColour(colour,true)){
-            message(L"该通道曲线已拉平。");
-            veyra::log::info("color-ui",std::format("curve flattened channel={}",colourCurveChannel));
-        }
-        if(auto canvas=item(colorCurveCanvasId))InvalidateRect(canvas,nullptr,FALSE);
-        return 0;
-    }
-    if(msg==WM_COMMAND&&LOWORD(wp)>=810&&LOWORD(wp)<810+kColorSections&&HIWORD(wp)==BN_CLICKED){
-        const int section=LOWORD(wp)-810;
-        colorFoldMask^=1u<<section;
-        saveColourFoldState();
-        arrange();
-        return 0;
-    }
-    // --- colour presets + the .cube picker (T5-b) ---------------------------
-    if(msg==WM_COMMAND&&LOWORD(wp)>=805&&LOWORD(wp)<=809&&HIWORD(wp)==BN_CLICKED){
-        const int id=LOWORD(wp);
-        engine::ColorLookStore lookStore(runtime::localDataDirectory());
-        if(id==805){
-            wchar_t name[64]{};GetWindowTextW(item(804),name,64);
-            if(std::wstring(name).find_first_not_of(L" \t\r\n")==std::wstring::npos){
-                SetFocus(item(804));
-                MessageBoxW(window,L"请输入预设名称，再点击保存。",L"保存色彩预设",MB_OK|MB_ICONINFORMATION);
-                return 0;
-            }
-            if(!lookStore.load()){
-                MessageBoxW(window,lookStore.error().c_str(),L"保存失败",MB_OK|MB_ICONERROR);return 0;
-            }
-            const bool exists=std::any_of(lookStore.entries().begin(),lookStore.entries().end(),[&](const auto& entry){return entry.name==name;});
-            if(exists&&MessageBoxW(window,L"已存在同名预设，是否覆盖？",name,MB_YESNO|MB_ICONQUESTION)!=IDYES)return 0;
-            auto colour=colourTarget();colour.enabled=true;
-            if(lookStore.put(name,colour,true)){
-                refreshColourLooks(name);
-                message(L"已保存色彩预设："+std::wstring(name));
-                veyra::log::info("color-ui","named preset saved to disk and selected");
-            }else MessageBoxW(window,lookStore.error().c_str(),L"保存失败",MB_OK|MB_ICONERROR);
-        }else if(id==806){
-            const int index=int(SendMessageW(item(803),CB_GETCURSEL,0,0));
-            if(lookStore.load()&&index>=1&&size_t(index-1)<lookStore.entries().size()){
-                const auto& colour=lookStore.entries()[size_t(index-1)].color;
-                const bool applied=applyColour(colour,true);
-                veyra::log::info("color-ui",std::format("preset apply index={} exposure={:.3f} lut={} accepted={}",
-                    index,colour.exposure,colour.lutNameString().empty()?0:1,applied));
-                if(applied){
-                    syncColorControls();refreshColourLuts();
-                    message(L"已应用该色彩预设（只改色彩，不动 NR/超分/补帧）。");
-                }else message(L"设置正在切换，请稍后再试。");
-            }else{
-                veyra::log::info("color-ui",std::format("preset apply rejected index={} entries={}",index,lookStore.entries().size()));
-                message(L"先在列表里选一个预设。");
-            }
-        }else if(id==807){
-            const int index=int(SendMessageW(item(803),CB_GETCURSEL,0,0));
-            if(lookStore.load()&&index>=1&&lookStore.erase(size_t(index-1))){
-                refreshColourLooks();
-                message(L"已删除该色彩预设。");
-            }else message(L"删除失败："+lookStore.error());
-        }else if(id==808){
-            const int index=int(SendMessageW(item(803),CB_GETCURSEL,0,0));
-            const auto path=pickColourSave(L"Veyra 色彩预设 (*.vpcolor)\0*.vpcolor\0所有文件 (*.*)\0*.*\0\0",L"导出色彩预设",L"look.vpcolor");
-            if(!path.empty()&&lookStore.load()&&lookStore.exportFile(size_t(std::max(0,index-1)),path))message(L"已导出 .vpcolor。");
-            else if(!path.empty())message(L"导出失败："+lookStore.error());
-        }else{
-            const auto path=pickColourFile(L"Veyra 色彩预设 (*.vpcolor)\0*.vpcolor\0所有文件 (*.*)\0*.*\0\0",L"导入色彩预设");
-            if(!path.empty()){
-                std::wstring name;
-                if(lookStore.load()&&lookStore.importFile(path,name)){refreshColourLooks(name);message(L"已导入预设："+name);}
-                else message(L"导入失败："+lookStore.error());
-            }
-        }
-        return 0;
-    }
-    if(msg==WM_COMMAND&&LOWORD(wp)==817&&HIWORD(wp)==CBN_SELCHANGE){
-        const int index=int(SendMessageW(item(817),CB_GETCURSEL,0,0));
-        auto colour=colourTarget();colour.enabled=true;
-        if(index<=0)colour.clearLut();
-        else if(size_t(index-1)<colourLutNames.size()&&!colour.setLutName(colourLutNames[size_t(index-1)])){message(L"LUT 名字非法。");return 0;}
-        if(index>0&&colour.lutStrength<=0.0f)colour.lutStrength=100.0f;
-        if(!applyColour(colour,false))message(L"设置正在切换，请稍后再试。");
-        else message(index<=0?L"已停用 LUT。":L"已选择 LUT；管线会重建一次，短暂停顿正常。");
-        syncColorControls();
-        return 0;
-    }
-    if(msg==WM_COMMAND&&LOWORD(wp)==819&&HIWORD(wp)==CBN_SELCHANGE){
-        const int index=int(SendMessageW(item(819),CB_GETCURSEL,0,0));
-        auto colour=colourTarget();
-        colour.lutInputSpace=std::clamp(index,0,2);
-        if(applyColour(colour,true))message(L"已切换 LUT 输入空间（日志会记录）。");
-        return 0;
-    }
-    if(msg==WM_COMMAND&&LOWORD(wp)==818&&HIWORD(wp)==BN_CLICKED){
-        const auto path=pickColourFile(L"Cube LUT (*.cube)\0*.cube\0所有文件 (*.*)\0*.*\0\0",L"导入 .cube LUT");
-        if(!path.empty()){
-            engine::ColorLutStore lutStore(runtime::localDataDirectory());
-            std::wstring name;std::string error;
-            if(lutStore.importFile(path,name,error)&&!name.empty()){
-                auto colour=colourTarget();colour.enabled=true;
-                colour.setLutName(name);
-                if(colour.lutStrength<=0.0f)colour.lutStrength=100.0f;
-                refreshColourLuts();
-                if(!applyColour(colour,false))message(L"LUT 已导入，但设置正在切换；稍后重选即可。");
-                else message(L"已导入并选择 LUT："+name+L"（已写入 manifest）。");
-            }else message(L"导入失败："+std::wstring(error.begin(),error.end()));
-        }
-        return 0;
-    }
-    if(msg==WM_COMMAND&&!populating&&!syncingColour&&LOWORD(wp)>=colorEditId(0)&&LOWORD(wp)<colorEditId(0)+kColorMaxParams&&HIWORD(wp)==EN_CHANGE){
-        const int index=LOWORD(wp)-colorEditId(0);
-        if(index<int(colorParams.size())){
-            wchar_t buffer[64]{};GetWindowTextW(item(LOWORD(wp)),buffer,64);
-            wchar_t* end=nullptr;const float value=wcstof(buffer,&end);
-            if(end==buffer||*end||!std::isfinite(value))message(L"数值未完整；仍使用上次有效值");
-            else colourFieldEdited(index,value);
-        }
-        return 0;
-    }
-    if(msg==WM_COMMAND&&!populating&&((LOWORD(wp)==209&&HIWORD(wp)==CBN_SELCHANGE)||(LOWORD(wp)==215&&HIWORD(wp)==BN_CLICKED))){liveField(LOWORD(wp));return 0;}
-    switch(msg){
+// Win32 synchronously reenters this callback during layout and control painting.
+// Allocate snapshots only in the message handlers that actually need them.
+__declspec(noinline) LRESULT createSettingsWindow(HWND h,UINT msg,WPARAM wp,LPARAM lp){
+switch(msg){
 case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.clear();smoothMotionHelpExpanded=false;
     WNDCLASSW bodyClass{};bodyClass.lpfnWndProc=bodyProc;bodyClass.hInstance=GetModuleHandleW(nullptr);bodyClass.lpszClassName=L"VeyraInspectorBody";bodyClass.hCursor=LoadCursorW(nullptr,IDC_ARROW);RegisterClassW(&bodyClass);
     // Composite only the scrolling controls, never the video/swapchain window.
@@ -1648,36 +1446,226 @@ case WM_CREATE:{window=h;font=makeFont(h);items.clear();displayedBackendWarning.
         for(const auto& entry:items)veyra::log::info("settings-layout",std::format("id={} page={} x={} y={} w={} h={}",
             GetDlgCtrlID(entry.h),entry.page,entry.x,entry.y,entry.w,entry.height));
     return 0;}
-case WM_SIZE:arrange();return 0;
-case WM_ERASEBKGND:return 1;
-case WM_PAINT:{PaintBuffer paint(h);fillSurface(paint.dc,paint.rect,h);return 0;}
-case WM_VSCROLL:{switch(LOWORD(wp)){case SB_LINEUP:scroll-=40;break;case SB_LINEDOWN:scroll+=40;break;case SB_PAGEUP:scroll-=240;break;case SB_PAGEDOWN:scroll+=240;break;case SB_THUMBTRACK:{SCROLLINFO si{sizeof(si),SIF_TRACKPOS};GetScrollInfo(h,SB_VERT,&si);scroll=si.nTrackPos;break;}}arrange();return 0;}
-case WM_MOUSEWHEEL:scroll-=GET_WHEEL_DELTA_WPARAM(wp)/WHEEL_DELTA*36;arrange();return 0;
-case WM_CTLCOLORSTATIC:case WM_CTLCOLOREDIT:case WM_CTLCOLORLISTBOX:case WM_CTLCOLORBTN:return colors(msg,wp,lp);
+}return DefWindowProcW(h,msg,wp,lp);
+}
+
+__declspec(noinline) LRESULT settingsCommand(HWND h,UINT msg,WPARAM wp,LPARAM lp){
+
+    if(msg==WM_COMMAND&&!populating&&HIWORD(wp)==BN_CLICKED){
+        if(const auto found=rowResets.find(LOWORD(wp));found!=rowResets.end()){
+            auto settings=enhancementEnabled?controller->snapshot().desired:configuredSettings;
+            found->second.reset(settings);
+            if(found->second.slider>=colorSliderId(0))applyColour(settings.color,false);
+            else submit(settings);
+            populate(enhancementEnabled?controller->snapshot().desired:configuredSettings);
+            return 0;
+        }
+    }
+    if(msg==WM_COMMAND&&!populating&&((LOWORD(wp)==240&&HIWORD(wp)==BN_CLICKED)||((LOWORD(wp)==241||LOWORD(wp)==242)&&HIWORD(wp)==CBN_SELCHANGE))){
+        auto setting=controller->snapshot().presentation;setting.enabled=checked(240)==BST_CHECKED;
+        setting.mode=engine::PacingMode(send(241,CB_GETCURSEL));setting.display=engine::DisplaySync(send(242,CB_GETCURSEL));
+        if(setting.valid()){controller->requestPresentation(setting);EnableWindow(item(241),setting.enabled);EnableWindow(item(242),setting.enabled);SendMessageW(GetParent(window),WM_APP+46,0,0);}return 0;
+    }
+    if(msg==WM_COMMAND&&LOWORD(wp)==221&&HIWORD(wp)==BN_CLICKED){smoothMotionHelpExpanded=!smoothMotionHelpExpanded;putText(221,smoothMotionHelpExpanded?L"Smooth Motion · 收起说明 ▴":L"Smooth Motion · 开启方法 ▾");arrange();return 0;}
+    if(msg==WM_COMMAND&&!populating&&LOWORD(wp)==220&&HIWORD(wp)==BN_CLICKED){liveField(220);return 0;}
+    if(msg==WM_COMMAND&&!populating&&LOWORD(wp)==230&&HIWORD(wp)==BN_CLICKED){SendMessageW(GetParent(window),WM_APP+44,230,checked(230));return 0;}
+    if(msg==WM_COMMAND&&!populating&&LOWORD(wp)==219&&HIWORD(wp)==BN_CLICKED){liveField(219);return 0;}
+    if(msg==WM_COMMAND&&!populating&&LOWORD(wp)==218&&HIWORD(wp)==CBN_SELCHANGE){liveField(218);return 0;}
+    if(msg==WM_COMMAND&&!populating&&((LOWORD(wp)==216&&HIWORD(wp)==CBN_SELCHANGE)||(LOWORD(wp)==217&&HIWORD(wp)==EN_CHANGE))){liveField(LOWORD(wp));return 0;}
+    if(msg==WM_COMMAND&&!populating&&LOWORD(wp)==222&&HIWORD(wp)==EN_CHANGE){liveField(222);return 0;}
+    if(msg==WM_COMMAND&&!populating&&LOWORD(wp)==222&&HIWORD(wp)==EN_KILLFOCUS){populate(enhancementEnabled?controller->snapshot().desired:configuredSettings);return 0;}
+    // --- colour page (plan v4) ---------------------------------------------
+    if(msg==WM_COMMAND&&LOWORD(wp)==800&&HIWORD(wp)==BN_CLICKED){
+        auto settings=enhancementEnabled?controller->snapshot().desired:configuredSettings;
+        settings.color.enabled=SendMessageW(item(800),BM_GETCHECK,0,0)==BST_CHECKED;
+        if(!submit(settings)){syncColorControls();return 0;}
+        message(settings.color.enabled?L"调色已开启：链路在所有效果器之前，会有一点额外开销。":L"调色已关闭：这条链完全不存在，零开销。");
+        return 0;
+    }
+    // Reset / undo / redo / copy / paste / hold-to-compare (plan T3 + section 9).
+    // Explicit ids: 820 sits inside this range but is the black & white switch,
+    // which has its own handler below (a range test silently swallowed it and the
+    // following sync reset the checkbox).
+    if(msg==WM_COMMAND&&HIWORD(wp)==BN_CLICKED&&(LOWORD(wp)==801||LOWORD(wp)==802||LOWORD(wp)==822||LOWORD(wp)==823||LOWORD(wp)==824)){
+        const int id=LOWORD(wp);
+        if(id==801){
+            auto neutral=engine::ColorSettings{};neutral.enabled=true;
+            if(applyColour(neutral,false))message(L"已还原为中性；可以点“撤销”逐步找回。");
+        }else if(id==802){
+            if(colourHistoryIndex>0){
+                --colourHistoryIndex;
+                if(applyColour(colourHistory[size_t(colourHistoryIndex)],false,false))message(L"已撤销上一步。");
+            }else message(L"没有可撤销的步骤。");
+        }else if(id==824){
+            if(colourHistoryIndex>=0&&colourHistoryIndex+1<int(colourHistory.size())){
+                ++colourHistoryIndex;
+                if(applyColour(colourHistory[size_t(colourHistoryIndex)],false,false))message(L"已重做。");
+            }else message(L"没有可重做的步骤。");
+        }else if(id==822){
+            colourClipboard=colourTarget();colourClipboardValid=true;
+            message(L"已复制当前色彩设置；可以粘贴到别的预设或下一段素材。");
+        }else if(id==823){
+            if(colourClipboardValid&&applyColour(colourClipboard,true))message(L"已粘贴色彩设置。");
+            else if(!colourClipboardValid)message(L"剪贴板里还没有色彩设置，先点“复制”。");
+            else message(L"设置正在切换，请稍后再试。");
+        }
+        syncColorControls();arrange();return 0;
+    }
+    if(msg==WM_COMMAND&&LOWORD(wp)==colorMixerModeId&&HIWORD(wp)==BN_CLICKED){
+        colourBlackWhite=SendMessageW(item(colorMixerModeId),BM_GETCHECK,0,0)==BST_CHECKED;
+        auto colour=colourTarget();
+        if(colour.blackWhite!=colourBlackWhite){
+            colour.blackWhite=colourBlackWhite;
+            if(!applyColour(colour,true)){
+                veyra::log::warn("color-ui","mixer correction switch rejected");
+                syncColorControls();
+                return 0;
+            }
+        }
+        veyra::log::info("color-ui",std::format("mixer blackWhite={}",colourBlackWhite?1:0));
+        message(colourBlackWhite?L"黑白混色器已打开：画面转单色，下面出现“黑白”滑块。":L"已回到 HSL 混色（色相/饱和度/明亮度）。");
+        syncColorControls();
+        arrange();
+        return 0;
+    }
+    if(msg==WM_COMMAND&&LOWORD(wp)>=colorCurveChannelId&&LOWORD(wp)<=colorCurveChannelId+3&&HIWORD(wp)==BN_CLICKED){
+        colourCurveChannel=LOWORD(wp)-colorCurveChannelId;
+        veyra::log::info("color-ui",std::format("curve channel selected={}",colourCurveChannel));
+        if(auto canvas=item(colorCurveCanvasId))InvalidateRect(canvas,nullptr,FALSE);
+        return 0;
+    }
+    if(msg==WM_COMMAND&&LOWORD(wp)==colorCurveResetId&&HIWORD(wp)==BN_CLICKED){
+        auto colour=colourTarget();
+        curveForChannel(colour,colourCurveChannel).reset();
+        if(applyColour(colour,true)){
+            message(L"该通道曲线已拉平。");
+            veyra::log::info("color-ui",std::format("curve flattened channel={}",colourCurveChannel));
+        }
+        if(auto canvas=item(colorCurveCanvasId))InvalidateRect(canvas,nullptr,FALSE);
+        return 0;
+    }
+    if(msg==WM_COMMAND&&LOWORD(wp)>=810&&LOWORD(wp)<810+kColorSections&&HIWORD(wp)==BN_CLICKED){
+        const int section=LOWORD(wp)-810;
+        colorFoldMask^=1u<<section;
+        saveColourFoldState();
+        arrange();
+        return 0;
+    }
+    // --- colour presets + the .cube picker (T5-b) ---------------------------
+    if(msg==WM_COMMAND&&LOWORD(wp)>=805&&LOWORD(wp)<=809&&HIWORD(wp)==BN_CLICKED){
+        const int id=LOWORD(wp);
+        engine::ColorLookStore lookStore(runtime::localDataDirectory());
+        if(id==805){
+            wchar_t name[64]{};GetWindowTextW(item(804),name,64);
+            if(std::wstring(name).find_first_not_of(L" \t\r\n")==std::wstring::npos){
+                SetFocus(item(804));
+                MessageBoxW(window,L"请输入预设名称，再点击保存。",L"保存色彩预设",MB_OK|MB_ICONINFORMATION);
+                return 0;
+            }
+            if(!lookStore.load()){
+                MessageBoxW(window,lookStore.error().c_str(),L"保存失败",MB_OK|MB_ICONERROR);return 0;
+            }
+            const bool exists=std::any_of(lookStore.entries().begin(),lookStore.entries().end(),[&](const auto& entry){return entry.name==name;});
+            if(exists&&MessageBoxW(window,L"已存在同名预设，是否覆盖？",name,MB_YESNO|MB_ICONQUESTION)!=IDYES)return 0;
+            auto colour=colourTarget();colour.enabled=true;
+            if(lookStore.put(name,colour,true)){
+                refreshColourLooks(name);
+                message(L"已保存色彩预设："+std::wstring(name));
+                veyra::log::info("color-ui","named preset saved to disk and selected");
+            }else MessageBoxW(window,lookStore.error().c_str(),L"保存失败",MB_OK|MB_ICONERROR);
+        }else if(id==806){
+            const int index=int(SendMessageW(item(803),CB_GETCURSEL,0,0));
+            if(lookStore.load()&&index>=1&&size_t(index-1)<lookStore.entries().size()){
+                const auto& colour=lookStore.entries()[size_t(index-1)].color;
+                const bool applied=applyColour(colour,true);
+                veyra::log::info("color-ui",std::format("preset apply index={} exposure={:.3f} lut={} accepted={}",
+                    index,colour.exposure,colour.lutNameString().empty()?0:1,applied));
+                if(applied){
+                    syncColorControls();refreshColourLuts();
+                    message(L"已应用该色彩预设（只改色彩，不动 NR/超分/补帧）。");
+                }else message(L"设置正在切换，请稍后再试。");
+            }else{
+                veyra::log::info("color-ui",std::format("preset apply rejected index={} entries={}",index,lookStore.entries().size()));
+                message(L"先在列表里选一个预设。");
+            }
+        }else if(id==807){
+            const int index=int(SendMessageW(item(803),CB_GETCURSEL,0,0));
+            if(lookStore.load()&&index>=1&&lookStore.erase(size_t(index-1))){
+                refreshColourLooks();
+                message(L"已删除该色彩预设。");
+            }else message(L"删除失败："+lookStore.error());
+        }else if(id==808){
+            const int index=int(SendMessageW(item(803),CB_GETCURSEL,0,0));
+            const auto path=pickColourSave(L"Veyra 色彩预设 (*.vpcolor)\0*.vpcolor\0所有文件 (*.*)\0*.*\0\0",L"导出色彩预设",L"look.vpcolor");
+            if(!path.empty()&&lookStore.load()&&lookStore.exportFile(size_t(std::max(0,index-1)),path))message(L"已导出 .vpcolor。");
+            else if(!path.empty())message(L"导出失败："+lookStore.error());
+        }else{
+            const auto path=pickColourFile(L"Veyra 色彩预设 (*.vpcolor)\0*.vpcolor\0所有文件 (*.*)\0*.*\0\0",L"导入色彩预设");
+            if(!path.empty()){
+                std::wstring name;
+                if(lookStore.load()&&lookStore.importFile(path,name)){refreshColourLooks(name);message(L"已导入预设："+name);}
+                else message(L"导入失败："+lookStore.error());
+            }
+        }
+        return 0;
+    }
+    if(msg==WM_COMMAND&&LOWORD(wp)==817&&HIWORD(wp)==CBN_SELCHANGE){
+        const int index=int(SendMessageW(item(817),CB_GETCURSEL,0,0));
+        auto colour=colourTarget();colour.enabled=true;
+        if(index<=0)colour.clearLut();
+        else if(size_t(index-1)<colourLutNames.size()&&!colour.setLutName(colourLutNames[size_t(index-1)])){message(L"LUT 名字非法。");return 0;}
+        if(index>0&&colour.lutStrength<=0.0f)colour.lutStrength=100.0f;
+        if(!applyColour(colour,false))message(L"设置正在切换，请稍后再试。");
+        else message(index<=0?L"已停用 LUT。":L"已选择 LUT；管线会重建一次，短暂停顿正常。");
+        syncColorControls();
+        return 0;
+    }
+    if(msg==WM_COMMAND&&LOWORD(wp)==819&&HIWORD(wp)==CBN_SELCHANGE){
+        const int index=int(SendMessageW(item(819),CB_GETCURSEL,0,0));
+        auto colour=colourTarget();
+        colour.lutInputSpace=std::clamp(index,0,2);
+        if(applyColour(colour,true))message(L"已切换 LUT 输入空间（日志会记录）。");
+        return 0;
+    }
+    if(msg==WM_COMMAND&&LOWORD(wp)==818&&HIWORD(wp)==BN_CLICKED){
+        const auto path=pickColourFile(L"Cube LUT (*.cube)\0*.cube\0所有文件 (*.*)\0*.*\0\0",L"导入 .cube LUT");
+        if(!path.empty()){
+            engine::ColorLutStore lutStore(runtime::localDataDirectory());
+            std::wstring name;std::string error;
+            if(lutStore.importFile(path,name,error)&&!name.empty()){
+                auto colour=colourTarget();colour.enabled=true;
+                colour.setLutName(name);
+                if(colour.lutStrength<=0.0f)colour.lutStrength=100.0f;
+                refreshColourLuts();
+                if(!applyColour(colour,false))message(L"LUT 已导入，但设置正在切换；稍后重选即可。");
+                else message(L"已导入并选择 LUT："+name+L"（已写入 manifest）。");
+            }else message(L"导入失败："+std::wstring(error.begin(),error.end()));
+        }
+        return 0;
+    }
+    if(msg==WM_COMMAND&&!populating&&!syncingColour&&LOWORD(wp)>=colorEditId(0)&&LOWORD(wp)<colorEditId(0)+kColorMaxParams&&HIWORD(wp)==EN_CHANGE){
+        const int index=LOWORD(wp)-colorEditId(0);
+        if(index<int(colorParams.size())){
+            wchar_t buffer[64]{};GetWindowTextW(item(LOWORD(wp)),buffer,64);
+            wchar_t* end=nullptr;const float value=wcstof(buffer,&end);
+            if(end==buffer||*end||!std::isfinite(value))message(L"数值未完整；仍使用上次有效值");
+            else colourFieldEdited(index,value);
+        }
+        return 0;
+    }
+    if(msg==WM_COMMAND&&!populating&&((LOWORD(wp)==209&&HIWORD(wp)==CBN_SELCHANGE)||(LOWORD(wp)==215&&HIWORD(wp)==BN_CLICKED))){liveField(LOWORD(wp));return 0;}
+switch(msg){
 case WM_COMMAND:{const int id=LOWORD(wp);if(!populating&&((id>=202&&id<=205||id==207||id==208)&&HIWORD(wp)==CBN_SELCHANGE||(id>=700&&id<=732)&&HIWORD(wp)==BN_CLICKED)){liveField(id);return 0;}if((id==206||id==213||id==214)&&HIWORD(wp)==BN_CLICKED){const auto accepted=SendMessageW(GetParent(h),WM_APP+45,id,checked(206));message(accepted?(id==213?L"请在画面中左键拖动框选；Esc取消。":L"已请求更新NR剔除区。"):L"未能操作：请先打开画面，或清除已满的4个区域。");return 0;}if((id==200||id==201)&&HIWORD(wp)==BN_CLICKED){const bool accepted=SendMessageW(GetParent(h),WM_APP+44,id,checked(id))!=0;message(accepted?L"已请求开关；确认帧边界结果后生效。":L"总增强正在切换，请待当前事务完成。");return 0;}if(HIWORD(wp)==EN_SETFOCUS){for(auto& item:items)if(GetDlgCtrlID(item.h)==id&&item.page==page){RECT r{};GetClientRect(h,&r);int height=MulDiv(r.bottom,96,veyra::ui::layoutDpi(h))-128;if(item.y<scroll)scroll=item.y;if(item.y+item.height>scroll+height)scroll=item.y+item.height-height;arrange();break;}}if(!populating&&id>=100&&id<=111&&HIWORD(wp)==EN_CHANGE){liveField(id);return 0;}
     if(!populating&&id>=100&&id<=111&&HIWORD(wp)==EN_KILLFOCUS){populate(enhancementEnabled?controller->snapshot().desired:configuredSettings);return 0;}
     engine::EnhancementSettings s;
     if(id==211){SetFocus(body);s={};if(submit(s))populate(s);message(L"已还原内建默认。");}
     else if(id>=501&&id<=505)SendMessageW(GetParent(h),WM_APP+41,id,id==501?send(500,CB_GETCURSEL,0,0):id==505?checked(505):0);
     return 0;}
-case WM_HSCROLL:{int id=GetDlgCtrlID(reinterpret_cast<HWND>(lp));if(id>=600&&id<612){int index=id-600;float v=float(SendMessageW(reinterpret_cast<HWND>(lp),TBM_GETPOS,0,0))/(index>=4&&index<=6?1:100);if(index==3&&v<0)v=-1;std::wostringstream o;o<<std::setprecision(4)<<v;putText(100+index,o.str().c_str());}
-    else if(id>=colorSliderId(0)&&id<colorSliderId(0)+kColorMaxParams){
-        const int index=id-colorSliderId(0);
-        if(index<int(colorParams.size())){
-            float value=float(SendMessageW(reinterpret_cast<HWND>(lp),TBM_GETPOS,0,0))/100.0f;
-            // Alt+drag = fine adjust (plan section 3.3): the thumb may jump, but
-            // the applied value only moves a tenth of the way towards it, and the
-            // sync below pulls the thumb back so repeated Alt-drags stay fine.
-            if((GetKeyState(VK_MENU)&0x8000)!=0){
-                const float current=colorParams[size_t(index)].value(colourTarget());
-                value=current+(value-current)*0.1f;
-            }
-            colourFieldEdited(index,value);
-        }
-    }
-    else if(id==622){// Feather slider: the edit box owns the value, its EN_CHANGE applies it.
-        const int value=std::clamp(int(SendMessageW(reinterpret_cast<HWND>(lp),TBM_GETPOS,0,0)),0,64);putText(222,std::to_wstring(value).c_str());}
-    return 0;}
+}return DefWindowProcW(h,msg,wp,lp);
+}
+
+__declspec(noinline) LRESULT settingsTimer(HWND h,UINT msg,WPARAM wp,LPARAM lp){
+switch(msg){
 case WM_TIMER:{auto s=controller->snapshot();putText(1150,s.presentationStatus.c_str());syncProtection(enhancementEnabled?s.desired.protection:configuredSettings.protection);if(enhancementEnabled&&!dirty&&displayedSettings!=s.desired)populate(s.desired);syncColorControls();check(200,enhancementEnabled&&s.desired.nr?BST_CHECKED:BST_UNCHECKED);check(201,enhancementEnabled&&s.desired.sr?BST_CHECKED:BST_UNCHECKED);std::wostringstream o;if(!s.running&&!s.frames&&s.transport!=engine::TransportState::Opening)o<<L"未打开媒体 · 设置待启用\n";else{
     o<<L"期望版本 "<<s.desired.revision<<L" / 已应用 "<<s.applied.revision<<(s.applying?L" · 应用中":L"");
     const wchar_t* backend=s.applied.frameGenerationBackend==engine::FrameGenerationBackend::XeSS?L"XeSS":s.applied.frameGenerationBackend==engine::FrameGenerationBackend::Fsr?L"AMD FSR":L"DLSS";
@@ -1695,6 +1683,40 @@ case WM_TIMER:{auto s=controller->snapshot();putText(1150,s.presentationStatus.c
         s.videoHdrStatus.empty()?L"等待预览状态":s.videoHdrStatus.c_str();
     putText(1145,hdrStatus);
     return 0;}
+}return DefWindowProcW(h,msg,wp,lp);
+}
+
+LRESULT CALLBACK proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
+    switch(msg){
+case WM_CREATE:return createSettingsWindow(h,msg,wp,lp);
+case WM_SIZE:arrange();return 0;
+case WM_ERASEBKGND:return 1;
+case WM_PAINT:{PaintBuffer paint(h);fillSurface(paint.dc,paint.rect,h);return 0;}
+case WM_VSCROLL:{switch(LOWORD(wp)){case SB_LINEUP:scroll-=40;break;case SB_LINEDOWN:scroll+=40;break;case SB_PAGEUP:scroll-=240;break;case SB_PAGEDOWN:scroll+=240;break;case SB_THUMBTRACK:{SCROLLINFO si{sizeof(si),SIF_TRACKPOS};GetScrollInfo(h,SB_VERT,&si);scroll=si.nTrackPos;break;}}arrange();return 0;}
+case WM_MOUSEWHEEL:scroll-=GET_WHEEL_DELTA_WPARAM(wp)/WHEEL_DELTA*36;arrange();return 0;
+case WM_CTLCOLORSTATIC:case WM_CTLCOLOREDIT:case WM_CTLCOLORLISTBOX:case WM_CTLCOLORBTN:return colors(msg,wp,lp);
+case WM_COMMAND:return settingsCommand(h,msg,wp,lp);
+case WM_HSCROLL:{
+    if(msg==WM_HSCROLL&&!populating&&lp){const auto id=GetDlgCtrlID(reinterpret_cast<HWND>(lp));if(id>=631&&id<=634){liveField(id);return 0;}}
+int id=GetDlgCtrlID(reinterpret_cast<HWND>(lp));if(id>=600&&id<612){int index=id-600;float v=float(SendMessageW(reinterpret_cast<HWND>(lp),TBM_GETPOS,0,0))/(index>=4&&index<=6?1:100);if(index==3&&v<0)v=-1;std::wostringstream o;o<<std::setprecision(4)<<v;putText(100+index,o.str().c_str());}
+    else if(id>=colorSliderId(0)&&id<colorSliderId(0)+kColorMaxParams){
+        const int index=id-colorSliderId(0);
+        if(index<int(colorParams.size())){
+            float value=float(SendMessageW(reinterpret_cast<HWND>(lp),TBM_GETPOS,0,0))/100.0f;
+            // Alt+drag = fine adjust (plan section 3.3): the thumb may jump, but
+            // the applied value only moves a tenth of the way towards it, and the
+            // sync below pulls the thumb back so repeated Alt-drags stay fine.
+            if((GetKeyState(VK_MENU)&0x8000)!=0){
+                const float current=colorParams[size_t(index)].value(colourTarget());
+                value=current+(value-current)*0.1f;
+            }
+            colourFieldEdited(index,value);
+        }
+    }
+    else if(id==622){// Feather slider: the edit box owns the value, its EN_CHANGE applies it.
+        const int value=std::clamp(int(SendMessageW(reinterpret_cast<HWND>(lp),TBM_GETPOS,0,0)),0,64);putText(222,std::to_wstring(value).c_str());}
+    return 0;}
+case WM_TIMER:return settingsTimer(h,msg,wp,lp);
 case WM_DESTROY:KillTimer(h,1);DeleteObject(font);window=nullptr;body=nullptr;items.clear();rowResets.clear();return 0;
 }return DefWindowProcW(h,msg,wp,lp);}
 }
