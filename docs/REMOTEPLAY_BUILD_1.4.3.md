@@ -1,6 +1,7 @@
 # Veyra 1.4.3 Test Build
 
-Local test on branch codex/fg-backend-switch-20260919, following repair commit 8c9957b.
+Local test on branch codex/fg-cadence-audit-20260920, based on d60ec88.
+Product code matches retained repair commit 7a3dfae; rejected cadence experiments are reverted.
 No v1.4.3 release tag or GitHub publication is implied.
 
 Remote Play remains enabled. Chiaki is pinned to streetpea/chiaki-ng commit

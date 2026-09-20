@@ -1,5 +1,35 @@
 # Veyra 工作记录
 
+## 2026-09-20 Retained repairs: 1.4.3 local test package
+
+User stopped further optimization and requested a new local 1.4.3 package.
+Source baseline d60ec88, product code unchanged from 7a3dfae. Failed queue
+priority/native-flow and earlier unsafe status/hold experiments remain reverted.
+Updated RELEASE_NOTES_1.4.3, REMOTEPLAY_BUILD_1.4.3 and CURRENT_STATUS;
+fixed6 uneven cadence remains explicitly unresolved, with no scanout claim.
+
+Ran scripts/build-isolated.ps1 with existing slider-reset-20260919 build/cache,
+DisplayVersion1.4.3 and targets veyra, veyra_presentation_worker_tests,
+veyra_ui_contract_tests. Build and both CPU/UI executables exit0.
+Ran scripts/package-portable.ps1 -Root . -Version 1.4.3 -Label '-test'
+-BuildDirectory E:/项目/Veyra/build/slider-reset-20260919
+-OutputDirectory E:/项目/Veyra/test-packages/1.4.3-20260920-final.
+Publisher audit passed all12 unchanged runtime identities and forbiddenFiles=0.
+ZIP payload120 files checked for size/SHA256 against manifest, plus manifest
+itself; no SDK, personal settings or media shipped. EXE version1.4.3.
+
+Ran scripts/acceptance/portable-smoke.ps1 on packaged EXE with visible-scene.mp4,
+CaseSeconds7: all7 cases passed, actual NR/SR/DLSS generation checked; reviewed
+DLSS+NR+SR screenshot and confirmed visible content. This does not verify all
+devices, XeSS anew, HDR displays or fixed6 cadence. Test result/screenshots:
+E:/项目/Veyra/tests/fg-cadence-repair-20260920/package143-smoke.
+Logs: E:/项目/Veyra/logs/fg-cadence-repair-20260920/package143-*.log.
+Process-local TEMP/TMP: E:/项目/Veyra/tmp/fg-cadence-repair-20260920.
+
+ZIP: E:/项目/Veyra/test-packages/1.4.3-20260920-final/Veyra-1.4.3-test-win64-portable.zip
+Size472346875 bytes; SHA256 BDB7B9405C3EBE9C41A2A9CFA29172EAD83829A43A2F7232FCEC9AE907D04BCC.
+No push, release or shutdown. Retain archive, usable build and evidence for user testing.
+
 ## 2026-09-20 Native-resolution FG guidance experiment: reverted
 
 Tested SDK render/motion/depth subrect1920x1080 with unchanged4K output,
