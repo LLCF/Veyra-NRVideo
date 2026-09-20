@@ -1,5 +1,22 @@
 # Veyra 工作记录
 
+## 2026-09-20 Native-resolution FG guidance experiment: reverted
+
+Tested SDK render/motion/depth subrect1920x1080 with unchanged4K output,
+using existing native flow rather than upscaled baseFlow. NR/NVOF and fixed6
+unchanged. Kept baseFlow dispatch for isolation. Create succeeded; no image
+quality equivalence claim.30s native-flow6/control6 exit0 lifecycle-only,
+retained268.319/295.364 submit/s,103/68 gaps>10ms,1/0 discarded frames.
+No gain; reverted all changes in EnhanceGraph and DlssFgBackend cpp/headers.
+Build commands use scripts/build-isolated.ps1, sustained target, existing
+E:/项目/Veyra/build/slider-reset-20260919 cache and process TEMP/TMP under
+E:/项目/Veyra/tmp/fg-cadence-repair-20260920. Tests use run-short-test.ps1
+with p001.mp4,<run>,6,on,30,on,0,file-4k, timeout95s, trace enabled; only
+native-flow6 sets VEYRA_TEST_FG_NATIVE_FLOW. Analyze via analyze-fg-cadence.py.
+Evidence E:/项目/Veyra/tests/fg-cadence-repair-20260920/native-flow{6,-control6}
+and adjacent files; logs/fg-cadence-repair-20260920/native-flow{-restored}-build.log.
+See FG_NON_NR_EXPERIMENTS_2026-09-20.md for limits. Fixed6 goal remains open.
+
 ## 2026-09-20 Graph queue HIGH priority experiment: reverted
 
 Temporary one-factor hook in src/gfx/D3D12DeviceContext.cpp selected HIGH

@@ -63,6 +63,38 @@ No product change retained. This does not rule out other optical-flow work.
 
 ## Current conclusion
 
+### Native flow extent as DLSSG render input: reverted
+
+Temporary VEYRA_TEST_FG_NATIVE_FLOW selected existing1920x1080 flowTex
+instead of its nearest-neighbour3840x2160 baseFlow expansion. Create
+RenderWidth/Height and motion/depth subrects were1920x1080; backbuffer and
+generated output stayed3840x2160. Motion normalization used native flow
+dimensions. Constant depth and zero-motion fallback used matching subrects
+of their existing larger textures. NR, NVOF computation, count/index/frame
+ID and scheduling were unchanged. Kept the original baseFlow adaptation
+dispatch to isolate SDK input behavior first; this experiment therefore
+does not measure savings from eliminating that dispatch.
+
+Create succeeded with logged internal1920x1080. Sequential30s runs exited0
+(minimumTargetRatio0: lifecycle only), watchdog95s:
+
+| Run | Retained seconds | Submit/s | P95/P99/max ms | Gaps >10ms | Discards |
+| --- | ---: | ---: | --- | ---: | ---: |
+| native-flow6 | 5.631 | 268.319 | 15.650/16.951/18.129 | 103 | 1 |
+| native-flow-control6 | 5.268 | 295.364 | 4.779/16.861/17.263 | 68 | 0 |
+
+FG evaluation sum averaged9.9624 versus9.6768ms. This run supplies no
+performance benefit; reverted all four source/header edits and the hook.
+No visual equivalence claim: SDK acceptance and generation validity alone
+do not prove motion/occlusion quality. No image quality acceptance was run
+because performance already failed. The cause of the regression is not
+isolated from run-to-run GPU variation; do not claim low-resolution guidance
+is universally slower. Product behavior remains the prior full-size input.
+
+Evidence under tests/fg-cadence-repair-20260920/native-flow{6,-control6},
+adjacent JSON/stdout/stderr; native-flow{-restored}-build.log under the
+matching logs directory. Rebuilt the sustained executable after rollback.
+
 ### Graph queue priority: reverted
 
 Tested D3D12_COMMAND_QUEUE_PRIORITY_HIGH on the graph direct queue only,
