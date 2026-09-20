@@ -60,6 +60,10 @@ int wmain(int argc,wchar_t** argv){
             if(s.failed){std::wcerr<<s.status<<L" / "<<s.backendWarning<<std::endl;ok=false;break;}
             if(started==Clock::time_point{}&&s.frames>=10)started=Clock::now();
             if(started!=Clock::time_point{}){
+                if(s.previewFgMultiplier!=multiplier){
+                    std::cerr<<"Requested multiplier changed during playback: "<<s.previewFgMultiplier<<std::endl;
+                    ok=false;break;
+                }
                 const auto elapsed=int(std::chrono::duration_cast<std::chrono::seconds>(Clock::now()-started).count());
                 if(elapsed>=seconds)break;
                 if(elapsed>=15&&!stalled&&!liveProfile){SetEnvironmentVariableW(L"VEYRA_TEST_VIDEO_WORK_MS",L"55");stalled=true;}

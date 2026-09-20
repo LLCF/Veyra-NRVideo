@@ -1,7 +1,6 @@
 #include "veyra/engine/LiveGpuScheduler.h"
 #include "veyra/engine/TimingWindow.h"
 #include "veyra/engine/FgRecoveryBudget.h"
-#include "veyra/engine/PreviewFgCapacity.h"
 #include "veyra/engine/LivePairLatency.h"
 #include "veyra/engine/PreviewFrameReadiness.h"
 #include "veyra/engine/PresentationGeometry.h"
@@ -11,17 +10,6 @@
 int main(){
     using Scheduler=veyra::engine::LiveGpuScheduler;using State=Scheduler::State;
     int failures=0;auto check=[&](bool pass,const char* text){std::cout<<(pass?"PASS ":"FAIL ")<<text<<'\n';failures+=!pass;};
-    {
-        veyra::engine::PreviewFgCapacity capacity;
-        check(capacity.select(6,16.667)==6,"unknown work preserves requested multiplier");
-        for(int i=0;i<60;++i){capacity.observe(18,10,5);capacity.select(6,16.667);}
-        check(capacity.select(6,16.667)==4,"sustained overload retains an evenly spaced sustainable group");
-        for(int i=0;i<30;++i){capacity.observe(8,4,3);capacity.select(6,16.667);}
-        check(capacity.select(6,16.667)==4,"brief headroom does not oscillate multiplier");
-        for(int i=0;i<200;++i){capacity.observe(8,4,3);capacity.select(6,16.667);}
-        check(capacity.select(6,16.667)==6,"sustained headroom restores requested multiplier");
-        capacity.reset();check(capacity.select(2,16.667)==2,"reset and 2X request cannot inherit a larger multiplier");
-    }
     {
         using namespace veyra;
         using R=engine::PreviewFrameReadiness;

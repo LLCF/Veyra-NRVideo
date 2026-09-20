@@ -116,6 +116,22 @@ it must not be used as evidence that fixed 6X was solved.
   soft drops, while still resetting processing history and invalidating on
   hard boundaries. Earlier fallback checkpoint: `0050870`.
 
+## Current continuation correction
+
+Automatic multiplier selection has been removed at the user's request. Current
+playback preserves the selected multiplier; it may still skip work or expire
+generated frames when deadlines cannot be met. Historical adaptive4X results
+below describe a superseded implementation, not the current playback policy.
+
+The status-readback experiment88915a3 was reverted as55e0bdd: an early subframe
+could read the final status before its producer fence, and Map/Unmap used
+different resources. The308.1/s result is withdrawn as optimization evidence.
+The restored normal6 run (no fixed-multiplier test override) preserved6X for
+30s:294.676 submissions/s in5.274s retained, P99/max16.846/17.259ms,
+69 rejected groups, zero retained generated discards. This remains below
+fixed6X acceptance. UI/worker tests and restored-content6 exited0; content
+test covers producer fences, PTS, resets and dynamic multipliers.
+
 ## Measured results
 
 Each trace is the **final retained window** of a bounded in-memory trace,

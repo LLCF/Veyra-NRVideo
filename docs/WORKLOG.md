@@ -4946,6 +4946,37 @@ XeSS xess-final2 and xess-final4 ran30s each: lifecycle passed, app submissions6
 
 Fixed6X uniform-cadence acceptance remains open. Experimental queue/profile/spacing controls remain opt-in and must not be described as production-ready. No publication, package or shutdown.
 
+### 2026-09-20 continuation: withdraw unsafe status-readback experiment
+
+Reverted 88915a3 as 55e0bdd. Its final-subframe shared status readback was
+mapped after only an earlier subframe fence completed; Map does not wait for
+the GPU. Map and Unmap also addressed different resources. The prior claim
+that 303.7 -> 308.1 submissions/s demonstrated an improvement is withdrawn.
+Per-subframe status copies and matching producer fences are restored. The
+reported 225/240 generated FPS were recent-window rates, not cumulative rates.
+
+Removed the uncommitted frameId experiment. Its indices went 1..5 then 2..6,
+so it was not a valid increasing-frame-ID design. Its 307.309 submissions/s,
+P99 16.721ms, max17.174ms, 54 rejected groups are NOT acceptance evidence;
+it also inherited the unsafe shared status. No conclusion about all possible
+frameId implementations follows. Evidence: tests/fg-cadence-repair-20260920/
+frameid-subframe-fixed6{/, .json} under E:/项目/Veyra.
+
+The previous bb91399 last-frame hold experiment fell to approximately72-74
+submissions/s and was reverted by dc87a59, restoring303.7/s in the matched
+retained window. Retaining a real-frame lease may constrain the two-slot
+pool; this is a hypothesis, not proof that the original admission was wrong.
+The forced-admission/hold variant's349 submissions mostly repeated frames
+(only2 generatedPresented) and is rejected. These failures remain documented
+here even though the implementation commits were reverted.
+
+Production still automatically selected a lower multiplier while fixed6 tests
+bypassed selection. Removed that production selection to honor the user's
+explicit choice; strengthened sustained tests to reject any observed effective
+multiplier change. This is a policy correction, not a throughput optimization.
+NR work remains unchanged. New output uses the existing E:/项目/Veyra
+{build,tests,logs,tmp}/ task paths. Build/regression results follow below.
+
 ### Prefix admission promotion and partial acceptance
 
 Enabled measured first-output/whole-group file admission with carried GPU

@@ -13,7 +13,6 @@
 #include "veyra/engine/FrameFlowWindow.h"
 #include "veyra/engine/LiveFgAdmission.h"
 #include "veyra/engine/FgRecoveryBudget.h"
-#include "veyra/engine/PreviewFgCapacity.h"
 #include "veyra/engine/LivePairLatency.h"
 #include "veyra/engine/RealtimePreviewScheduling.h"
 #include "veyra/engine/CaptureHalfRate.h"
@@ -483,7 +482,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
             TimingWindow livePresent{std::chrono::seconds(1)};
             TimingWindow livePresentGpu{std::chrono::seconds(1)};
             FgRecoveryBudget fgBudget;uint64_t fgBudgetRevision=options.settings.revision;
-            PreviewFgCapacity fgCapacity;unsigned previewFgMultiplier=options.fgMultiplier;
+            unsigned previewFgMultiplier=options.fgMultiplier;
             LivePairLatency pairLatency;
             const bool adaptiveCapturePhase=physicalCapture&&GetEnvironmentVariableW(L"VEYRA_TEST_LEGACY_CAPTURE_PHASE",nullptr,0)==0;
             int64_t nextFgAdmissionLog=0,nextFgRejectionLog=0;
@@ -589,8 +588,6 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     traceFrame(diagnostics::TraceKind::Ready,batch.batch.identity,batch.batch.batchId,std::max(batch.videoFenceValue,batch.genFenceValue),batch.batch.b100ns,invalid,valid,elapsedMs(watch.processStart));
                     if(watch.real)completedProcessing(batch.batch.identity);
                     if(batch.batch.identity.settingsRevision==fgBudgetRevision)fgBudget.complete(watch.gpuExecutionMs,batch.fgEvaluated>0,batch.historyReset||batch.fgRecovery,host100ns(),watch.fgExecutionMs);
-                    if(batch.batch.identity.settingsRevision==fgBudgetRevision&&!batch.historyReset&&!batch.fgRecovery&&watch.gpuExecutionMs&&watch.fgExecutionMs)
-                        fgCapacity.observe(*watch.gpuExecutionMs,*watch.fgExecutionMs,batch.fgEvaluated);
                     if(adaptiveCapturePhase&&watch.captureArrival>0&&valid==batch.fgCandidates&&
                        batch.hasGenerated&&!batch.historyReset&&!batch.fgRecovery&&
                        batch.batch.identity.settingsRevision==fgBudgetRevision&&watch.presentationGeneration==presentationGeneration.load()){
@@ -1066,10 +1063,8 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     nextFgAdmissionLog=now+10000000;if(!admitted)nextFgRejectionLog=now+10000000;
                     veyra::log::info("live-fg-admission",std::format("timeline={} revision={} source={} multiplier={} requestedMultiplier={} admitted={} admittedPairs={} rejectedPairs={} remainingDeadlineMs={:.3f} firstDeadlineMs={:.3f} queuedGpuMs={:.3f} predictedMs={:.3f} elapsedMs={:.3f} blitGpuP95Ms={:.3f} presentCpuP95Ms={:.3f} warmingHistory={} (CPU Present is backpressure, not added GPU cost; firstDeadlineMs=-1 when unused)",timeline,batch.identity.settingsRevision,batch.identity.sourceFrameId,previewFgMultiplier,options.fgMultiplier,admitted,fgAdmittedPairs,fgRejectedPairs,double(deadline-now)/10000,firstDeadline?double(firstDeadline-now)/10000:-1,queuedMs,fgBudget.predicted(now,warmingHistory).value_or(-1),elapsed,blit,livePresent.p95(),warmingHistory));
                 };
-                if(fgBudgetRevision!=options.settings.revision){fgBudget.reset();fgCapacity.reset();pairLatency.reset();fgBudgetRevision=options.settings.revision;}
+                if(fgBudgetRevision!=options.settings.revision){fgBudget.reset();pairLatency.reset();fgBudgetRevision=options.settings.revision;}
                 previewFgMultiplier=options.fgMultiplier;
-                if(!isImage&&!rereadCached&&options.fg&&!presentSinkFrameGeneration(options.settings.frameGenerationBackend)&&!GetEnvironmentVariableW(L"VEYRA_TEST_FIXED_FG_MULTIPLIER",nullptr,0))
-                    previewFgMultiplier=fgCapacity.select(options.fgMultiplier,double(liveSourceInterval100ns(pkt.duration,activeSource->info().averageFps))/10000);
                 {std::lock_guard lock(mutex_);snapshot_.previewFgMultiplier=previewFgMultiplier;}
                 const auto liveInterval=livePhaseInterval100ns(pkt.duration,activeSource->info().averageFps/(isScreen&&halfRate?2:1),isScreen);
                 const auto processingAllowance=isCapture&&options.fg&&!presentSinkFrameGeneration(options.settings.frameGenerationBackend)?
