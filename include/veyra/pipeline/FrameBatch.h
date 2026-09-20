@@ -27,6 +27,10 @@ struct FrameLease {
     Microsoft::WRL::ComPtr<ID3D12Fence> readyFenceObject;
     uint64_t readyFence=0,consumerFence=0;
     uint32_t slot=0;
+    // MFG status is written once per input pair. Generated frames in the same
+    // batch share the final per-batch readback slot, while their textures keep
+    // distinct slots and fences.
+    uint32_t statusSlot=UINT32_MAX;
     bool referencesValid=false;
     bool ready()const{return fenceComplete(readyFenceObject.Get(),readyFence);}
 };

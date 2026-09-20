@@ -5009,3 +5009,20 @@ GPU full-group 观测约 NR 6.715ms、Flow 1.056ms、FG batch 10.042ms，slot CP
 4.519/16.692/17.102ms，18 个间隔超过 16.667ms，36 次 rejected→warmup；GPU
 P95 约 NR5.664ms、Flow1.265ms、FG10.659ms，slot CPU wait 仍为 0。降低 NR 分辨率
 接近但没有达到均匀固定 6X，因此仍只作为性能对照，不改变原画质验收目标。
+### 2026-09-20 MFG status readback reduction (retained)
+
+First single-variable optimization on the fixed6X baseline: the disable flag is
+copied to readback once after the final MFG Evaluate, while all generated frames
+in that batch reference the same per-batch readback slot. Texture slots and
+fences remain distinct, so queued batches do not alias status memory. Changes:
+`include/veyra/pipeline/FrameBatch.h`, `src/pipeline/EnhanceGraph.cpp`.
+
+Build `E:/项目/Veyra/logs/fg-cadence-repair-20260920/status-readback-build.log`
+succeeded; UI contract tests passed. `status-readback-fixed6` on p001/NR1080/4K
+fixed6X reached 308.1 software submissions/s in the retained trace window,
+with 252 full6 groups and no discarded generated subframes; the corresponding
+baseline recheck was 303.7/s. Frame-flow cumulative generated FPS was 240 vs
+225 in that pair of runs. This is a small positive result, not fixed6X acceptance.
+The fixed2 regression remained 119.996/s with no gaps over16.667ms. Keep this
+change as the current experiment checkpoint and test the next optimization from
+here; no package, release or shutdown.
