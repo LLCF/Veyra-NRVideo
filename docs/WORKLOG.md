@@ -5018,6 +5018,29 @@ shutdown, package, push or publication. This continuation supersedes the
 earlier opt-in/default6 descriptions without rewriting historical results.
 ## 2026-09-20 固定 6X 均匀呈现深度排查计划
 
+### Non-NR experiment continuation
+
+User requested skipping NR work. Completed three bounded single-factor GPU
+experiments: paired whole-group P95 admission, redundant presentation clear,
+and shader-to-CopyResource flow history. All reverted for lack of demonstrated
+cadence improvement. No experimental hook remains. Product source equals
+7a3dfae, including preserved user multiplier and restored safe status copies.
+Detailed per-run metrics and commands: docs/FG_NON_NR_EXPERIMENTS_2026-09-20.md.
+Artifacts: E:/项目/Veyra/{tests,logs,tmp}/fg-cadence-repair-20260920; final build
+E:/项目/Veyra/build/slider-reset-20260919. non-nr-final-build.log succeeded;
+non-nr-final-cpu.log and non-nr-final-ui.log exited0. GPU comparisons all exited0
+Final30s2X/4X throughput regressions (minimumTargetRatio0.95) also exit0:
+non-nr-final2 retained119.861/s, P99/max8.949/19.017ms with one discarded
+subframe; non-nr-final4 retained239.983/s, P99/max4.721/5.027ms, zero discards.
+These are bounded final windows, not scanout or entire-run cadence proof.
+with lifecycle-only thresholds; no claim of fixed6 acceptance. Startup/runtime
+and physical display guarantees are not inferred from those exit codes.
+
+Read-only searches for shaders/Blit.hlsl and TextureBlit.hlsl failed; actual
+shader is ScaleBlit.hlsl and was inspected before the copy experiment. No
+build or GPU-test failure was hidden. No SDK/runtime tracked, no package,
+publication or shutdown. Goal remains active because6X cadence is unresolved.
+
 用户明确要求继续攻克固定 6X 的不均匀呈现，不能把自动降档当作修复。新增
 `docs/FG_CADENCE_DEEP_INVESTIGATION_PLAN_2026-09-20.md`，以 `p001.mp4`、NR1080、
 4K 输出、DLSS 固定 6X 为主验收；计划要求先补齐每个 MFG 子帧的 GPU/ready/deadline/

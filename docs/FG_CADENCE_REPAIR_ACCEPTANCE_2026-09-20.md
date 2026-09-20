@@ -1,5 +1,11 @@
 # FG cadence: partial acceptance, fixed 6X still open
 
+Latest non-NR continuation: paired whole-group prediction, removing redundant
+presentation clear, and CopyResource flow history experiments were reverted.
+None established a cadence gain; fixed6 remains approximately298-303/s in the
+latest retained windows with17ms holes. See FG_NON_NR_EXPERIMENTS_2026-09-20.md
+for paired measurements, commands and limitations. NR stays unchanged.
+
 ## Fixed6 workload controls
 
 Two30s diagnostic tests select EXISTING NR900/720 policies, keeping

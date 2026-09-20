@@ -1,6 +1,12 @@
 # 固定 6X 帧生成均匀呈现：深度排查与攻坚计划
 
 日期：2026-09-20  
+最新执行约束：用户要求跳过 NR 优化，保持原画质、所选倍率，不新增等待或自动降档。
+下文 NR policy、额外 lookahead、fallback 仅保留历史研究背景，不是当前施工授权。
+`7a3dfae` 已移除自动倍率选择；`55e0bdd` 已撤回不安全的共享状态回读。
+组内 MFG 的 BackbufferFrameID 保持同一真实输入身份，不能将下文“单调”解读为每个子帧加一。
+继续实验结果见 `FG_NON_NR_EXPERIMENTS_2026-09-20.md`。
+
 分支：`codex/fg-cadence-audit-20260920`  
 目标媒体：`E:/项目/Likely7 个人账号/Deepseek Grok/p001.mp4`  
 当前目标：4K60 H.264 文件、NR 开启、DLSS 固定 6X、4K 输出。该媒体已经是
