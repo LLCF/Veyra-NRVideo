@@ -4985,3 +4985,12 @@ Current serial NR+flow+FG exceeds60Hz budget; do not infer architectural
 optimization is impossible. Fixed6X cadence remains an active goal; no
 shutdown, package, push or publication. This continuation supersedes the
 earlier opt-in/default6 descriptions without rewriting historical results.
+## 2026-09-20 固定 6X 均匀呈现深度排查计划
+
+用户明确要求继续攻克固定 6X 的不均匀呈现，不能把自动降档当作修复。新增
+`docs/FG_CADENCE_DEEP_INVESTIGATION_PLAN_2026-09-20.md`，以 `p001.mp4`、NR1080、
+4K 输出、DLSS 固定 6X 为主验收；计划要求先补齐每个 MFG 子帧的 GPU/ready/deadline/
+Present 关联，再分别验证计算服务时间、门禁误拒绝、恢复 warmup、呈现队头阻塞和资源
+fence/allocator 反压。只对有证据的单因素优化施工；不以 4X fallback、关闭 NR 或降低
+NR 分辨率宣称固定 6X 已解决。当前仍在 `codex/fg-cadence-audit-20260920`，无打包、
+推送、发布或关机授权动作。构建和测试产物继续写入 `E:/项目/Veyra/` 对应任务目录。

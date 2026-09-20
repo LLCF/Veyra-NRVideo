@@ -1,5 +1,10 @@
 # Fixed-media DLSS cadence repair
 
+本轮继续施工前的深度排查合同见
+[`FG_CADENCE_DEEP_INVESTIGATION_PLAN_2026-09-20.md`](FG_CADENCE_DEEP_INVESTIGATION_PLAN_2026-09-20.md)。
+该计划把固定 6X 的计算服务时间、admission/recovery、呈现队头阻塞和资源等待分开验收；
+自动降档只保留为明确标注的 fallback，不构成固定 6X 完成。
+
 Continuation: affordable same-input reseeding removes a second lost group
 after budget rejection. Fixed6 now measures about280 submissions/s, still
 with15ms holes; acceptance remains open. Fallback is not the requested fix.
