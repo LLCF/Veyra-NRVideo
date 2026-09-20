@@ -4,8 +4,6 @@
 
 English | [简体中文](README.md)
 
-[Current status](docs/CURRENT_STATUS.md) · [Build instructions](docs/BUILD.md). **1.4.2** adds RTX Video HDR, optional frame pacing, window/display capture, bitmap subtitles and named grading presets. See the [release notes](docs/RELEASE_NOTES_1.4.2.md).
-
 <p align="center">
   <a href="https://github.com/Likely7/Veyra-NRVideo/blob/main/REAMDE%20MP4.mp4">
     <img src="assets/readme-demo.gif" alt="Veyra demo video" width="960">
@@ -16,49 +14,17 @@ English | [简体中文](README.md)
 
 A Windows video player and capture-card enhancement tool. Play videos, process images, and preview capture devices with optional super resolution, NR enhancement, and frame generation.
 
-[Download 1.4.2 Portable](https://github.com/Likely7/Veyra-NRVideo/releases/tag/v1.4.2) · [Release Notes](docs/RELEASE_NOTES_1.4.2.md) · [Report an Issue](https://github.com/Likely7/Veyra-NRVideo/issues)
+[Download 1.4.3 Portable](https://github.com/Likely7/Veyra-NRVideo/releases/tag/v1.4.3) · [Release Notes](docs/RELEASE_NOTES_1.4.3.md) · [Report an Issue](https://github.com/Likely7/Veyra-NRVideo/issues)
 
-## 1.4.2 Update
+## 1.4.3 Update
 
-**RTX Video HDR** converts SDR content to HDR under Professional mode > Enhancement, with contrast, saturation, middle gray and peak brightness controls. It combines with NR, SR and frame generation and supports HEVC Main10 HDR export. HDR preview requires an HDR display with Windows HDR enabled; SDR displays retain SDR, and HDR export needs no HDR display. This is the video technology, not game RTX HDR.
+**Frame generation and presentation:** fixes DLSS / XeSS switches reverting unexpectedly, stale XeSS multiplier capabilities, and several incorrect FG admission decisions. Repairs cost accounting, live presentation timing, GPU completion synchronization and bounded file catch-up. Your chosen multiplier is retained; no automatic downgrade or fixed 35/50ms delay is added. XeSS VSync uses the provider presentation path.
 
-**Optional frame pacing** under Professional mode > Motion defaults to Off. Choose Low Queue, Uniform Presentation (front-end pacing), or experimental NVIDIA Reflex. With FG, Reflex explicitly falls back to Low Queue; XeSS retains provider scheduling. These options manage queuing and cadence, not GPU throughput. See the [measured latency report](docs/FRAME_PACING_ACCEPTANCE_2026-09-18.md).
+**Windows and settings:** fixes stack-exhaustion crashes while resizing, coalesces cross-monitor DPI font/layout changes, keeps the subtitle popup open, allows repeated subtitle edits, and preserves numeric drafts during refresh. Parameter sliders gain individual reset controls; holding V also bypasses color grading.
 
-Also adds window/display video capture (no audio), editable device FPS negotiated directly with the capture driver, MKV bitmap subtitles and named grading presets. Fixes fullscreen tooltip residue, the obscured PS5 button, scrolling/hover repaint issues, partial HDR metadata/color handling and XeSS presentation resources. The NVIDIA FSR 4.1 experiment was reverted.
+**Capture, subtitles and screenshots:** repairs capture-audio timestamp compatibility, compressed capture reference chains, decoder packet retries, frame identity and reordered timestamps. Adds configurable subtitle target lines, fixes grouped subtitle layout/style caching and erroneous NR + RTX Video HDR screenshot rejection, and improves volume controls and separate XeSS counters.
 
-<p align="center"><img src="docs/images/1.4.2/rtx-video-hdr-comparison.jpg" alt="User RTX Video HDR off/on comparison" width="720"></p>
-<p align="center"><small>User camera comparison: top off, bottom on. This illustrates one setup; it is not raw HDR pixel fidelity or display luminance measurement.</small></p>
-
-## 1.4.1 Update
-
-**RTX 30/40 DLSS frame generation fixes, up to 6X**: fixes initialization failures, unintended 2X fallback and RTX 3060 freezes when enabling FG. Also repairs sustained-playback scheduling that could leave FG limited despite low total GPU utilization, plus 6X batch capacity, timestamps and presentation synchronization. RTX 50 retains its native path. Affected users report successful testing; compatibility unlocks remain community experimental, with no claim that every GPU/driver combination was tested.
-
-**Playback and capture**: selectable embedded primary/secondary subtitles and audio tracks, faster large-MKV opening and seeking, persistent NR/SR settings, sleep/screensaver prevention during playback, consistent presentation when enabling NR before XeSS, and recovery from audio-output faults without unnecessarily restarting video capture.
-
-**Export**: NVENC ABI compatibility and clearer errors; removes qualification gates and the final full-file frame-by-frame decode, preserves variable frame timing and selected audio, and automatically uses HEVC Main10 for HDR requests with H.264 selected. See the [complete 1.4.1 notes](docs/RELEASE_NOTES_1.4.1.md) for changes, evidence and limits.
-
-## 1.4.0 Update
-
-**New colour page**: a full-float grading chain that runs *before* every effect stage (zero cost while the master switch is off). The panel follows Lightroom's layout and feel: gradient rails, a point-curve editor with draggable control points (monotone cubic spline, both black/white points free to move), four colour-grading wheels, an 8-colour mixer strip with a black & white switch, `.cube` LUTs with an input-space check, named colour presets with `.vpcolor` import/export, undo/redo, hold-to-see-original, and a per-section "eye" that temporarily disables a group. Everything is graded in linear light with output dithering to avoid banding; HDR is graded in the linear domain, before tone mapping.
-
-**Fixes**: HEVC-in-MKV files that would not open (new D3D11VA hardware path), failed exports caused by whole-slot frame gaps (an honest repeat of the previous frame), colour parameters that were not live (or did not refresh while paused), a `.cube` load crash, exports that ignored the grade, PS5 streaming connect failures, capture formats that stalled after two frames, capture windows that streaming tools could not find, silent Dolby/DTS capture, AVerMedia 5.1 passthrough and 40+ more - itemised in the [release notes](docs/RELEASE_NOTES_1.4.0.md).
-
-**Removed**: the AMD FSR *frame-generation* entry in the panel (switching back to DLSS was easy to get stuck on and the result was mediocre); the engine backend stays.
-
-<p align="center"><img src="docs/images/1.4.0/mjpeg-latency.png" alt="MJPEG capture chain before/after" width="900"></p>
-<p align="center"><small>MJPEG capture chain, two-minute real-hardware runs: 1080p60 processCpu 1.987 to 0.364-0.375 ms (-81%), 4K18 6.218 to 0.912-0.936 ms (-85%)</small></p>
-
-<p align="center"><img src="docs/images/1.4.0/native-latency.png" alt="Native (YUY2/NV12/RGB) capture chain before/after" width="900"></p>
-<p align="center"><small>Native capture chain: 1080p60 P95 unchanged, 4K18 P95 -7.5% and processCpu -8.7%, zero drops on both sides.</small></p>
-
-<p align="center"><img src="docs/images/1.4.0/colour-latency.png" alt="Colour chain on/off latency" width="900"></p>
-<p align="center"><small>Colour chain on/off (YUY2 1080p60 capture, two minutes each): +0.037 ms GPU per frame, no measurable software latency change, 60 fps and zero drops in both.</small></p>
-
-## 1.3.0 Update
-
-Version 1.3.0 integrates playback, capture-audio, color and frame-generation repairs since 1.2.0. It adds drag previews, fullscreen 10-second seeking, remembered capture settings and NR internal resolutions; improves AV1/MOV playback, capture sync/crackle, SDR colors and HDR-to-SDR mapping; and submits live DLSS MFG subframes as each becomes ready. The main FPS display reports submitted frames.
-
-See [1.3.0 release notes](docs/RELEASE_NOTES_1.3.0.md) for the full list and limits. Full Dolby Vision, Atmos object rendering and precise internal XeSS FG GPU timing remain unavailable. Hardware-specific validation still applies.
+**Known limits:** fixed 6X can still have uneven presentation under load. Submission FPS is not physical display refresh or a guarantee of smooth motion. This release does not claim every FG limitation or GC551/GC573 hardware issue is resolved. See the [complete changes and validation limits](docs/RELEASE_NOTES_1.4.3.md).
 
 ## Features
 
@@ -67,7 +33,7 @@ See [1.3.0 release notes](docs/RELEASE_NOTES_1.3.0.md) for the full list and lim
 | Playback and capture | H.264 / HEVC / AV1 and compatible MOV/ProRes video, PNG / JPEG images, DirectShow / UVC capture cards |
 | Super resolution | DLSS SR and RTX Video SR; 1440p / 4K / 8K targets with aspect ratio preserved |
 | NR enhancement | Experimental NVIDIA NR; realtime and native modes, style, intensity, and region protection |
-| Frame generation | DLSS 2X / 3X / 4X; experimental XeSS 2X preview |
+| Frame generation | DLSS up to 6X; experimental XeSS preview with runtime-supported multipliers |
 | Smooth Motion | NVIDIA App driver-based frame generation, enabled manually; in-app setup guide |
 | Controls | Live settings, restore defaults, original/processed comparison, split view, preview zoom |
 | Export | PNG / JPEG images; NVENC H.264 / HEVC video |
@@ -79,7 +45,7 @@ Features introduced in 1.2.0 include HDR file/capture enhancement, HDR10 export 
 
 ## Download and Run
 
-1. Download **Veyra-1.4.2-win64-portable.zip** from [Releases](https://github.com/Likely7/Veyra-NRVideo/releases). The Source code archives are for developers.
+1. Download **Veyra-1.4.3-win64-portable.zip** from [Releases](https://github.com/Likely7/Veyra-NRVideo/releases). The Source code archives are for developers.
 2. Extract the entire archive into a writable directory and run **Veyra.exe**. No SDK, Python, or development tools are needed.
    NR, upscaling and internal frame generation start disabled. Enable them as needed; importing old preferences restores their switches.
 3. Use a current GPU driver. NVIDIA NR, DLSS, RTX Video SR, and NVENC require compatible NVIDIA RTX hardware; this version was primarily tested on an RTX 5070.
@@ -164,9 +130,9 @@ NR and DLSS frame generation are **community-experimental integrations**, not NV
 
 ## Development and License
 
-[Build Instructions](docs/BUILD.md) · [Runtime Components](docs/RUNTIME_COMPONENTS_1.4.2.md) · [Third-Party Notices](THIRD_PARTY_NOTICES.md)
+[Build Instructions](docs/BUILD.md) · [Runtime Components](docs/RUNTIME_COMPONENTS_1.4.3.md) · [Third-Party Notices](THIRD_PARTY_NOTICES.md)
 
-Original Veyra source is [GPLv3](LICENSE); the combined streaming program also falls under [AGPLv3 and the upstream OpenSSL exception](licenses/remoteplay/CHIAKI_AGPL3_OPENSSL.txt). Application source matches the release tag. The RemotePlay-source and FFmpeg-source assets provide dependency source and are not needed to run the player. SDKs, models, and runtimes are excluded from this source repository. Release components retain their separate licenses and experimental distribution boundaries.
+Original Veyra source is [GPLv3](LICENSE); the combined streaming program also falls under [AGPLv3 and the upstream OpenSSL exception](licenses/remoteplay/CHIAKI_AGPL3_OPENSSL.txt). Application source matches the release tag. The combined source ZIP includes RemotePlay and patched FFmpeg dependency source archives; it is not needed to run the player. SDKs, models, and runtimes are excluded from this source repository. Release components retain their separate licenses and experimental distribution boundaries.
 
 Stage cards and the main chart report enhancement GPU processing times. Extra picture delay is estimated separately in the detailed view; neither is measured button-to-screen latency. Files can be processed ahead. Sustained overload skips expired preview frame opportunities to keep media time advancing and audio continuous; export retains complete processing.
 
@@ -182,13 +148,20 @@ multiple instances to the same target file.
 
 In Professional mode, click **Screenshot** in the top toolbar to save the latest processed full-resolution picture under **Pictures / Veyra Screenshots**: PNG for SDR and floating-point JPEG XR (`.jxr`) for HDR output. Use an HDR-capable viewer. Application UI and window zoom are excluded.
 
-## HDR and 5.1 (current 1.4.2)
+## HDR and 5.1
+
+<p align="center"><img src="docs/images/1.4.2/rtx-video-hdr-comparison.jpg" alt="User RTX Video HDR off/on comparison" width="720"></p>
+<p align="center"><small>User camera comparison: top off, bottom on. This illustrates one setup; it is not raw HDR pixels or a luminance measurement.</small></p>
 
 Native HDR support is retained. Version 1.4.2 adds SDR conversion using RTX Video HDR. Since 1.4.0, supported Dolby/DTS capture streams can be decoded to PCM; this is not compressed bitstream passthrough. Individual HDR displays, 5.1 endpoints, and capture cards still require hardware acceptance.
 
+Enable RTX Video HDR under Professional mode > Enhancement, with contrast, saturation, middle gray and peak brightness controls. HDR preview requires an HDR display with Windows HDR enabled; SDR displays retain SDR, and HDR export needs no HDR display. This is the video technology, not game RTX HDR.
+
+Frame pacing under Professional mode > Motion defaults to Off. Choose Low Queue, Uniform Presentation or experimental NVIDIA Reflex. With FG, Reflex falls back to Low Queue; XeSS retains provider scheduling. These options control queuing and cadence, not GPU throughput. See the [latency report](docs/FRAME_PACING_ACCEPTANCE_2026-09-18.md).
+
 - Files, P010/P016 capture and PS5 can use explicitly described BT.2020 NCL PQ/HLG input. Windows HDR enables retained HDR output with NR, DLSS SR / RTX Video SR and DLSS / XeSS FG. NR / Video SR use an SDR proxy plus the retained HDR base, with reduced changes near black and compressed highlights. This is not native HDR NR inference. HLG uses a 1000-nit, gamma-1.2 reference conversion.
 - Capture defaults to device color metadata. Manual PQ / HLG is available for devices that omit it, requiring P010/P016. Ten-bit storage alone does not identify HDR. RGB/YUY2 HDR and BT.2020 constant-luminance input are unsupported.
-- HDR video export uses HEVC Main10 / BT.2020 / PQ, including HLG-to-PQ conversion and optional NR, SR and internal DLSS FG. XeSS remains preview-only. H.264 HDR export is rejected. HDR screenshots use lossless scRGB FP16 JPEG XR. Original mastering/peak metadata is not invented or reused after processing.
+- HDR video export uses HEVC Main10 / BT.2020 / PQ, including HLG-to-PQ conversion and optional NR, SR and internal DLSS FG. XeSS remains preview-only. HDR export requests with H.264 selected use HEVC Main10. HDR screenshots use lossless scRGB FP16 JPEG XR. Original mastering/peak metadata is not invented or reused after processing.
 - File and capture PCM preserve speaker positions through one audio clock, compensation and volume path. Capture tries actual multichannel device formats first. Configure the Windows endpoint for 5.1; stereo endpoints receive an explicit downmix. Detailed status reports input/output channel counts. PS5 remains stereo. Compressed Dolby/DTS passthrough and Atmos object audio are not implemented.
 
 RTX 5070 GPU output, HDR export and software channel isolation have local test evidence. HDR display appearance, real 5.1 speaker positioning and individual capture cards require hardware acceptance. See the [execution record](docs/HDR_MULTICHANNEL_EXECUTION_2026-09-14.md). Fresh-install effects remain off.

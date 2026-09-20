@@ -1,5 +1,30 @@
 # Veyra 工作记录
 
+## 2026-09-20 1.4.3 official release preparation
+
+User accepted the latest package and authorized GitHub publication. Created
+checkpoint/pre-release-1.4.3-20260920 at 139db25; merged the user's remote
+Chinese README edit 73709e0 (merge c7c8219). Audited all local branches: current
+product repairs are ancestors, four remaining branches are old experiments,
+an unfinished probe or A/B baselines and are intentionally excluded. Retained
+experiment reverts; no new product code changes. Updated bilingual README to
+latest-only release content, preserved support QR images and HDR comparison,
+rewrote formal notes/build/runtime docs and added a clean-commit source packer.
+
+Build-isolated with DisplayVersion=1.4.3 passed; EXE remains the exact accepted
+F2A1E407...B80676 binary. Final portable package is under
+E:/项目/Veyra/releases/1.4.3/final, 472351857 bytes,
+SHA256 2CC1558B62849D7B71FDEA04CF6B010EF7825FD75F101AE456516C679A9EA0A7.
+Portable-smoke (7 seconds per case) passed all seven cases. ZIP integrity
+verified 120 payloads, 21 unchanged DLLs versus 1.4.2, runtime audit 12 entries,
+zero forbidden files. Evidence: E:/项目/Veyra/tests/release-1.4.3-20260920.
+Temporary scripts/build subprocess files: E:/项目/Veyra/tmp/release-1.4.3-20260920.
+The first docs-only package candidate in the parent release directory remains
+unpublished after automatic approval rejected cleanup; final/ is authoritative.
+Detailed scope, exclusions, commands and limitations: RELEASE_1.4.3_EXECUTION.md.
+Actual publication and corresponding-source results will be recorded after
+remote verification; this preparation entry does not assert upload success.
+
 ## 2026-09-20 Settings and display transition follow-up
 
 Implemented numeric draft preservation and transactional per-row reset in

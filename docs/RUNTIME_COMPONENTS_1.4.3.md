@@ -1,6 +1,6 @@
-# Veyra 1.4.3 Test Runtime Components
+# Veyra 1.4.3 Runtime Components
 
-This local test package preserves the runtime identities used in 1.4.2.
+This release preserves the runtime identities used in 1.4.2.
 No new runtime, SDK, model or driver binary is introduced. NVIDIA FSR4 INT8 remains withdrawn.
 
 The authoritative per-file names, sizes, versions, SHA256 hashes, signature status and origin categories are in:

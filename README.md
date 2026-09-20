@@ -13,23 +13,21 @@
 
 Windows 视频播放器与采集卡增强工具。支持视频、图片、采集卡实时预览和 PS5 局域网串流，可组合使用超分辨率、NR 画面增强与补帧。
 
-[下载 1.4.2 免安装版](https://github.com/Likely7/Veyra-NRVideo/releases/tag/v1.4.2) · [更新记录](docs/RELEASE_NOTES_1.4.2.md) · [反馈问题](https://github.com/Likely7/Veyra-NRVideo/issues)
+[下载 1.4.3 免安装版](https://github.com/Likely7/Veyra-NRVideo/releases/tag/v1.4.3) · [更新记录](docs/RELEASE_NOTES_1.4.3.md) · [反馈问题](https://github.com/Likely7/Veyra-NRVideo/issues)
 
-## 1.4.2 更新
+## 1.4.3 更新
 
-**RTX Video HDR**：在专业模式的增强设置中开启，将 SDR 视频转换为 HDR，可调整对比度、饱和度、中间灰和峰值亮度，与 NR、超分和补帧组合，支持 HEVC Main10 HDR 导出。HDR 预览需要兼容的 HDR 显示器并开启 Windows HDR；SDR 屏保持 SDR，导出不要求 HDR 屏。集成的是视频版技术，不是游戏 RTX HDR。
+**补帧与呈现**：修复 DLSS / XeSS 切换后自动弹回、XeSS 倍率能力缓存和部分错误补帧受限路径；修正调度成本统计、实时呈现相位、GPU 完成同步及文件播放追赶。保留用户选择的倍率，不自动降档，也不新增固定 35/50ms 等待。XeSS 垂直同步接入提供方呈现链路。
 
-**帧同步**：专业模式 → 运动 → 帧同步，默认关闭，可选低排队、均匀呈现（前端同步）、NVIDIA Reflex（实验）。用于控制排队与提交节奏，不凭空提高性能；开启补帧时 Reflex 明确回退低排队，XeSS 保持自身调度。[延迟实测与边界](docs/FRAME_PACING_ACCEPTANCE_2026-09-18.md)。
+**窗口与设置**：修复拖动边角放大窗口时的栈耗尽崩溃，合并跨屏 DPI 字体与布局刷新；修复字幕按钮闪关、字幕设置无法连续调整、数值输入被刷新覆盖。参数滑条新增单项还原，按住 V 对比原画时也会绕过调色。
 
-**其他更新**：窗口/显示器画面采集、手动协商采集卡设备帧率、MKV 图形字幕、命名调色预设；修复全屏提示残留、PS5 入口遮挡、滚动残影、选框闪烁、部分 HDR 红色异常和 XeSS 呈现资源问题。撤回 NVIDIA FSR 4.1 画质实验，保留 RTX 超分。
+**采集、字幕与截图**：修复采集音频时间戳兼容、压缩采集参考链与解码重送、帧身份和重排时间戳；字幕支持目标行数调整，修正多组字幕布局和样式缓存；修复 NR + RTX Video HDR 截图的错误拒绝，并补充音量快捷调节及独立 XeSS 统计。
 
-<p align="center"><img src="docs/images/1.4.2/rtx-video-hdr-comparison.jpg" alt="用户提供 RTX Video HDR 关闭与开启对比" width="720"></p>
-<p align="center"><small>用户拍摄对比：上图关闭，下图开启。照片仅展示该设备下的观感，不是原始 HDR 像素或显示器亮度测量。</small></p>
-
+**已知边界**：固定 6X 在高负载下仍可能呈现不均匀，软件提交 FPS 不等于屏幕刷新率或肉眼流畅度。本版不宣称所有“补帧受限”或 GC551/GC573 实卡问题已根治。[完整更新与验证边界](docs/RELEASE_NOTES_1.4.3.md)。
 
 ## 下载与运行
 
-1. 在 [Releases](https://github.com/Likely7/Veyra-NRVideo/releases) 下载 **Veyra-1.4.2-win64-portable.zip**，不要下载 Source code。
+1. 在 [Releases](https://github.com/Likely7/Veyra-NRVideo/releases) 下载 **Veyra-1.4.3-win64-portable.zip**，不要下载 Source code。
 2. 完整解压到一个可写文件夹，双击 **Veyra.exe**。无需安装 SDK、Python 或开发工具。
    首次启动 NR、超分和内部补帧均关闭，确认基础画面后按需开启；导入旧设置会恢复原来的开关。
 3. 使用当前显卡驱动。要使用 NVIDIA NR、DLSS、RTX Video SR 和 NVENC，需兼容的 NVIDIA RTX 显卡；本版本主要在 RTX 5070 上验证。
@@ -125,13 +123,20 @@ NR 与 DLSS 帧生成属于 **community experimental / 社区实验集成**，�
 
 ## 开发与许可
 
-[构建说明](docs/BUILD.md) · [组件清单](docs/RUNTIME_COMPONENTS_1.4.2.md) · [第三方许可](THIRD_PARTY_NOTICES.md)
+[构建说明](docs/BUILD.md) · [组件清单](docs/RUNTIME_COMPONENTS_1.4.3.md) · [第三方许可](THIRD_PARTY_NOTICES.md)
 
 Veyra 原有源码采用 [GPLv3](LICENSE)；含串流的组合程序同时适用 [AGPLv3 与上游 OpenSSL 例外](licenses/remoteplay/CHIAKI_AGPL3_OPENSSL.txt)。应用源码对应版本标签，Release 另附串流依赖与 FFmpeg 对应源码包，普通用户无需下载。SDK、模型和运行时不进入源码仓库；Release 组件按各自许可与实验发布范围单独提供。
 
-## HDR 与 5.1（当前 1.4.2）
+## HDR 与 5.1
+
+<p align="center"><img src="docs/images/1.4.2/rtx-video-hdr-comparison.jpg" alt="用户提供 RTX Video HDR 关闭与开启对比" width="720"></p>
+<p align="center"><small>用户拍摄对比：上图关闭，下图开启。照片仅展示该设备下的观感，不是原始 HDR 像素或显示器亮度测量。</small></p>
 
 保留原生 HDR 能力，1.4.2 新增 SDR 转 RTX Video HDR。真实 HDR 屏、5.1 扬声器和不同采集卡仍须逐台验收。1.4.0 起采集 Dolby/DTS 可解码到 PCM，不等于压缩码流直通。
+
+RTX Video HDR 开关在专业模式的增强设置，可调整对比度、饱和度、中间灰和峰值亮度。HDR 预览需要 HDR 显示器并开启 Windows HDR；SDR 屏保持 SDR，HDR 导出不要求 HDR 屏。这是视频版技术，不是游戏 RTX HDR。
+
+帧同步位于专业模式 → 运动，默认关闭，可选低排队、均匀呈现、NVIDIA Reflex（实验）。补帧开启时 Reflex 回退低排队，XeSS 保持自身调度。它控制排队和呈现节奏，不提高 GPU 算力。[实测与边界](docs/FRAME_PACING_ACCEPTANCE_2026-09-18.md)。
 
 - **HDR 输入 / 增强**：文件、P010/P016 采集与 PS5 HDR；支持明确标记的 BT.2020 NCL / PQ 或 HLG。Windows HDR 开启时，可组合 NR、DLSS SR / RTX Video SR、DLSS / XeSS 补帧。NR / Video SR 使用 SDR 代理和 HDR 基底合成，压缩高光和近黑区域的增强会衰减；不把 SDR 结果逆造为原始 HDR。HLG 使用 1000nit / gamma 1.2 参考转换。
 - **SDR 显示开关**：采集卡面板的“转为 SDR 显示”默认关闭，控制所有实时预览。打开后将 HDR 映射为 SDR，增强照常可用；播放中切换无需重连，可能短暂停顿。关闭后跟随显示器 HDR 状态。截图跟随当前画面，视频导出保持原有 HDR 规则。
