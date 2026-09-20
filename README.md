@@ -4,12 +4,6 @@
 
 [English](README_EN.md) | 简体中文
 
-[当前状态与开发任务](docs/CURRENT_STATUS.md) · [本机构建](docs/BUILD.md)。正式版 **1.4.2** 新增 RTX Video HDR、可关闭的帧同步、屏幕采集、图形字幕和命名调色预设，并修复采集 HDR、XeSS 与界面细节。[完整更新说明](docs/RELEASE_NOTES_1.4.2.md)。
-
-采集卡连接设置新增 **设备帧率 FPS**：手输 30、40 或小数，0 沿用所选格式，重新连接生效。直接请求设备输出该帧率，失败明确报错；不是软件丢帧限速，也不承诺识别并删除游戏重复画面。实卡是否接受由驱动与所选分辨率/格式决定。
-
-新增 **专业模式 → 左侧屏幕采集（窗口图标）**：窗口 / 显示器选择、预览、裁剪、鼠标指针与帧率上限，默认跟随采集目标所在显示器的刷新率，也可手动选择，接入现有增强链。只采集画面，声音由原应用直接播放，可能领先经过增强的画面。本机 WGC / DXGI 采集和 NR + DLSS 4X 短测通过；多显卡和各类游戏兼容性仍需按设备验证。详见[实现与验证记录](docs/SCREEN_CAPTURE_PLAN_2026-09-19.md)。
-
 <p align="center">
   <a href="https://github.com/Likely7/Veyra-NRVideo/blob/main/REAMDE%20MP4.mp4">
     <img src="assets/readme-demo.gif" alt="Veyra 演示视频" width="960">
@@ -31,32 +25,6 @@ Windows 视频播放器与采集卡增强工具。支持视频、图片、采集
 
 <p align="center"><img src="docs/images/1.4.2/rtx-video-hdr-comparison.jpg" alt="用户提供 RTX Video HDR 关闭与开启对比" width="720"></p>
 <p align="center"><small>用户拍摄对比：上图关闭，下图开启。照片仅展示该设备下的观感，不是原始 HDR 像素或显示器亮度测量。</small></p>
-
-## 1.4.1 更新
-
-**重点修复 RTX 30/40 DLSS 补帧**：修复无法开启、错误回落到 2X，以及 RTX 3060 开启后卡死的问题，支持最高 6X。修复持续播放后显卡未满载却一直显示“补帧受限”的调度问题，以及 6X 的批次数组、计时和呈现资源同步错误。RTX 50 保持原生路径。受影响用户已反馈测试可用，兼容解锁仍为社区实验功能，不代表所有型号和驱动组合均已验证。
-
-**播放器与采集**：可选择 MKV 内嵌主/副字幕和音轨；优化多字幕大文件打开与拖动；修复 NR/SR 等设置重启丢失、播放时进入屏保或休眠、先开 NR 再开 XeSS 的呈现一致性问题，以及音频输出故障引起采集图误重启和画面卡顿。
-
-**导出**：修复 NVENC 接口版本兼容和错误提示，取消导出资格门禁与结束后的整片逐帧复检，保留可变帧率时间间隔和所选音轨；HDR 选择 H.264 时自动使用 HEVC Main10。完整变化、验证记录和边界见 [1.4.1 更新说明](docs/RELEASE_NOTES_1.4.1.md)。
-
-## 1.4.0 更新
-
-**新增色彩页**：一条全浮点、位于所有效果器之前的调色链（总开关关闭时零开销）。面板按 Lightroom 的观感与手感做：渐变色轨、可拖控制点的曲线（单调三次样条，两端黑/白场点可自由拖）、四个颜色分级色轮、混色器 8 色点条 + 黑白开关、`.cube` LUT（含输入空间检查）、命名色彩预设与 `.vpcolor` 导入导出、撤销/重做、按住看原图，以及每个分组的“眼睛”临时停用。全链路线性光处理 + 输出抖动，避免色带；HDR 在线性域调色并在 tone mapping 之前生效。
-
-**修复**：IMAX/HEVC 的 MKV 打不开（新增 D3D11VA 硬解路径）、导出整槽缺帧失败（诚实补上一帧）、调色参数不实时/暂停时不刷新、载入 `.cube` 概率闪退、导出不应用调色、PS5 串流连不上、原生采集格式只剩 2 帧、采集卡窗口被第三方直播工具识别不到、杜比/DTS 采集无声、AVerMedia 5.1 直通等 40 余项，逐条见[更新说明](docs/RELEASE_NOTES_1.4.0.md)。
-
-**移除**：AMD FSR 补帧的界面入口（切回 DLSS 容易卡住、效果一般）；引擎后端保留。
-
-<p align="center"><img src="docs/images/1.4.0/mjpeg-latency.png" alt="MJPEG 采集链路优化前后（2 分钟真机复测）" width="900"></p>
-<p align="center"><small>MJPEG 压缩采集链路：2 分钟真机复测，1080p60 processCpu 1.987 → 0.364–0.375 ms（−81%），4K18 6.218 → 0.912–0.936 ms（−85%）</small></p>
-
-<p align="center"><img src="docs/images/1.4.0/native-latency.png" alt="YUY2 等原生格式采集链路优化前后" width="900"></p>
-<p align="center"><small>原生（YUY2/NV12/RGB）采集链路：1080p60 P95 持平，4K18 P95 −7.5%、processCpu −8.7%，两侧零丢帧</small></p>
-
-<p align="center"><img src="docs/images/1.4.0/colour-latency.png" alt="调色链路开启前后延迟对比" width="900"></p>
-<p align="center"><small>调色链路开/关（采集卡 YUY2 1080p60，各 2 分钟）：每帧多 0.037 ms GPU，软件侧延迟无可测变化，均满 60 fps 零丢帧</small></p>
-
 
 
 ## 下载与运行
