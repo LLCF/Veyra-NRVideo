@@ -182,26 +182,3 @@ GPU 抖动。该方案只缓冲短时抖动，不能解决持续服务时间大�
 实际修改文件、测试命令和日志路径，以及未测量的显示器物理延迟边界。若所有合法优化后仍
 无法在该硬件和原画质下达到 6X，必须把“当前服务时间超过预算”的证据和最稳定的 fallback
 单独写清楚，不能把它包装成 6X 已解决。
-## 11. 2026-09-20 findings from the first repair pass
-
-The first production-safe change retains the last same-timeline texture for a
-file-preview hold when a generated candidate is already valid but misses its
-deadline. It is explicitly logged as `fg-hold` / Present detail 2 and is never
-counted as interpolation. This prevents a late candidate from creating an empty
-display slot, but it cannot help pairs rejected before MFG evaluation.
-
-The decisive diagnostic was a test-only file lookahead (35 ms and 50 ms). With
-the original A/B PTS, NR1080 4K fixed6X rejected most pairs because the first
-interpolation PTS precedes the arrival of B; the normal run was about72 software
-submissions/s. At35 ms lookahead, 4,473 generated frames were counted in the
-short run and no generated candidates were discarded, but the retained cadence
-was about203 submissions/s with16 long gaps. At50 ms, about3,010 generated frames
-were counted and cadence fell to about140/s with33 ms media jumps. Therefore a
-blind fixed lookahead is not an acceptable fix: it proves the temporal admission
-error, but adds latency and still cannot hide the serial NR+Flow+MFG service time.
-The test switches were removed; only the bounded hold remains in production.
-
-Next implementation target is an adaptive, bounded file lookahead tied to measured
-service time, followed by a real overlap/resource-ownership experiment. It must
-preserve original PTS, audio continuity, and report added preview latency. No
-downshift or hold-only result will be called fixed6X acceptance.

@@ -613,12 +613,6 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
             PresentationCadence cadence;
             PresentationSettings presentationEffective;
             uint64_t pacingRevision=0,presenterGeneration=0;
-            // Keep the last submitted texture for a bounded file-preview hold
-            // when a generated candidate misses its media deadline. A hold is
-            // explicitly tracked and never reported as an interpolated frame.
-            std::shared_ptr<pipeline::FrameLease> lastPresentedLease;
-            bool lastPresentedGenerated=false,lastPresentedReferences=false;
-            pipeline::FrameIdentity lastPresentedIdentity{};
             auto applyPresentation=[&]{
                 PresentationSettings requested;uint64_t revision;
                 {std::lock_guard lock(mutex_);requested=presentation_;revision=presentationRevision_;}
@@ -643,7 +637,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 {std::lock_guard lock(mutex_);snapshot_.presentationEffective=presentationEffective;snapshot_.presentationRevision=revision;snapshot_.presentationStatus=message;}
                 veyra::log::info("pacing",std::format("revision={} requested={}/{}/{} effective={}/{}/{}",revision,requested.enabled,unsigned(requested.mode),unsigned(requested.display),presentationEffective.enabled,unsigned(presentationEffective.mode),unsigned(presentationEffective.display)));
             };
-            auto drainLivePresentation=[&]{cadence.reset();lastPresentedLease.reset();lastPresentedIdentity={};if(liveScheduler){++presentationDrains;liveScheduler->cancel();pollCompletions();pendingCompletions.clear();}pairLatency.reset();};
+            auto drainLivePresentation=[&]{cadence.reset();if(liveScheduler){++presentationDrains;liveScheduler->cancel();pollCompletions();pendingCompletions.clear();}pairLatency.reset();};
             auto advanceLive=[&]{applyPresentation();if(liveScheduler){pollCompletions();if(stop_||(paused_&&!seekPreviewPending)||seekSeconds_>=0){liveScheduler->cancel();cadence.reset();}else liveScheduler->advance(host100ns());}};
             auto waitLive=[&]{const auto due=liveScheduler?liveScheduler->wakeAt():0;deadlineWait.slice(due>host100ns()?std::min(1.0,double(due-host100ns())/10000):1.0);};
             uint64_t metricsRevision=options.settings.revision,metricsEpoch=0,metricsWindowEpoch=0,statsSourceBase=0;
@@ -1273,7 +1267,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     watch->reflexFrame=currentReflexFrame;
                     pendingCompletions.push_back(watch);
                     struct LiveStepState {
-                        unsigned next=0,handled=0,remaining=0;uint64_t held=0;bool readyReported=false;
+                        unsigned next=0,handled=0,remaining=0;bool readyReported=false;
                         Clock::time_point readyStart=Clock::now();std::optional<Clock::time_point> deadlineStart;
                         double readyMs=0,waitMs=0,presentMs=0,ageMs=0;uint64_t count=0,dropped=0;
                         diagnostics::GpuSample blit;
@@ -1318,27 +1312,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                                 const auto ready=watch->frameReadyObserved[s.next];
                                 veyra::log::info("fg-deadline",std::format("revision={} batch={} subframe={} expired={} readyObservedLateMs={:.3f} decisionLateMs={:.3f} observedReadyToDecisionMs={:.3f} batchReady={} (CPU fence observations, not scanout; -1 means readiness unknown)",item.identity.settingsRevision,batch.batch.batchId,item.subframe,generationExpired,ready?double(ready-timeline.deadline(item.pts100ns))/10000:-1,double(decisionTime-timeline.deadline(item.pts100ns))/10000,ready?double(decisionTime-ready)/10000:-1,watch->ready.load()));
                             }
-                            if(readiness==PreviewFrameReadiness::Expired){
-                                // Preserve the media cadence when a valid MFG
-                                // result arrived late. Repeating the last
-                                // submitted texture is a display hold, not an
-                                // interpolated frame, and is file-preview only.
-                                const bool sameTimeline=lastPresentedLease&&lastPresentedIdentity.epoch==item.identity.epoch&&lastPresentedIdentity.settingsRevision==item.identity.settingsRevision;
-                                if(!isCapture&&generated&&sameTimeline&&lastPresentedLease->ready()){
-                                    const auto begin=Clock::now();const auto before=presenter.submittedCount();
-                                    if(!presenter.present(ctx,ring,graph,lastPresentedLease->slot,lastPresentedGenerated,lastPresentedReferences,comparisonMode_,comparisonBase_,comparisonSplit_,lastPresentedIdentity,previewView()))return {State::Failed};
-                                    lastPresentedLease->consumerFence=presenter.consumerFenceValue(ring.lastSignaledValue());
-                                    const bool didPresent=presenter.submittedCount()>before;
-                                    if(didPresent){
-                                        const auto elapsed=elapsedMs(begin);
-                                        ++s.held;++s.handled;++s.next;s.deadlineStart.reset();cadence.submitted(decisionTime);
-                                        traceFrame(diagnostics::TraceKind::Present,lastPresentedIdentity,batch.batch.batchId,lastPresentedLease->consumerFence,item.pts100ns,item.subframe,2,elapsed);
-                                        if(veyra::log::verboseFrameLogs())veyra::log::info("fg-hold",std::format("batch={} source={} subframe={} pts100ns={} reusedSource={} reusedGenerated={} elapsedMs={:.3f} (display hold; not interpolated)",batch.batch.batchId,item.identity.sourceFrameId,item.subframe,item.pts100ns,lastPresentedIdentity.sourceFrameId,lastPresentedGenerated,elapsed));
-                                        continue;
-                                    }
-                                }
-                                ++s.dropped;++s.handled;++s.next;s.deadlineStart.reset();continue;
-                            }
+                            if(readiness==PreviewFrameReadiness::Expired){++s.dropped;++s.handled;++s.next;s.deadlineStart.reset();continue;}
                             if(!s.deadlineStart)s.deadlineStart=Clock::now();
                             if(isCapture){if(host100ns()<timeline.deadline(item.pts100ns))return {State::Pending,timeline.deadline(item.pts100ns)};}
                             else if(!fileAwaitingVideo){
@@ -1375,7 +1349,6 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                             }
                             if(didPresent){
                                 cadence.submitted(optionalNow);
-                                lastPresentedLease=item.lease;lastPresentedGenerated=generated;lastPresentedReferences=item.lease->referencesValid;lastPresentedIdentity=item.identity;
                                 if(physicalCapture&&veyra::log::verboseFrameLogs())veyra::log::info("capture-present-sample",std::format("source={} epoch={} revision={} batch={} subframe={} generated={} arrival={} arrivalA={} ready={} begin={} end={}",item.identity.sourceFrameId,item.identity.epoch,item.identity.settingsRevision,batch.batch.batchId,item.subframe,generated,captureArrival,lineage?lineage->a.host100ns:0,watch->frameReadyObserved[s.next],optionalNow,host100ns()));
                                 if(veyra::log::verboseFrameLogs())veyra::log::info("pacing-sample",std::format("mode={} enabled={} sync={} pts={} begin={} end={} ready={} process={} generated={} queue={} lateMs={:.3f}",unsigned(presentationEffective.mode),presentationEffective.enabled,unsigned(presentationEffective.display),item.pts100ns,optionalNow,host100ns(),watch->frameReadyObserved[s.next],std::chrono::duration_cast<std::chrono::nanoseconds>(watch->processStart.time_since_epoch()).count()/100,generated,liveScheduler->occupancy(),isCapture?double(optionalNow-timeline.deadline(item.pts100ns))/10000:fileAwaitingVideo?0:nowMs()-itemPtsMs));
                                 traceFrame(diagnostics::TraceKind::Present,item.identity,batch.batch.batchId,item.lease->consumerFence,item.pts100ns,item.subframe,1,elapsed);

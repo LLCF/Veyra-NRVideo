@@ -5009,26 +5009,3 @@ GPU full-group 观测约 NR 6.715ms、Flow 1.056ms、FG batch 10.042ms，slot CP
 4.519/16.692/17.102ms，18 个间隔超过 16.667ms，36 次 rejected→warmup；GPU
 P95 约 NR5.664ms、Flow1.265ms、FG10.659ms，slot CPU wait 仍为 0。降低 NR 分辨率
 接近但没有达到均匀固定 6X，因此仍只作为性能对照，不改变原画质验收目标。
-### 2026-09-20 late-frame hold experiment
-
-Added a bounded file-preview hold in `src/engine/EngineController.cpp`. When a
-generated candidate is already valid but misses its media deadline, the scheduler
-may submit the last texture from the same epoch/settings revision at that PTS.
-The event is recorded as `Present detail=2` and `fg-hold`; it is not counted as a
-generated/interpolated frame. Reset/seek/settings drains clear the retained lease.
-Capture, export and provider-owned pacing do not use this path.
-
-The clean build `hold-fallback-build.log` succeeded and UI contract tests passed.
-On `p001.mp4`, NR1080, 4K, fixed6X with the normal admission gate, the run still
-submitted about 72 software frames/s because most pairs were rejected before any
-MFG evaluation; this confirms the hold path cannot repair a gate that never creates
-a candidate. A test-only force-admission run reached about349 submissions/s with
-zero gaps over16.667ms, but only2 provider-generated frames were actually counted
-and most submissions were holds/late candidates. That switch was removed; it is
-not a production solution. A second test-only last-deadline admission variant
-remained about74/s and was also removed. The results prove that the dominant
-remaining issue is admission plus serial service time, not a missing display wait.
-
-Artifacts: `E:/项目/Veyra/tests/fg-cadence-repair-20260920/hold-fixed6`,
-`force-admit-fixed6`, `last-only-fixed6`; build logs are under
-`E:/项目/Veyra/logs/fg-cadence-repair-20260920/`. No package, release or shutdown.
