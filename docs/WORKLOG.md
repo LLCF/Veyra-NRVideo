@@ -5246,35 +5246,41 @@ evidence/build paths are E:/项目/Veyra/tests/resize-hang-20260920 and
 E:/项目/Veyra/build/slider-reset-20260919; no new binary artifacts, runtime
 changes, publication or shutdown.
 
-## 2026-09-22 Native AJA KONA HDMI (in progress)
+## 2026-09-22 Native AJA KONA HDMI (implemented; PR submitted)
 
-User requested direct AJA capture in Veyra, with local hardware verification.
-Source branch codex/aja-capture. User explicitly selected Desktop for all task
-artifacts because this machine has no E drive: C:/Users/charll/Desktop/Veyra-AJA-work.
-Original Veyra 1.4.2 portable remains unchanged. A separate build agent handles
-MSVC/SDK/FFmpeg dependencies at user's explicit request.
+Current status: native AJA video and embedded PCM support are implemented,
+built and submitted for upstream review in https://github.com/Likely7/Veyra-NRVideo/pull/8.
+The PR is not merged. This entry supersedes the earlier in-progress notes.
 
-Added optional native NTV2 backend, stable serial+HDMI-port enumeration through
-CaptureCardSource, automatic wire-format selection, exclusive device ownership,
-TSI UHD routing, bounded latest-frame DMA ingress and shared AVFrame/FramePacket
-contract. Initial path is UYVY 8-bit SDR, progressive through UHD60; audio code
-is PCM-only and remains unverified. Saved routing/channel configuration is
-restored on close. No driver installation/reboot or publication.
+Delivered: optional external MIT NTV2 backend; stable serial/HDMI-port selection
+in the existing capture UI; automatic input-format detection; exclusive device
+ownership; UHD TSI routing; bounded latest-frame ingress; shared video/audio
+pipeline; device-state restoration and failure reporting. Supported scope is
+KONA HDMI, progressive 8-bit SDR through UHD60 and 48 kHz linear PCM.
+The eight-channel PCM initialization issue was fixed using an explicit
+WAVEFORMATEXTENSIBLE layout. Temporary missing-NVOF fallback code was removed
+once the actual Optical Flow SDK became available.
 
-AJA SDK external checkout pinned to 007fb92b5328c01da85bd170dc5cfc9ede3cfe91,
-MIT notice included. The SDK source/runtime is not vendored into this repository.
+Validation completed on the local KONA HDMI / PS5 Pro / RTX 5090:
+- Native capture: 718 frames in 12 seconds, 59.926 fps at UHD59.94.
+- Full application preview: 858 processed frames; real PS5 screenshot verified.
+- AJA + NR + NVOF: smoke passed, 1009 processed frames and 1005 optical-flow
+  executions; terminal processing 60 fps and input 59.94 fps.
+- Embedded audio: 15-second diagnostic received 22,576,128 PCM bytes; conversion
+  and output buffers were captured, and the user confirmed audible playback.
+- Final review build, capture color contract tests and capture audio integration
+  tests passed. Git diff whitespace checks passed.
 
-Actual compilation began: first errors corrected were missing MSWindows SDK
-consumer definition, NTV2_POINTER buffer type, and demo-local audio size constant.
-This is NOT acceptance: native capture, UI preview and enhanced output remain to
-be verified after a successful build. Existing official Control Room capture
-proved the physical PS5 path (240 frames UHD59.94), not this new implementation.
-Build logs and scripts live beneath the Desktop artifact root.
+Remaining validation limits: the hardware rerun after final review fixes had no
+HDMI signal, so it did not pass. Surround speaker mapping, end-to-end audio/video
+latency and formal AJA frame-generation quality validation are not established.
+HDR, compressed HDMI audio and other AJA models are outside this implementation's
+validated scope. These are explicit limits, not unfinished basic capture/audio
+implementation. No claim of precise game FPS or HDMI-to-display latency.
 
-Native AJA acceptance update: 12-second facade test delivered 718 real UHD59.94 frames at 59.926 fps after increasing AutoCirculate ring from 3 to the official sample default 7. A 15-second full application preview completed without failure: 858 processed frames, terminal processedFps=60.00, callbackFps=59.94, 14 startup mailbox overwrites. Built-in screenshot visually confirms PS5 Gran Turismo home screen. No HDMI-to-display latency claim. Audio and enhancement remain separate pending checks. Evidence: Desktop Veyra-AJA-work/logs/aja-ring-test.log, aja-preview-app.log, aja-preview.png. User supplied Optical Flow SDK 5.0.7; build agent enabling actual NVOF implementation and GPU probe.
-
-
-NVOF SDK 5.0.7 acceptance: actual NvOfSession build restored, independent RTX5090 synthetic flow probe PASS. Full AJA UHD59.94 + NR + NVOF application smoke PASS: failed=false, frames=1009, nrEvaluated=1009, nvofExecuted=1005, terminal processedFps=60.00 callbackFps=59.94 captureDropped=3. Evidence logs/aja-nvof-nr-preview.log. Audio/FG not covered by this run; XeSS/FSR/RemotePlay not built.
-
-
-AJA audio fix: replaced ambiguous 8-channel WAVEFORMATEX with WAVEFORMATEXTENSIBLE (7.1 speaker mask, 24 valid bits in 32-bit slots). Existing parseWavePcm rejects >2 channels without explicit layout. Rebuilt application; 15-second real HDMI PCM test received 22,576,128 bytes at 48kHz/8ch, conversion and WASAPI rendered buffers captured. Runtime logs show nonzero peaks and zero underruns/clipping in observed samples. User confirmed audible output. Normal preview relaunched with embedded audio and saved preferences. Evidence Desktop Veyra-AJA-work/logs/aja-audio-check.*. Does not establish surround speaker mapping or end-to-end sync accuracy.
+Artifacts are under the user-selected Desktop/Veyra-AJA-work directory; the
+original portable package remains unchanged. Evidence includes logs/aja-ring-test.log,
+logs/aja-preview-app.log, logs/aja-nvof-nr-preview.log, logs/aja-audio-check.*,
+logs/aja-final-build.log and logs/review-audio-tests.log.
+AJA SDK commit: 007fb92b5328c01da85bd170dc5cfc9ede3cfe91; MIT attribution included.
+SDKs and runtime binaries are not committed. No driver changes or reboot.
