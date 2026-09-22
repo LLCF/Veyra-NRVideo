@@ -5245,3 +5245,36 @@ and leaves the previously verified resize-fix package untouched. Existing
 evidence/build paths are E:/项目/Veyra/tests/resize-hang-20260920 and
 E:/项目/Veyra/build/slider-reset-20260919; no new binary artifacts, runtime
 changes, publication or shutdown.
+
+## 2026-09-22 Native AJA KONA HDMI (in progress)
+
+User requested direct AJA capture in Veyra, with local hardware verification.
+Source branch codex/aja-capture. User explicitly selected Desktop for all task
+artifacts because this machine has no E drive: C:/Users/charll/Desktop/Veyra-AJA-work.
+Original Veyra 1.4.2 portable remains unchanged. A separate build agent handles
+MSVC/SDK/FFmpeg dependencies at user's explicit request.
+
+Added optional native NTV2 backend, stable serial+HDMI-port enumeration through
+CaptureCardSource, automatic wire-format selection, exclusive device ownership,
+TSI UHD routing, bounded latest-frame DMA ingress and shared AVFrame/FramePacket
+contract. Initial path is UYVY 8-bit SDR, progressive through UHD60; audio code
+is PCM-only and remains unverified. Saved routing/channel configuration is
+restored on close. No driver installation/reboot or publication.
+
+AJA SDK external checkout pinned to 007fb92b5328c01da85bd170dc5cfc9ede3cfe91,
+MIT notice included. The SDK source/runtime is not vendored into this repository.
+
+Actual compilation began: first errors corrected were missing MSWindows SDK
+consumer definition, NTV2_POINTER buffer type, and demo-local audio size constant.
+This is NOT acceptance: native capture, UI preview and enhanced output remain to
+be verified after a successful build. Existing official Control Room capture
+proved the physical PS5 path (240 frames UHD59.94), not this new implementation.
+Build logs and scripts live beneath the Desktop artifact root.
+
+Native AJA acceptance update: 12-second facade test delivered 718 real UHD59.94 frames at 59.926 fps after increasing AutoCirculate ring from 3 to the official sample default 7. A 15-second full application preview completed without failure: 858 processed frames, terminal processedFps=60.00, callbackFps=59.94, 14 startup mailbox overwrites. Built-in screenshot visually confirms PS5 Gran Turismo home screen. No HDMI-to-display latency claim. Audio and enhancement remain separate pending checks. Evidence: Desktop Veyra-AJA-work/logs/aja-ring-test.log, aja-preview-app.log, aja-preview.png. User supplied Optical Flow SDK 5.0.7; build agent enabling actual NVOF implementation and GPU probe.
+
+
+NVOF SDK 5.0.7 acceptance: actual NvOfSession build restored, independent RTX5090 synthetic flow probe PASS. Full AJA UHD59.94 + NR + NVOF application smoke PASS: failed=false, frames=1009, nrEvaluated=1009, nvofExecuted=1005, terminal processedFps=60.00 callbackFps=59.94 captureDropped=3. Evidence logs/aja-nvof-nr-preview.log. Audio/FG not covered by this run; XeSS/FSR/RemotePlay not built.
+
+
+AJA audio fix: replaced ambiguous 8-channel WAVEFORMATEX with WAVEFORMATEXTENSIBLE (7.1 speaker mask, 24 valid bits in 32-bit slots). Existing parseWavePcm rejects >2 channels without explicit layout. Rebuilt application; 15-second real HDMI PCM test received 22,576,128 bytes at 48kHz/8ch, conversion and WASAPI rendered buffers captured. Runtime logs show nonzero peaks and zero underruns/clipping in observed samples. User confirmed audible output. Normal preview relaunched with embedded audio and saved preferences. Evidence Desktop Veyra-AJA-work/logs/aja-audio-check.*. Does not establish surround speaker mapping or end-to-end sync accuracy.
