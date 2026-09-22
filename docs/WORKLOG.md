@@ -5271,9 +5271,12 @@ Validation completed on the local KONA HDMI / PS5 Pro / RTX 5090:
 - Final review build, capture color contract tests and capture audio integration
   tests passed. Git diff whitespace checks passed.
 
-Remaining validation limits: the hardware rerun after final review fixes had no
-HDMI signal, so it did not pass. Surround speaker mapping, end-to-end audio/video
-latency and formal AJA frame-generation quality validation are not established.
+Final user acceptance: after delivery, the user reported completing an end-to-end
+usage test without encountering problems. This is user-reported functional
+acceptance. The earlier automated hardware rerun had no HDMI signal and remains
+recorded as unsuccessful; it does not negate the subsequent user report.
+Surround speaker mapping, quantitatively measured end-to-end audio/video latency
+and formal AJA frame-generation quality validation are not established.
 HDR, compressed HDMI audio and other AJA models are outside this implementation's
 validated scope. These are explicit limits, not unfinished basic capture/audio
 implementation. No claim of precise game FPS or HDMI-to-display latency.

@@ -38,3 +38,7 @@ Hardware test usage: `veyra_aja_capture_tests.exe` lists device paths. Supply a
 listed path and an output raw-frame filename to capture for 12 seconds. Append
 `--audio` to exercise embedded PCM initialization and delivery as well. A live,
 moving, non-black source is needed for the video acceptance checks.
+
+Final user acceptance: the user subsequently reported completing end-to-end
+usage testing without encountering problems. This records functional acceptance
+by the user, not a quantitative latency or surround-channel measurement.
